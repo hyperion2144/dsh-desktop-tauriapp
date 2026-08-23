@@ -100,7 +100,11 @@ jobs:
       # 修复 release body 乱码：不把多行 body 经 releaseBody/${{ }} 传给 tauri-action
       #（UTF-8 多字节在表达式内嵌 + 双平台并行竞态下会损坏成 U+FFFD，见 v0.5.5/v0.6.1/v0.6.2）。
       # 构建完成后用 gh 直接覆写正确 body（幂等：两个 job 内容相同，最后写入的即正确值）。
+      # shell 必须显式 bash：windows-latest 默认 PowerShell，反斜杠续行 `\`
+      # 在 PS 里是转义符，`--repo` 会被解析成 unary operator 报
+      # "Missing expression after unary operator '--'"（v0.6.3 实测）。
       - name: Overwrite release body (gh)
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
