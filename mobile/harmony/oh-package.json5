@@ -1,0 +1,6 @@
+{
+  "modelVersion": "5.0.0",
+  "description": "DSH 手机访问壳（鸿蒙 ArkTS）——扫码/输入配对后进入 dsh WebView。",
+  "dependencies": {},
+  "devDependencies": {}
+}

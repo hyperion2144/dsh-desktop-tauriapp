@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.1.0",
+  "description": "DSH 手机访问壳 entry 模块（ArkTS + ArkWeb）。",
+  "main": "",
+  "author": "dsh-desktop",
+  "license": "MIT",
+  "dependencies": {}
+}

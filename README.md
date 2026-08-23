@@ -103,6 +103,32 @@ pnpm tauri build   # macOS 出 .app/.dmg；Windows 出 .msi/.exe
 
 构建细节、平台差异与验收清单见 [skill/SKILL.md](skill/SKILL.md)。
 
+### 移动端壳（Android / iOS / 鸿蒙）
+
+仓库 `mobile/` 下有手机访问壳（配对桌面 dsh 后进入 WebView 使用）：
+
+| 平台 | 目录 | 构建/发布 |
+|------|------|-----------|
+| **Android + iOS** | `mobile/expo-app/`（Expo/RN 共用一套代码） | **随 GitHub CI 自动出包**：Android `app-debug.apk`（可直接安装）、iOS `DeepSeek.ipa`（未签名，用 [AltStore](https://altstore.io) 等免费签名侧载） |
+| **鸿蒙** | `mobile/harmony/`（ArkTS + ArkWeb） | **不随 CI 发布**——需本地 DevEco Studio 构建 + 华为账号签名，见 [mobile/harmony/README.md](mobile/harmony/README.md) |
+
+本地构建移动端：
+
+```bash
+# Android APK
+cd mobile/expo-app
+npm ci
+npx expo prebuild -p android
+cd android && ./gradlew assembleDebug   # 产物 app/build/outputs/apk/debug/app-debug.apk
+
+# iOS IPA（未签名）
+npx expo prebuild -p ios
+cd ios && pod install
+xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Release \
+  -sdk iphoneos -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
+# 打包 Payload/DeepSeek.app → DeepSeek.ipa
+```
+
 ### 作为技能使用
 
 ```bash
@@ -116,6 +142,9 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp   # Claude Code / Claude Agent
 |------|------|
 | macOS | ✅ 实测（三条验收路径全绿） |
 | Windows | ✅ 实测（Win11 无管理员环境完整构建+打包+验收，见 [docs/windows-audit-report.md](docs/windows-audit-report.md)） |
+| Android | ✅ 实测（模拟器 + 真机安装运行） |
+| iOS/iPad | ✅ 实测（模拟器 + AltStore 侧载） |
+| 鸿蒙 | ✅ 实测（Mate 80 RS 真机扫码配对 + 浅色主题） |
 
 ## 许可
 

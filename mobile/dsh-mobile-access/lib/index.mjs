@@ -261,7 +261,7 @@ export function createMobileAccessService(opts = {}) {
         // token 无效或已作废：API 返回 403 JSON；浏览器渲染简短提示页。
         if (wantsHtml) {
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end('<!doctype html><meta charset="utf-8"><title>配对失败</title><body style="font-family:sans-serif;padding:32px;background:#171a21;color:#e7eaf0"><h2>配对失败</h2><p>链接无效或令牌已过期。请在桌面「远程访问」设置中重新铸造令牌。</p></body>');
+          res.end('<!doctype html><meta charset="utf-8"><title>配对失败</title><body style="font-family:sans-serif;padding:32px;background:#f5f5f7;color:#1d1d1f"><h2>配对失败</h2><p>链接无效或令牌已过期。请在桌面「远程访问」设置中重新铸造令牌。</p></body>');
           return true;
         }
         json(403, { error: 'invalid-token' });

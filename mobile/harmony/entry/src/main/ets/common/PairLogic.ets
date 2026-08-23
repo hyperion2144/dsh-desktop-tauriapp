@@ -6,12 +6,15 @@ import { url } from '@kit.ArkTS';
 export interface PairInput {
   token: string;
   base: string;
+  /** http(s) 配对链接的完整 URL（/pair 自动种 cookie 后 302 进应用）；dsh-mobile:// 与手动输入无此字段。 */
+  entryUrl?: string;
 }
 
 export interface PairEntry {
   token: string;
   base: string;
   name?: string;
+  entryUrl?: string;
 }
 
 export interface PairStorage {
@@ -32,6 +35,7 @@ export class PairLogic {
     const s = (input ?? '').trim();
     let token = '';
     let base = '';
+    let entryUrl = '';
     if (s.startsWith('dsh-mobile://')) {
       const u: url.URL = url.URL.parseURL(s);
       token = u.params.get('token') ?? extraToken;
@@ -41,6 +45,8 @@ export class PairLogic {
       token = u.params.get('token') ?? extraToken;
       const path = u.pathname === '/pair' ? '' : u.pathname;
       base = u.host + path;
+      // http 配对链接：进入时先访问完整 URL（/pair 自动配对 + 种 cookie + 302 跳转）。
+      if (u.pathname === '/pair' && token !== '') entryUrl = s;
     } else if (/^[^/\s]+:\d{1,5}$/.test(s)) {
       base = s;
       token = extraToken;
@@ -48,7 +54,13 @@ export class PairLogic {
       return null;
     }
     if (!token || !base) return null;
-    return { token: token, base: base };
+    const out: PairInput = { token: token, base: base };
+    if (entryUrl !== '') out.entryUrl = entryUrl;
+    return out;
+  }
+
+  static buildEntryUrl(pair: PairInput, scheme: string = 'http'): string {
+    return pair.entryUrl ?? (scheme + '://' + pair.base + '/');
   }
 
   static buildEnterUrl(base: string, scheme: string = 'http'): string {

@@ -1,0 +1,12 @@
+{
+  "modelVersion": "5.0.0",
+  "dependencies": {},
+  "execution": {
+    "daemon": false,
+    "parallel": false,
+    "incremental": false
+  },
+  "logging": {},
+  "debugging": {},
+  "nodeOptions": {}
+}

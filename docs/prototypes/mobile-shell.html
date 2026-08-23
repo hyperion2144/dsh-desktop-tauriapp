@@ -1,7 +1,7 @@
 <!doctype html><html lang=zh><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>原型：DSH Mobile 手机壳（dsh 主题）</title>
 <style>
-:root{--bg:var(--dsw-alias-bg-base,#0f1115);--panel:var(--dsw-alias-bg-layer-1,#171a21);--panel2:var(--dsw-alias-bg-layer-2,#1b2029);--line:var(--dsw-alias-border-l2,#2a2f3a);--tx:var(--dsw-alias-label-primary,#e7eaf0);--tx2:var(--dsw-alias-label-secondary,#9aa4b2);--ac:var(--dsw-alias-state-accent-primary,#3b82f6);--ok:var(--dsw-alias-state-success-primary,#2fbf71);--off:#4a5160;--hover:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));--r:12px;--safe:env(safe-area-inset-top,0)}
+:root{--bg:var(--dsw-alias-bg-base,#121212);--panel:var(--dsw-alias-bg-layer-1,#1a1a1e);--panel2:var(--dsw-alias-bg-layer-2,#232329);--line:var(--dsw-alias-border-l2,#2e2e34);--tx:var(--dsw-alias-label-primary,#ffffff);--tx2:var(--dsw-alias-label-secondary,#a0a6b5);--ac:var(--dsw-alias-state-accent-primary,#3C5DFF);--ok:var(--dsw-alias-state-success-primary,#2fbf71);--off:#4a5160;--hover:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));--r:12px;--safe:env(safe-area-inset-top,0)}
 *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","HarmonyOS Sans SC","Microsoft YaHei",sans-serif}
 body{background:var(--bg);color:var(--tx);font-size:14px;line-height:1.5}
 .phone{max-width:400px;margin:0 auto;min-height:100vh;background:var(--bg);padding:calc(var(--safe) + 14px) 16px 84px;position:relative}
@@ -19,9 +19,9 @@ body{background:var(--bg);color:var(--tx);font-size:14px;line-height:1.5}
 .footer span{font-size:11px;color:var(--tx2)}
 .webview{position:absolute;inset:calc(var(--safe) + 8px) 8px 0;background:#12141a;border-radius:14px 14px 0 0;color:#dfe3ea;overflow:hidden;display:none}
 .webview.show{display:block}.bar{height:34px;background:#1a1d26;display:flex;align-items:center;padding:0 10px;gap:8px;font-size:11px;color:#7c8494}
-.drawer{position:absolute;top:34px;bottom:0;left:0;width:76%;background:#171a21;box-shadow:0 6px 30px rgba(0,0,0,.5);transform:translateX(-102%);transition:transform .22s;padding:14px;font-size:12px;color:#dfe3ea}.drawer.open{transform:none}
+.drawer{position:absolute;top:34px;bottom:0;left:0;width:76%;background:#1a1a1e;box-shadow:0 6px 30px rgba(0,0,0,.5);transform:translateX(-102%);transition:transform .22s;padding:14px;font-size:12px;color:#dfe3ea}.drawer.open{transform:none}
 .chat{padding:12px}.bubble{background:#191d26;border:1px solid #2a2f3a;border-radius:10px;padding:9px 11px;margin-bottom:8px;font-size:12px}.me{background:#1c2540;border-color:#31415f;margin-left:22px}
-.sheet{position:absolute;left:0;right:0;bottom:0;background:#171a21;border-radius:14px 14px 0 0;padding:12px;font-size:12px;color:#dfe3ea;display:none}.sheet.show{display:block}
+.sheet{position:absolute;left:0;right:0;bottom:0;background:#1a1a1e;border-radius:14px 14px 0 0;padding:12px;font-size:12px;color:#dfe3ea;display:none}.sheet.show{display:block}
 .seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:3px;margin-bottom:14px}.seg button{flex:1;background:transparent;border:none;color:var(--tx2);border-radius:8px;padding:7px 0;font-size:12px;cursor:pointer}.seg button.on{background:var(--ac);color:#fff}
 .paste input{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;font-size:12px;color:var(--tx);outline:none}
 </style></head><body>

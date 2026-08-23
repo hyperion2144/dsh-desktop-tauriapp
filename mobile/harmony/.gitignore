@@ -1,0 +1,10 @@
+# HarmonyOS build artifacts
+.hvigor/
+.idea/
+oh_modules/
+entry/build/
+entry/.preview/
+**/build/
+*.hap
+*.app
+local.properties

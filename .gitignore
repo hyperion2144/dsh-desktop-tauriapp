@@ -15,3 +15,5 @@ desktop/src-tauri/embedded/
 *_orig.png
 whale-iconset-tmp/
 zz-test-relative.txt
+# DSH visualize cards (session workspace copies)
+viz/

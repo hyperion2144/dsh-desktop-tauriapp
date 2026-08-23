@@ -1,0 +1,12 @@
+{
+  "name": "dsh-mobile-harmony",
+  "version": "0.1.0",
+  "ohos": {
+    "org": "dsh-desktop",
+    "buildTool": "hvigor",
+    "directoryLevel": "project"
+  },
+  "description": "DSH 手机访问壳（鸿蒙 ArkTS）——扫码/输入配对后进入 dsh WebView。",
+  "license": "MIT",
+  "dependencies": {}
+}

@@ -83,6 +83,9 @@ jobs:
           echo "---" >> /tmp/body.md
           echo "- **macOS** (Apple Silicon): .app + .dmg" >> /tmp/body.md
           echo "- **Windows** (x86_64): .msi (WiX) + -setup.exe (NSIS)" >> /tmp/body.md
+          echo "- **Android**: app-debug.apk（手机壳，直接安装）" >> /tmp/body.md
+          echo "- **iOS**: DeepSeek.ipa（未签名，AltStore 等免费签名侧载）" >> /tmp/body.md
+          echo "- **鸿蒙**: 不随 CI 发布，需本地 DevEco 构建（见 mobile/harmony/README.md）" >> /tmp/body.md
           echo "body<<__EOF__" >> "$GITHUB_OUTPUT"
           cat /tmp/body.md >> "$GITHUB_OUTPUT"
           echo "__EOF__" >> "$GITHUB_OUTPUT"
@@ -111,3 +114,93 @@ jobs:
           gh release edit "${{ github.ref_name }}" \
             --repo "$GITHUB_REPOSITORY" \
             --notes-file /tmp/body.md
+
+  # 移动端壳（expo-app）：Android APK（debug 签名，可直接安装）
+  # + iOS IPA（未签名，供 AltStore 等免费签名工具侧载）。
+  # 鸿蒙壳不在 CI 发布（需 DevEco/华为签名），见 mobile/harmony/README.md。
+  build-mobile:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-latest
+            target: android
+          - platform: macos-latest
+            target: ios
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: mobile/expo-app/package-lock.json
+
+      - name: Setup Java (Android)
+        if: matrix.target == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK (Android)
+        if: matrix.target == 'android'
+        uses: android-actions/setup-android@v3
+
+      - name: Install expo dependencies
+        working-directory: mobile/expo-app
+        run: npm ci
+
+      - name: Expo prebuild (${{ matrix.target }})
+        working-directory: mobile/expo-app
+        run: npx expo prebuild -p ${{ matrix.target }} --no-install
+
+      - name: Build Android APK
+        if: matrix.target == 'android'
+        working-directory: mobile/expo-app/android
+        run: ./gradlew assembleDebug
+
+      - name: Build iOS IPA (unsigned)
+        if: matrix.target == 'ios'
+        working-directory: mobile/expo-app/ios
+        run: |
+          pod install
+          xcodebuild -workspace DeepSeek.xcworkspace \
+            -scheme DeepSeek \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-device \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          mkdir -p /tmp/Payload
+          cp -R build-device/Build/Products/Release-iphoneos/DeepSeek.app /tmp/Payload/
+          cd /tmp && zip -qry DeepSeek.ipa Payload
+
+      - name: Upload Android APK
+        if: matrix.target == 'android'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: mobile/expo-app/android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload iOS IPA
+        if: matrix.target == 'ios'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: /tmp/DeepSeek.ipa

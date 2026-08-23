@@ -15,6 +15,10 @@
     {
       "name": "EntryAbility_label",
       "value": "DeepSeek 手机访问"
+    },
+    {
+      "name": "reason_camera",
+      "value": "用于扫描桌面端配对二维码完成设备配对"
     }
   ]
 }
