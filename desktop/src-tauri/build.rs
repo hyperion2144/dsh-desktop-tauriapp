@@ -2,7 +2,8 @@
 // 的源目录，随后被打进 .app 的 Contents/Resources/plugins/<name>）。
 //   - dsh-desktop-tauriapp（仓库根：桌面插件）
 //   - dsh-mobile-access（mobile/dsh-mobile-access：手机访问 host+client 半区）
-//   - @dsh-external/dsh-mobile-nav（mobile/vendor/dsh-mobile-nav：移动布局第三方包，MIT）
+//   - dsh-mobile-nav（mobile/dsh-mobile-nav：git 子模块 mexiaosqwq/dsh-web-mobile，原样使用
+//     上游布局包，包名 @dsh-external/dsh-mobile-nav，MIT 出处见包内 LICENSE/README）
 // 打包场景下 desktop_plugin_dir() 经 Tauri resource_dir() 找到内嵌副本，不依赖开发仓库路径。
 // 用 CARGO_MANIFEST_DIR 定位仓库根，与执行时的 cwd 无关。
 use std::path::PathBuf;
@@ -29,8 +30,8 @@ fn stage_embedded_plugins() {
         ("dsh-desktop-tauriapp", ".", &["package.json", "index.js", "cordis.patch.yml", "README.md", "LICENSE"], &["lib"]),
         ("dsh-mobile-access", "mobile/dsh-mobile-access", &["package.json", "cordis.patch.yml", "README.md", "LICENSE"], &["lib", "client"]),
         (
-            "@dsh-external/dsh-mobile-nav",
-            "mobile/vendor/dsh-mobile-nav",
+            "dsh-mobile-nav",
+            "mobile/dsh-mobile-nav",
             &["package.json", "cordis.patch.yml", "README.md", "LICENSE"],
             &["lib"],
         ),

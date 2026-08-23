@@ -1,0 +1,3 @@
+[submodule "mobile/dsh-mobile-nav"]
+	path = mobile/dsh-mobile-nav
+	url = https://github.com/mexiaosqwq/dsh-web-mobile.git

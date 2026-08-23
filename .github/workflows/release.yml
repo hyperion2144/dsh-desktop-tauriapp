@@ -27,6 +27,10 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0   # 全量历史：结构化 release notes 需要上一个 tag..HEAD
+          # mobile/dsh-mobile-nav 是 git 子模块（mexiaosqwq/dsh-web-mobile），
+          # build.rs 会在打包场景读取子模块内的 package.json/cordis.patch.yml/lib，
+          # 不递归 checkout 时该目录为空，CI 构建会失败。
+          submodules: recursive
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:

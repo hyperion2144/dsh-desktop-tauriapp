@@ -1130,17 +1130,19 @@ fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     None
 }
 
-/// 桌面插件 --patch 注入清单：当前只注入桌面插件自身一行。
-/// 手机访问（dsh-mobile-access）与移动布局（@dsh-external/dsh-mobile-nav）暂不注入：
-/// 写入 app 数据目录，幂等。
-/// 注入清单包含桌面插件 + 移动端插件（client 已打包为 __ModuleLoader__.load 格式）。
+/// 桌面插件 --patch 注入清单：桌面插件 + 手机访问（dsh-mobile-access）+ 移动布局
+/// （@dsh-external/dsh-mobile-nav，git 子模块 mexiaosqwq/dsh-web-mobile 原样使用，
+/// 不再自研）。写入 app 数据目录，幂等。
 fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     let Some(dir) = app.path().app_data_dir().ok() else {
         return PathBuf::from("/tmp/dsh-desktop-tauriapp-inject.yml");
     };
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join("desktop-plugin-inject.yml");
-    let content = "- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-mobile-nav\n      name: \"@dsh-external/dsh-mobile-nav\"\n";
+    // name 用上游 cordis.patch.yml 一致的 '@dsh-external/dsh-mobile-nav'（含 scope），
+    // 与子模块的 package.json name / build-client.mjs loader id 对齐；
+    // materialize 时 link_name 也用同名（见 materialize_desktop_plugin）。
+    let content = "- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-mobile-nav\n      name: '@dsh-external/dsh-mobile-nav'\n";
     let stale = std::fs::read_to_string(&path).map(|t| t != content).unwrap_or(true);
     if stale {
         let _ = std::fs::write(&path, content);
@@ -1148,7 +1150,7 @@ fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     path
 }
 
-/// 定位手机访问插件包目录（dsh-mobile-access / @dsh-external/dsh-mobile-nav）：
+/// 定位手机访问插件包目录（dsh-mobile-access / dsh-mobile-nav）：
 /// 优先打包内嵌副本 resource_dir/plugins/<name>，回退开发仓库 mobile/<rel>。
 fn mobile_package_dir(app: &tauri::AppHandle, name: &str, rel: &str) -> Option<PathBuf> {
     if let Ok(res_dir) = app.path().resource_dir() {
@@ -1219,10 +1221,13 @@ fn materialize_desktop_plugin(app: &tauri::AppHandle) {
     } else {
         log::warn!("未定位到 dsh-mobile-access 插件包，跳过共享模块池挂载");
     }
-    if let Some(dir) = mobile_package_dir(app, "@dsh-external/dsh-mobile-nav", "vendor/dsh-mobile-nav") {
+    // link_name 与上游 cordis.patch.yml 的 name 一致（含 scope）：
+    // dsh 从 profile 解析 'name: @dsh-external/dsh-mobile-nav' 时按这个 key
+    // 在共享模块池 node_modules 里查找，链路必须同 key。
+    if let Some(dir) = mobile_package_dir(app, "dsh-mobile-nav", "dsh-mobile-nav") {
         materialize_pool_package(&pool, "@dsh-external/dsh-mobile-nav", &dir);
     } else {
-        log::warn!("未定位到 @dsh-external/dsh-mobile-nav 插件包，跳过共享模块池挂载");
+        log::warn!("未定位到 dsh-mobile-nav 插件包，跳过共享模块池挂载");
     }
 }
 

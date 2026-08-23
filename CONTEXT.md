@@ -19,3 +19,9 @@ _Avoid_: 语言服务器（那是进程本身，不是位置）
 **移动端编辑器 Mobile Editor**:
 better-sidebar 自带的文本编辑器（未接 LSP），手机壳直接复用。
 _Avoid_: 轻量编辑器、简易编辑器
+
+**移动端布局 Mobile Layout**:
+移动端窄屏适配（<1024px 抽屉/浮层/sheet、安全区、composer 重排）由上游插件
+`mexiaosqwq/dsh-web-mobile`（git 子模块 `mobile/dsh-mobile-nav`，包名
+`@dsh-external/dsh-mobile-nav`）原样提供，本仓库不再自研移动布局；桌面 ≥1024px 完全 no-op。
+_Avoid_: 移动端自建布局（重做布局）、移动三页导航（已废弃）
