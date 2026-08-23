@@ -63,4 +63,24 @@ else
   echo "=== [C-受限PATH] 跳过：未找到 app 产物（$APP_BIN，先 pnpm tauri build）==="
 fi
 
+# D 移动访问 lane（手机访问服务改写反代，默认 3091；被占自动 +1 探测）
+# 需要桌面壳已拉起 dsh（A/B/C 任一已跑），lane 随 dsh web 启动。
+LANE="${LANE_PORT:-3091}"
+if nc -z 127.0.0.1 "$LANE" 2>/dev/null; then
+  echo "=== [D-移动lane] 探测 $LANE ==="
+  # /pair 应 200（配对入口，匿名可访问）
+  PAIR_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:$LANE/pair" 2>/dev/null || echo "000")
+  # 属主 mint 应 200 + token（回环直连）
+  MINT=$(curl -s --max-time 5 -X POST "http://127.0.0.1:$LANE/api/pair/mint" 2>/dev/null || echo "")
+  MINT_CODE=$(echo "$MINT" | grep -o '"ok":true' | head -1 || true)
+  if [ "$PAIR_CODE" = "200" ] && [ -n "$MINT_CODE" ]; then
+    echo "移动 lane OK：/pair=$PAIR_CODE，mint 返回 ok:true ✓"
+  else
+    echo "FAIL: 移动 lane 异常 —— /pair=$PAIR_CODE mint=${MINT_CODE:-无}"
+    exit 1
+  fi
+else
+  echo "=== [D-移动lane] 跳过：$LANE 无服务（需桌面壳拉起 dsh 后运行）==="
+fi
+
 echo "验收完成 ✓"
