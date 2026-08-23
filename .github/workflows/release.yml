@@ -145,7 +145,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
+          # expo-app 是 npm 项目（package-lock.json），缓存用 npm 而非 pnpm——
+          # pnpm 缓存要找 pnpm-lock.yaml，路径不存在会让 Post 步骤报错
+          # "Path Validation Error ... no cache is being saved"（v0.6.4 实测）。
+          cache: npm
           cache-dependency-path: mobile/expo-app/package-lock.json
 
       - name: Setup Java (Android)
@@ -176,6 +179,8 @@ jobs:
         if: matrix.target == 'ios'
         working-directory: mobile/expo-app/ios
         run: |
+          # macos runner 自带 CocoaPods；确认可用
+          pod --version
           pod install
           xcodebuild -workspace DeepSeek.xcworkspace \
             -scheme DeepSeek \
