@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-tauriapp",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "description": "DSH 桌面壳「DeepSeek Harness Desktop Desktop」技能包：把 DeepSeek Harness 封装成 Tauri 2 桌面应用（macOS+Windows），含托盘常驻、任务通知、鲸鱼娘桌宠、国内镜像加速、Windows 无管理员工具链",
   "type": "module",
   "main": "index.js",
