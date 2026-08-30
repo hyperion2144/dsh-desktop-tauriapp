@@ -70,7 +70,7 @@
     "resources": {
       "embedded/dsh-desktop-tauriapp": "plugins/dsh-desktop-tauriapp/",
       "embedded/dsh-mobile-access": "plugins/dsh-mobile-access/",
-      "embedded/dsh-mobile-nav": "plugins/dsh-mobile-nav/"
+      "embedded/dsh-web-mobile": "plugins/dsh-web-mobile/"
     }
   }
 }
