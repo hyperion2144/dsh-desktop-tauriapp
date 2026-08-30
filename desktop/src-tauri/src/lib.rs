@@ -1177,8 +1177,22 @@ fn mobile_package_dir(app: &tauri::AppHandle, name: &str, rel: &str) -> Option<P
 
 /// 把插件包挂进共享模块池 $DSH_HOME/profiles/node_modules，使 `name: <pkg>`
 /// 从任意 profile 可解析（macOS/Linux 用符号链接，Windows 退化为复制整包）。幂等。
+/// scoped 包名（如 @dsh-external/dsh-mobile-nav）会自动补建 scope 父目录；
+/// pool 目录本身不存在时也会一并创建，函数自足不依赖调用方预建。
 fn materialize_pool_package(pool: &std::path::Path, link_name: &str, dir: &std::path::Path) {
     let link = pool.join(link_name);
+    // bug #22：scoped 包名的父目录（如 …/node_modules/@dsh-external）若不存在，
+    // symlink/copy 会直接 ENOENT 且仅落日志，dsh 启动即报 Cannot find package。
+    // 挂载前先补建父目录，失败则放弃本次挂载（错误已记日志，可观测）。
+    if let Some(parent) = link.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::error!(
+                "共享模块池挂载 {link_name} 前创建父目录 {} 失败：{e}",
+                parent.display()
+            );
+            return;
+        }
+    }
     let target = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     if let Ok(existing) = std::fs::read_link(&link) {
         if existing == target {
@@ -2884,6 +2898,90 @@ mod unit_tests {
         assert_eq!(SpawnError::NotFound("nope".into()).to_string(), "nope");
         assert_eq!(SpawnError::Other("boom".into()).to_string(), "boom");
     }
+
+    // —— 共享模块池挂载（bug #22：scoped 包名挂载）——
+
+    fn pool_test_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-pool-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn pool_test_pkg(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let pkg = root.join(name);
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), "{\"name\":\"fake\"}\n").unwrap();
+        pkg
+    }
+
+    #[test]
+    fn pool_mount_scoped_name_creates_scope_parent() {
+        // bug #22：scoped 包名挂载时 scope 父目录必须自动创建，
+        // 否则 symlink ENOENT 静默失败，dsh 启动报 Cannot find package。
+        let root = pool_test_dir("scoped");
+        let pool = root.join("profiles").join("node_modules");
+        let pkg = pool_test_pkg(&root, "nav");
+        materialize_pool_package(&pool, "@dsh-external/dsh-mobile-nav", &pkg);
+        let link = pool.join("@dsh-external").join("dsh-mobile-nav");
+        assert!(
+            link.join("package.json").exists(),
+            "scoped 挂载后应能经链接读到包内文件（scope 父目录需自动补建）"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pool_mount_scoped_idempotent() {
+        // 重复挂载同一 scoped 包名应幂等复用，不重建、不报错。
+        let root = pool_test_dir("scoped-idem");
+        let pool = root.join("pool");
+        let pkg = pool_test_pkg(&root, "nav");
+        materialize_pool_package(&pool, "@scope/pkg", &pkg);
+        materialize_pool_package(&pool, "@scope/pkg", &pkg);
+        assert!(pool.join("@scope").join("pkg").join("package.json").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pool_mount_unscoped_and_stale_replacement() {
+        // 回归保护：非 scoped 挂载与陈旧链接替换的既有行为不被破坏。
+        let root = pool_test_dir("unscoped");
+        let pool = root.join("pool");
+        let a = pool_test_pkg(&root, "pkg-a");
+        let b = root.join("pkg-b");
+        std::fs::create_dir_all(&b).unwrap();
+        materialize_pool_package(&pool, "dsh-x", &a);
+        assert!(pool.join("dsh-x").join("package.json").exists());
+        materialize_pool_package(&pool, "dsh-x", &b);
+        let target = std::fs::canonicalize(pool.join("dsh-x")).unwrap();
+        assert_eq!(
+            target,
+            std::fs::canonicalize(&b).unwrap(),
+            "陈旧链接应替换为新实体"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pool_mount_scope_dir_as_file_fails_observably() {
+        // 异常分支：scope 父路径被文件占用时挂载应放弃且可观测（不 panic）。
+        let root = pool_test_dir("scope-file");
+        let pool = root.join("pool");
+        std::fs::create_dir_all(&pool).unwrap();
+        std::fs::write(pool.join("@scope"), "not a dir").unwrap();
+        let pkg = pool_test_pkg(&root, "nav");
+        materialize_pool_package(&pool, "@scope/pkg", &pkg);
+        assert!(!pool.join("@scope").join("pkg").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }
 
 
