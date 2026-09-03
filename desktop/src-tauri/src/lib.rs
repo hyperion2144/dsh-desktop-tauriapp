@@ -261,6 +261,10 @@ struct DshState {
     notify_port: AtomicU16,
     /// 任务通知服务器访问 token（仅启动时生成一次，重启复用）。
     notify_token: Mutex<String>,
+    /// dsh web 启动 URL 里的一次性 process token（stdout 解析；空 = 老版 dsh 未打印）。
+    /// dsh 新版对不带 token 的请求返回 401；token 经 303 + Set-Cookie 换取 30 天会话
+    /// cookie，进程存活期内可重复交换。仅内存保存，不落盘。
+    web_token: Mutex<String>,
     /// 双击拖拽区"缩放"前的主窗口几何（None = 当前处于标准尺寸，可触发放大；
     /// Some = 当前已放大，再双击恢复到此几何）。Mutex 防并发双击。
     pre_zoom_geom: Mutex<Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>>,
@@ -563,6 +567,11 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
         let app = app.clone();
         thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
+                // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
+                if let Some(token) = parse_web_token_line(&line) {
+                    store_web_token(&app, token);
+                }
                 log::info!("[dsh] {line}");
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stdout", "line": line }));
@@ -766,6 +775,11 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
         let app = app.clone();
         thread::spawn(move || {
             for line in BufReader::new(out).lines().map_while(Result::ok) {
+                // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
+                // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
+                if let Some(token) = parse_web_token_line(&line) {
+                    store_web_token(&app, token);
+                }
                 log::info!("[dsh] {line}");
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stdout", "line": line }));
@@ -783,6 +797,42 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
         });
     }
     Ok(child)
+}
+
+/// 从 dsh web stdout 行解析启动 URL 的 process token。
+/// 行格式（单独一行）：`dsh web: http://127.0.0.1:3080/?token=xxxx`，
+/// token 字符集为 URL 安全字母（含 -/_）。解析失败/无 token 返回 None
+/// （老版 dsh 无 token 机制，桌面壳回退到不带 token 的 URL）。
+fn parse_web_token_line(line: &str) -> Option<String> {
+    let idx = line.find("dsh web: http")?;
+    let rest = &line[idx + "dsh web: http".len()..];
+    let marker = "?token=";
+    let tidx = rest.find(marker)?;
+    let raw = &rest[tidx + marker.len()..];
+    let token: String = raw
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == '~')
+        .collect();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+/// 把解析到的 process token 写入 DshState（空则忽略；后到的覆盖先到的）。
+fn store_web_token(app: &AppHandle, token: String) {
+    if token.is_empty() {
+        return;
+    }
+    *app.state::<DshState>().web_token.lock().unwrap() = token.clone();
+    log::info!("[token] 已捕获 dsh web process token（长度 {}）", token.len());
+}
+
+/// 清空 process token（重启/重新 spawn 前调用：新实例的 token 必然不同，
+/// 残留旧 token 会在宽限窗口内被误用于导航而 401）。
+fn clear_web_token(app: &AppHandle) {
+    *app.state::<DshState>().web_token.lock().unwrap() = String::new();
 }
 
 /// 生成本地通知服务器的访问 token（防本机其它进程误触发；非加密学强度）。
@@ -1029,12 +1079,13 @@ fn probe_local(port: u16) -> (bool, String) {
     (true, detail)
 }
 
-/// 远程 dsh 探测（host[:port]）：与本地同语义。
+/// 远程 dsh 探测：入参可为完整 URL（新版）或 host:port（旧格式）。与本地同语义。
 fn probe_remote(addr: &str) -> (bool, String) {
-    if !matches!(std::net::TcpStream::connect(addr), Ok(_)) {
-        return (false, format!("{addr} 连接失败"));
+    let host_port = remote_host_port(addr);
+    if !matches!(std::net::TcpStream::connect(&host_port), Ok(_)) {
+        return (false, format!("{host_port} 连接失败"));
     }
-    let detail = match probe_http(addr, "/") {
+    let detail = match probe_http(&host_port, "/") {
         Ok(true) => "HTTP 200".into(),
         Ok(false) => "HTTP 非 2xx/3xx（仅日志）".into(),
         Err(e) => format!("HTTP 探测超时/异常（仅日志）：{e}"),
@@ -1294,33 +1345,63 @@ fn strip_web_profile_plugin_bundle() {
 /// 在原生布局内注入局部拖拽区（不禁用 ui-layout）；
 /// `advanced=false`（复用了外部已有实例）：不带标记，标准布局 + 系统原生标题栏。
 /// 普通浏览器/无标记访问不激活桌面 UI。
-fn desktop_url(port: u16, advanced: bool) -> String {
-    if !advanced {
-        return format!("http://127.0.0.1:{port}/");
+/// `token` 为 dsh web 的 process token（新版本必需，否则 401；None/空 = 老版回退）。
+/// 注意：带 token 的 URL 经 303 重定向到 `/` 时 query 参数会被剥掉，因此有 token
+/// 时标记参数不与 token 同跳（wait_ready_and_navigate 的两段式导航负责补跳标记）。
+fn desktop_url(port: u16, advanced: bool, token: Option<&str>) -> String {
+    match token.filter(|t| !t.is_empty()) {
+        Some(tok) => format!("http://127.0.0.1:{port}/?token={tok}"),
+        None if advanced => {
+            let platform = desktop_platform_tag();
+            format!(
+                "http://127.0.0.1:{port}/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={platform}"
+            )
+        }
+        None => format!("http://127.0.0.1:{port}/"),
     }
-    let platform = if cfg!(target_os = "macos") {
+}
+
+/// 当前平台的桌面标记值（client 端 environment.ts 按同名约定解析）。
+fn desktop_platform_tag() -> &'static str {
+    if cfg!(target_os = "macos") {
         "darwin"
     } else if cfg!(target_os = "windows") {
         "win32"
     } else {
         "linux"
-    };
+    }
+}
+
+/// 在已建立的会话（cookie 已换到）之上追加高级模式标记参数。
+/// 无 token 的新版 dsh 上无意义（401），但有 token 交换后这是激活桌面 chrome 的唯一途径。
+fn advanced_marker_query() -> String {
     format!(
-        "http://127.0.0.1:{port}/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={platform}"
+        "dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={}",
+        desktop_platform_tag()
     )
 }
 
 /// 轮询等待服务就绪，然后把主窗口导航到 Web GUI；失败则跳错误页。
 /// `nport`/`ntoken` 是通知桥的端口与令牌，导航完成后才注入监听脚本。
+///
+/// dsh 新版要求 process token：有 token 时两段式导航 ——
+/// 第一跳 `/?token=x`（303 Set-Cookie 换会话 cookie，重定向会剥掉 query 参数），
+/// 2.5s 后第二跳补上高级模式标记并重挂任务通知监听（标记 URL 在 cookie 会话下 200）；
+/// 无 token（老版 dsh）保持旧行为：一跳直达，标记参数随首跳携带。
 async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
     // advanced 以当前接入模式为准（高级=带标记桌面 chrome；兼容=标准布局）
-    let url = desktop_url(port, state.mode.load(Ordering::SeqCst) == MODE_ADVANCED);
+    let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
     // 远程模式：不探测/不 spawn 本地，直接导航远程页面
     if let Some(addr) = load_desktop_settings().remote_addr {
-        navigate_remote(&app, &addr, state.mode.load(Ordering::SeqCst) == MODE_ADVANCED);
+        navigate_remote(&app, &addr, advanced);
         return;
     }
+    // spawn 场景才等 stdout 的 token 行（外部复用场景永远等不到，token 只能来自粘贴）
+    let expect_token = state.spawned_this_run.load(Ordering::SeqCst);
+    // 端口监听可能先于 stdout 的 token 行就绪（实测出现过）：spawn 场景给 5s 宽限，
+    // 新版 dsh 通常 <1s 内到达；老版 dsh（无 token 机制）最多多等 5s 再按回退路径导航。
+    let token_grace_deadline = Instant::now() + Duration::from_secs(5);
     let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         if state.spawn_failed.load(Ordering::SeqCst) {
@@ -1328,6 +1409,17 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
             return;
         }
         if port_open(port) {
+            let web_token = state.web_token.lock().unwrap().clone();
+            if expect_token && web_token.is_empty() && Instant::now() < token_grace_deadline {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                continue;
+            }
+            // URL 在导航时刻构建（token 可能在等待期间才被 stdout 线程捕获）
+            let url = desktop_url(
+                port,
+                advanced,
+                if web_token.is_empty() { None } else { Some(web_token.as_str()) },
+            );
             if let Some(w) = app.get_webview_window("main") {
                 let script = format!("window.location.replace({url:?});");
                 if let Err(e) = w.eval(&script) {
@@ -1338,6 +1430,28 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
                 // 导航后注入监听：0.3.0 在 setup 阶段提前注入，冷启动时脚本
                 // 落在加载页、随导航销毁（通知收不到的根因之二）。
                 inject_task_notifier(app.clone(), nport, &ntoken);
+                // 两段式第二跳：token 交换的 303 已把 query 剥干净，等 cookie 落地后
+                // 补跳带高级模式标记的 URL（此时无需 token，cookie 会话直接 200）。
+                // 兼容模式/老版 dsh（无 token）不补跳，维持单跳。
+                if !web_token.is_empty() && advanced {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(2500)).await;
+                        let marked =
+                            format!("http://127.0.0.1:{port}/?{}", advanced_marker_query());
+                        if let Some(w) = handle.get_webview_window("main") {
+                            if let Err(e) =
+                                w.eval(&format!("window.location.replace({marked:?});"))
+                            {
+                                log::warn!("[nav] 高级模式标记补跳失败：{e}");
+                            } else {
+                                log::info!("[nav] 已补跳高级模式标记 URL");
+                            }
+                        }
+                        // 补跳会再次整页加载，任务通知监听随页面销毁，需要重挂
+                        inject_task_notifier(handle, nport, &ntoken);
+                    });
+                }
             }
             log::info!("本地服务就绪，已导航到 {url}");
             set_status(&app, STATUS_READY, "运行中");
@@ -1878,8 +1992,32 @@ fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result<(), String
             let port = app_port();
             let nport = state.notify_port.load(Ordering::SeqCst);
             let ntoken = state.notify_token.lock().unwrap().clone();
+            let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                wait_ready_and_navigate(app, port, nport, ntoken).await;
+                // 新版 dsh web 需要 process token（否则 401）：外部实例的 token 拿不到，
+                // 提示用户粘贴 dsh web 打印的完整 URL（含 token）。老版 dsh（无 token）
+                // 可直接跳过这一步。
+                let web_token = handle.state::<DshState>().web_token.lock().unwrap().clone();
+                if web_token.is_empty() {
+                    if let Some(input) = prompt_input(
+                        &handle,
+                        "compat-token",
+                        "粘贴 dsh web 启动 URL",
+                        "形如 http://127.0.0.1:3080/?token=…（老版 dsh 可留空回车）",
+                        "",
+                    )
+                    .await
+                    {
+                        if let Some(token) = extract_token_from_url(&input) {
+                            store_web_token(&handle, token);
+                        } else if normalize_remote_url(&input).is_some() && !input.contains("token=") {
+                            log::info!("[mode] 兼容模式：输入为不带 token 的 URL，按老版 dsh 处理");
+                        } else if !input.trim().is_empty() {
+                            show_notification(&handle, "未能识别 token", "输入里没有 ?token= 参数，将按老版 dsh 直连（新版会 401）");
+                        }
+                    }
+                }
+                wait_ready_and_navigate(handle, port, nport, ntoken).await;
             });
             Ok(())
         }
@@ -1897,7 +2035,8 @@ fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result<(), String
                     return;
                 }
                 log::info!("[mode] 端口 {port} 已释放，用桌面 overlay 实例重启");
-                // 3) 以桌面 overlay 实例拉起
+                // 3) 以桌面 overlay 实例拉起（先清旧 token：新实例 token 必然不同）
+                clear_web_token(&handle);
                 match spawn_dsh(&handle, port, true) {
                     Ok(child) => {
                         *handle.state::<DshState>().child.lock().unwrap() = Some(child);
@@ -2050,37 +2189,115 @@ fn create_profile_flow(app: &AppHandle) {
 }
 
 
-/// 归一化远程地址：去 scheme、拒绝路径/凭据，端口默认 3080。
-fn normalize_remote(addr: &str) -> Option<String> {
-    let mut a = addr.trim().to_string();
-    for prefix in ["http://", "https://"] {
-        if let Some(rest) = a.strip_prefix(prefix) {
-            a = rest.to_string();
-        }
-    }
-    if a.is_empty() || a.contains('/') || a.contains('@') || a.contains(' ') || a.contains('?') || a.contains('#') {
+/// 归一化远程地址（完整 URL 或旧格式 host[:port]）为可导航 URL。
+/// 新版 dsh web 的远程地址是它打印的完整 URL（http/https + ?token=…）；
+/// 旧格式 host[:port] 自动补 http:// 兼容。拒绝非 http(s)、无 host、
+/// 带 / 之外路径与带凭据的输入（token URL 的路径恒为 /）。
+fn normalize_remote_url(input: &str) -> Option<String> {
+    let raw = input.trim();
+    if raw.is_empty() {
         return None;
     }
-    match a.rsplit_once(':') {
-        Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
-            if h.is_empty() { None } else { Some(format!("{h}:{p}")) }
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let url = tauri::Url::parse(&with_scheme).ok()?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return None;
+    }
+    if url.host_str().unwrap_or("").is_empty() {
+        return None;
+    }
+    let path = url.path();
+    if !(path.is_empty() || path == "/") {
+        return None;
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// 远程条目的展示名：URL 形态取 host[:port]（旧格式原样返回）。
+/// 托盘标签/状态详情用它，避免把长 URL（含 token）直接铺进菜单。
+fn remote_display(addr: &str) -> String {
+    if let Ok(url) = tauri::Url::parse(addr) {
+        if url.scheme() == "http" || url.scheme() == "https" {
+            let host = url.host_str().unwrap_or("");
+            return match url.port() {
+                Some(p) => format!("{host}:{p}"),
+                None => host.to_string(),
+            };
         }
-        _ => Some(format!("{a}:3080")),
+    }
+    addr.to_string()
+}
+
+/// 远程地址的 TCP 连接目标 host:port（URL 形态解析并补 scheme 默认端口；旧格式原样）。
+fn remote_host_port(addr: &str) -> String {
+    if let Ok(url) = tauri::Url::parse(addr) {
+        if url.scheme() == "http" || url.scheme() == "https" {
+            let host = url.host_str().unwrap_or("");
+            let port = url.port_or_known_default().unwrap_or(80);
+            return format!("{host}:{port}");
+        }
+    }
+    addr.to_string()
+}
+
+/// 去掉 URL 查询串里的 token= 参数（保留其余参数），用于 cookie 建立后的干净导航。
+fn strip_token_query(url: &str) -> String {
+    match tauri::Url::parse(url) {
+        Ok(mut u) => {
+            let pairs: Vec<(String, String)> = u
+                .query_pairs()
+                .filter(|(k, _)| k != "token")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            u.set_query(None);
+            if !pairs.is_empty() {
+                let q = pairs
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join("&");
+                u.set_query(Some(&q));
+            }
+            u.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
+/// 从用户粘贴的 dsh web 启动 URL 里提取 process token（没有则 None）。
+fn extract_token_from_url(input: &str) -> Option<String> {
+    let url = tauri::Url::parse(input.trim()).ok()?;
+    let (_, value) = url
+        .query_pairs()
+        .find(|(k, _)| k == "token")
+        .map(|(k, v)| (k.to_string(), v.to_string()))?;
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
     }
 }
 
 /// 选择远程/本地服务来源：写 settings 后按来源重启。
+/// `addr` 存完整 URL（新版 dsh web 带 process token；旧格式 host[:port] 仍兼容）。
 fn select_remote(app: &AppHandle, addr: Option<String>) {
     let mut settings = load_desktop_settings();
     settings.remote_addr = addr;
     save_desktop_settings(&settings);
     if let Some(a) = settings.remote_addr.as_deref() {
-        let host = a.split(':').next().unwrap_or(a).to_string();
+        let host = remote_host_port(a).split(':').next().unwrap_or(a).to_string();
         let mut list = INTERNAL_HOSTS.lock().unwrap();
         if !list.contains(&host) {
             list.push(host);
         }
-        log::info!("[tray] 切换 dsh 服务地址 -> 远程 {a}");
+        log::info!("[tray] 切换 dsh 服务地址 -> 远程 {}", remote_display(a));
     } else {
         log::info!("[tray] 切换 dsh 服务地址 -> 本地");
     }
@@ -2088,23 +2305,28 @@ fn select_remote(app: &AppHandle, addr: Option<String>) {
     restart_dsh_in_mode(app, mode);
 }
 
-/// 新增远程地址流程：弹窗输入 host[:port] → 校验 → 存入列表并选中。
+/// 新增远程地址流程：弹窗输入完整 URL（或旧格式 host[:port]）→ 校验 → 存入列表并选中。
 fn add_remote_flow(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let Some(input) = prompt_input(&handle, "add-remote", "新增 dsh 服务地址", "host[:port]，如 192.168.1.10:3080", "").await else {
+        let Some(input) = prompt_input(&handle, "add-remote", "新增 dsh 服务地址", "dsh web 打印的完整 URL（含 token），或 host[:port]", "").await else {
             return;
         };
-        let Some(addr) = normalize_remote(&input) else {
-            show_notification(&handle, "新增地址失败", "格式应为 host[:port]，不允许含路径/凭据");
+        let Some(addr) = normalize_remote_url(&input) else {
+            show_notification(&handle, "新增地址失败", "格式应为 dsh web 打印的完整 URL 或 host[:port]");
             return;
         };
+        // 新版 dsh web 的 token 是必要凭据：URL 里带了就先存入 state，
+        // 供远程导航直接使用（导航时按需拼接，不修改用户保存的原始 URL）。
+        if let Some(token) = extract_token_from_url(&addr) {
+            store_web_token(&handle, token);
+        }
         let mut settings = load_desktop_settings();
         if !settings.remote_list.contains(&addr) {
             settings.remote_list.push(addr.clone());
         }
         save_desktop_settings(&settings);
-        log::info!("[tray] 新增远程 dsh 地址：{addr}（未切换，请在菜单中手动选择）");
+        log::info!("[tray] 新增远程 dsh 地址：{}（未切换，请在菜单中手动选择）", remote_display(&addr));
         refresh_tray_mode(&handle);
     });
 }
@@ -2117,7 +2339,7 @@ fn remove_remote_flow(app: &AppHandle, addr: &str) {
         settings.remote_addr = None;
     }
     save_desktop_settings(&settings);
-    log::info!("[tray] 删除远程 dsh 地址：{addr}");
+    log::info!("[tray] 删除远程 dsh 地址：{}", remote_display(addr));
     refresh_tray_mode(app);
 }
 
@@ -2152,34 +2374,112 @@ fn set_port_flow(app: &AppHandle) {
 }
 
 /// 远程首页是否挂载了本插件的 client（GET / 并从响应里检索挂载串）。
+/// `addr` 可为完整 URL（新版，带 token 时跟随 303 换 cookie；探活页只需要 200 首页）
+/// 或 host:port（旧格式）。
 fn remote_has_plugin(addr: &str) -> bool {
     use std::io::{Read, Write};
-    let Ok(mut stream) = std::net::TcpStream::connect(addr) else { return false };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let req = format!("GET / HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(req.as_bytes()).is_err() {
-        return false;
-    }
+    let host_port = remote_host_port(addr);
+    // 请求路径取 URL 的 path+query（含 token 时 dsh 会 303 → cookie 首页），
+    // 旧格式 host:port 保持请求根路径。
+    let (target, cookie) = match tauri::Url::parse(addr) {
+        Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {
+            let q = match u.query() {
+                Some(q) => format!("?{q}"),
+                None => String::new(),
+            };
+            let path = if u.path().is_empty() { "/" } else { u.path() };
+            (format!("{path}{q}"), String::new())
+        }
+        _ => ("/".to_string(), String::new()),
+    };
+    // 最多跟一次重定向（token 交换 303 → Set-Cookie → 首页 200）。
+    // 裸 socket 不带 cookie jar，手动接住 Set-Cookie 再发第二跳。
+    let mut current_target = target;
+    let mut current_cookie = cookie;
     let mut buf = Vec::with_capacity(65536);
-    let mut tmp = [0u8; 8192];
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&tmp[..n]);
-                if buf.len() >= 65536 {
-                    break;
+    for _hop in 0..2 {
+        let Ok(mut stream) = std::net::TcpStream::connect(&host_port) else { return false };
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+        let mut req = format!(
+            "GET {current_target} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n"
+        );
+        if !current_cookie.is_empty() {
+            req.push_str(&format!("Cookie: {current_cookie}\r\n"));
+        }
+        req.push_str("\r\n");
+        if stream.write_all(req.as_bytes()).is_err() {
+            return false;
+        }
+        buf.clear();
+        let mut tmp = [0u8; 8192];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.len() >= 65536 {
+                        break;
+                    }
                 }
             }
         }
+        let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let status = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse::<u16>().ok())
+            .unwrap_or(0);
+        if (300..400).contains(&status) {
+            // 记下 Set-Cookie，按 Location 起一跳（Location 可能是相对路径 /）
+            let set_cookie = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string());
+            if let Some(cv) = set_cookie {
+                let pair = cv.split(';').next().unwrap_or("").trim().to_string();
+                if !pair.is_empty() {
+                    current_cookie = pair;
+                }
+            }
+            let loc = head
+                .lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("location:"))
+                .and_then(|l| l.split_once(':'))
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default();
+            if loc.is_empty() {
+                return false;
+            }
+            current_target = if loc.starts_with("http://") || loc.starts_with("https://") {
+                match tauri::Url::parse(&loc) {
+                    Ok(u) => {
+                        let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
+                        let path = if u.path().is_empty() { "/" } else { u.path() };
+                        format!("{path}{q}")
+                    }
+                    Err(_) => return false,
+                }
+            } else {
+                loc
+            };
+            continue;
+        }
+        break;
     }
     String::from_utf8_lossy(&buf).contains("/plugins/dsh-desktop-tauriapp/client.js")
 }
 
-/// 导航到远程 dsh 页面（高级=带标记；远程缺插件时提示建议切兼容，不阻塞）。
+/// 导航到远程 dsh 页面。`addr` 为完整 URL（新版 dsh web 含 process token）
+/// 或旧格式 host:port（自动补 http://）。高级模式在无 token / 已带标记的场景外
+/// 统一两段式：token 交换的 303 会剥 query，2.5s 后补跳带标记 URL（cookie 会话 200）。
+/// 远程缺插件时提示建议切兼容，不阻塞。
 fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
-    let host = addr.split(':').next().unwrap_or(addr).to_string();
+    let host_port = remote_host_port(addr);
+    let host = host_port.split(':').next().unwrap_or(addr).to_string();
     {
         let mut list = INTERNAL_HOSTS.lock().unwrap();
         if !list.contains(&host) {
@@ -2190,23 +2490,50 @@ fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
         log::warn!("[remote] 远程未检测到 dsh-desktop-tauriapp 插件，建议使用兼容模式");
         show_notification(app, "远程 dsh 未安装桌面插件", "高级模式需要远程安装 dsh-desktop-tauriapp，建议改用兼容模式");
     }
-    let url = if advanced {
-        let platform = if cfg!(target_os = "macos") {
-            "darwin"
-        } else if cfg!(target_os = "windows") {
-            "win32"
-        } else {
-            "linux"
-        };
-        format!("http://{addr}/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={platform}")
+    // 基础 URL：完整 URL 原样用（含 token/旧参数）；旧格式补 scheme 与根路径。
+    let base = if tauri::Url::parse(addr)
+        .map(|u| u.scheme() == "http" || u.scheme() == "https")
+        .unwrap_or(false)
+    {
+        addr.to_string()
     } else {
         format!("http://{addr}/")
     };
+    let has_token = tauri::Url::parse(&base)
+        .ok()
+        .map(|u| u.query_pairs().any(|(k, _)| k == "token"))
+        .unwrap_or(false);
+    let mut url = base.clone();
+    let mut follow_up: Option<String> = None;
+    if advanced && !base.contains("dsh-desktop-tauriapp-mode=") {
+        if has_token {
+            // 有 token：首跳先交换 cookie（参数会被 303 剥掉），补跳再带标记
+            url = base.clone();
+            follow_up = Some(format!("{}?{}", strip_token_query(&base), advanced_marker_query()));
+        } else {
+            // 无 token（老版 dsh 或已建立 cookie 会话）：标记随首跳
+            let sep = if base.contains('?') { "&" } else { "?" };
+            url = format!("{base}{sep}{}", advanced_marker_query());
+        }
+    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.eval(&format!("window.location.replace({url:?});"));
+        if let Some(marked) = follow_up {
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(2500)).await;
+                if let Some(w) = handle.get_webview_window("main") {
+                    if let Err(e) = w.eval(&format!("window.location.replace({marked:?});")) {
+                        log::warn!("[remote] 高级模式标记补跳失败：{e}");
+                    } else {
+                        log::info!("[remote] 已补跳高级模式标记 URL");
+                    }
+                }
+            });
+        }
     }
-    log::info!("已导航到远程 dsh：{url}");
-    set_status(app, STATUS_REMOTE, &format!("远程 {addr}"));
+    log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
+    set_status(app, STATUS_REMOTE, &format!("远程 {}", remote_display(addr)));
     app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
 }
 
@@ -2224,17 +2551,19 @@ fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let active_remote = settings.remote_addr.clone();
     let port = configured_port();
 
-    // dsh 服务地址 ▸
+    // dsh 服务地址 ▸（标签用展示名 host[:port]，完整 URL 里的 token 不进菜单）
     let local_label = if active_remote.is_none() { "✓ 本地".to_string() } else { "本地".to_string() };
     let local_item = MenuItem::with_id(app, "remote:local", local_label, true, None::<&str>)?;
     let mut remote_builder = SubmenuBuilder::new(app, "dsh 服务地址");
     remote_builder = remote_builder.item(&local_item);
     for addr in &settings.remote_list {
+        let display = remote_display(addr);
         let label = if active_remote.as_deref() == Some(addr) {
-            format!("✓ {addr}")
+            format!("✓ {display}")
         } else {
-            addr.clone()
+            display
         };
+        // 菜单 id 仍携带完整地址（URL 或旧格式），选中/删除按原值匹配
         let item = MenuItem::with_id(app, format!("remote-set:{addr}"), label, true, None::<&str>)?;
         remote_builder = remote_builder.item(&item);
     }
@@ -2244,7 +2573,7 @@ fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     if !settings.remote_list.is_empty() {
         let mut del_builder = SubmenuBuilder::new(app, "删除地址");
         for addr in &settings.remote_list {
-            let item = MenuItem::with_id(app, format!("remote-del:{addr}"), addr.clone(), true, None::<&str>)?;
+            let item = MenuItem::with_id(app, format!("remote-del:{addr}"), remote_display(addr), true, None::<&str>)?;
             del_builder = del_builder.item(&item);
         }
         remote_builder = remote_builder.items(&[&del_builder.build()?]);
@@ -2429,6 +2758,8 @@ fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
             return;
         }
         // 2) 按目标模式拉起（高级=注入局部拖拽 chrome；兼容=标准布局 + 原生标题栏）
+        // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
+        clear_web_token(&handle);
         let advanced = target_mode == MODE_ADVANCED;
         match spawn_dsh(&handle, port, advanced) {
             Ok(child) => {
@@ -2530,6 +2861,7 @@ pub fn run() {
             pet_save_at: Mutex::new(None),
             notify_port: AtomicU16::new(0),
             notify_token: Mutex::new(String::new()),
+            web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
         })
         .setup(|app| {
@@ -2560,6 +2892,8 @@ pub fn run() {
                 set_status(app.handle(), STATUS_STARTING, "启动中");
                 materialize_desktop_plugin(app.handle());
                 strip_web_profile_plugin_bundle();
+                // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
+                clear_web_token(app.handle());
                 match spawn_dsh(app.handle(), port, true) {
                     Ok(child) => {
                         log::info!("dsh 子进程已启动（PID {}）", child.id());
@@ -2824,6 +3158,157 @@ pub fn run() {
 mod unit_tests {
     use super::*;
 
+    // —— dsh web process token（issue #23）——
+
+    #[test]
+    fn parse_web_token_line_extracts_token() {
+        // 真实 stdout 行格式（单独一行）
+        let line = "dsh web: http://127.0.0.1:3080/?token=RQsEG-U8B4RMcWxE2d8LRQLt5yLHl_3RlPKFexm1Lu0";
+        assert_eq!(
+            parse_web_token_line(line).as_deref(),
+            Some("RQsEG-U8B4RMcWxE2d8LRQLt5yLHl_3RlPKFexm1Lu0")
+        );
+        let short = "dsh web: http://127.0.0.1:13080/?token=MUpczjUeeXYnS6uOr3b2G461BgylSTmIA3Nkz1LKDOY";
+        assert_eq!(
+            parse_web_token_line(short).as_deref(),
+            Some("MUpczjUeeXYnS6uOr3b2G461BgylSTmIA3Nkz1LKDOY")
+        );
+    }
+
+    #[test]
+    fn parse_web_token_line_stops_at_boundary() {
+        // token 后跟其它字符（如回车后的提示）时在字符集边界截断
+        let line = "dsh web: http://127.0.0.1:3080/?token=abc123 extra";
+        assert_eq!(parse_web_token_line(line).as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn parse_web_token_line_rejects_non_token_lines() {
+        assert_eq!(parse_web_token_line("[dsh] ready"), None);
+        assert_eq!(parse_web_token_line("dsh web: http://127.0.0.1:3080/"), None);
+        assert_eq!(parse_web_token_line("dsh web: http://x/?token="), None);
+        assert_eq!(parse_web_token_line(""), None);
+    }
+
+    #[test]
+    fn desktop_url_with_token_ignores_advanced_marker() {
+        // 有 token：URL 只带 token（标记由第二跳补上，303 会剥 query）
+        assert_eq!(
+            desktop_url(3080, true, Some("tok1")),
+            "http://127.0.0.1:3080/?token=tok1"
+        );
+        // 兼容模式 + token：同上
+        assert_eq!(
+            desktop_url(3080, false, Some("tok1")),
+            "http://127.0.0.1:3080/?token=tok1"
+        );
+    }
+
+    #[test]
+    fn desktop_url_without_token_keeps_legacy_behavior() {
+        // 老版 dsh（无 token）回退：高级带标记 / 兼容裸根
+        assert_eq!(
+            desktop_url(3080, true, None),
+            "http://127.0.0.1:3080/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform=darwin"
+        );
+        assert_eq!(desktop_url(3080, false, None), "http://127.0.0.1:3080/");
+        // 空 token 视同无 token
+        assert_eq!(
+            desktop_url(3080, true, Some("")),
+            desktop_url(3080, true, None)
+        );
+    }
+
+    #[test]
+    fn normalize_remote_url_accepts_full_and_legacy() {
+        // 完整 URL（新版 dsh web 打印格式）
+        assert_eq!(
+            normalize_remote_url("http://192.168.1.10:3080/?token=abc-DEF_123").as_deref(),
+            Some("http://192.168.1.10:3080/?token=abc-DEF_123")
+        );
+        // 旧格式 host:port 与裸 host（自动补 scheme/端口）
+        assert_eq!(
+            normalize_remote_url("192.168.1.10:3080").as_deref(),
+            Some("http://192.168.1.10:3080/")
+        );
+        assert_eq!(
+            normalize_remote_url("dsh.example.cn").as_deref(),
+            Some("http://dsh.example.cn/")
+        );
+        // https 保留
+        assert_eq!(
+            normalize_remote_url("https://dsh.example.cn/").as_deref(),
+            Some("https://dsh.example.cn/")
+        );
+    }
+
+    #[test]
+    fn normalize_remote_url_rejects_bad_input() {
+        assert_eq!(normalize_remote_url(""), None);
+        assert_eq!(normalize_remote_url("ftp://x"), None);
+        assert_eq!(normalize_remote_url("http://user:pass@h/"), None);
+        assert_eq!(normalize_remote_url("http://h/extra/path"), None);
+        // 无 host
+        assert_eq!(normalize_remote_url("http://"), None);
+    }
+
+    #[test]
+    fn remote_display_hides_token() {
+        assert_eq!(
+            remote_display("http://192.168.1.10:3080/?token=secret123"),
+            "192.168.1.10:3080"
+        );
+        assert_eq!(remote_display("https://dsh.example.cn/"), "dsh.example.cn");
+        // 旧格式原样
+        assert_eq!(remote_display("192.168.1.10:3080"), "192.168.1.10:3080");
+    }
+
+    #[test]
+    fn remote_host_port_resolves_urls() {
+        assert_eq!(
+            remote_host_port("http://192.168.1.10:3080/?token=x"),
+            "192.168.1.10:3080"
+        );
+        // 缺省端口按 scheme 补全
+        assert_eq!(remote_host_port("https://dsh.example.cn/"), "dsh.example.cn:443");
+        assert_eq!(remote_host_port("192.168.1.10:3080"), "192.168.1.10:3080");
+    }
+
+    #[test]
+    fn strip_token_query_removes_only_token() {
+        assert_eq!(
+            strip_token_query("http://127.0.0.1:3080/?token=abc"),
+            "http://127.0.0.1:3080/"
+        );
+        assert_eq!(
+            strip_token_query("http://127.0.0.1:3080/?token=abc&keep=1"),
+            "http://127.0.0.1:3080/?keep=1"
+        );
+        assert_eq!(
+            strip_token_query("http://127.0.0.1:3080/?keep=1&token=abc&keep2=2"),
+            "http://127.0.0.1:3080/?keep=1&keep2=2"
+        );
+        // 旧格式原样返回
+        assert_eq!(strip_token_query("192.168.1.10:3080"), "192.168.1.10:3080");
+    }
+
+    #[test]
+    fn extract_token_from_url_reads_query() {
+        assert_eq!(
+            extract_token_from_url("http://127.0.0.1:3080/?token=abc_DEF-1").as_deref(),
+            Some("abc_DEF-1")
+        );
+        assert_eq!(extract_token_from_url("http://127.0.0.1:3080/"), None);
+        assert_eq!(extract_token_from_url("http://h/?token="), None);
+        assert_eq!(extract_token_from_url("not a url"), None);
+    }
+
+    #[test]
+    fn advanced_marker_query_contains_mode_and_platform() {
+        let q = advanced_marker_query();
+        assert!(q.starts_with("dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform="));
+    }
+
     #[test]
     fn version_key_parses_semver() {
         assert_eq!(version_key(std::path::Path::new("v22.12.0")), (22, 12, 0));
@@ -2875,6 +3360,7 @@ mod unit_tests {
             pet_save_at: Mutex::new(None),
             notify_port: AtomicU16::new(0),
             notify_token: Mutex::new(String::new()),
+            web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
         };
         assert!(!state.restarting.load(Ordering::SeqCst));
