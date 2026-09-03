@@ -531,6 +531,11 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if !cloudflared.is_empty() {
         cmd.env("DSH_CLOUDFLARED_BIN", cloudflared);
     }
+    // GUI 应用（Finder 启动）的 cwd 是 /（不可写）：dsh-mnemon 的 workspace 存储域
+    // 用 process.cwd() 作 .mnemon 根，子进程继承 / 会报 ENOENT 起不来（终端启动
+    // 无此问题，因为终端 cwd 是可写目录）。显式把子进程 cwd 设为 dsh home：
+    // .mnemon 等工作区相对产物统一落进 $DSH_HOME/.mnemon，归属 harness 单一根。
+    cmd.current_dir(dsh_home());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
     {
@@ -759,6 +764,8 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if !cloudflared.is_empty() {
         cmd.env("DSH_CLOUDFLARED_BIN", cloudflared);
     }
+    // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
+    cmd.current_dir(dsh_home());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
