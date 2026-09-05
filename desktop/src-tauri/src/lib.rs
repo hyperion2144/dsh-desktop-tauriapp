@@ -842,6 +842,77 @@ fn clear_web_token(app: &AppHandle) {
     *app.state::<DshState>().web_token.lock().unwrap() = String::new();
 }
 
+/// 用 token 向 dsh web 换取会话 cookie（裸 HTTP，不跟随重定向）。
+/// dsh 对 `GET /?token=x` 回 303 + Set-Cookie（dsh-auth-<authority>=v1.…，
+/// HttpOnly; SameSite=Strict; Path=/; Max-Age=30 天）。
+/// 返回 Set-Cookie 的 cookie 名与原始值（不含属性），失败返回 None。
+fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<(String, String)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(host_port).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let req = format!(
+        "GET /?token={token} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break; // 响应头已完整（303 无 body）
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head.lines().next()?.split_whitespace().nth(1)?.parse::<u16>().ok()?;
+    if !(300..400).contains(&status) {
+        log::warn!("[token] 交换会话 cookie 失败：HTTP {status}");
+        return None;
+    }
+    let line = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))?
+        .to_string();
+    let value_part = line.split_once(':')?.1.trim().to_string();
+    let (name, value_full) = value_part.split_once('=')?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    // value 取到第一个 ';' 为止（后面是 Max-Age/Path 等属性，不能混入值）
+    let value = value_full.split(';').next().unwrap_or("").trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    Some((name.trim().to_string(), value))
+}
+
+/// 把 dsh 会话 cookie 直接种进 webview 的 cookie 存储（WKHTTPCookieStore / WebView2）。
+///
+/// 为什么不走「导航到 ?token= 让 303 种 cookie」：加载页是 tauri://localhost，
+/// 首跳 127.0.0.1 是跨站导航；dsh 的 cookie 是 SameSite=Strict，303 跟随请求
+/// 与 WebKit 异步落库 cookie 存在竞态，抢跑的请求不带 cookie → 渲染 401 白屏，
+/// 等 2.5s 补跳才恢复。原生种 cookie 不经网络层，导航前 cookie 已就绪，
+/// 一次导航直达桌面，全程无白屏。
+fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    let mut cookie = cookie::Cookie::new(name.to_string(), value.to_string());
+    cookie.set_domain(host.to_string());
+    cookie.set_path("/");
+    cookie.set_http_only(true);
+    cookie.set_same_site(cookie::SameSite::Strict);
+    // 30 天，与 dsh 侧 maxAge 一致；过期则重新用 state 里的 token 换
+    cookie.set_max_age(cookie::time::Duration::days(30));
+    if let Err(e) = w.set_cookie(cookie) {
+        // set_cookie 在 Linux 上（webkitgtk）可能不支持：失败则回退旧两段式导航路径
+        log::warn!("[token] 原生种会话 cookie 失败（回退两段式导航）：{e}");
+    } else {
+        log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
+    }
+}
+
 /// 生成本地通知服务器的访问 token（防本机其它进程误触发；非加密学强度）。
 fn random_token() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1391,10 +1462,11 @@ fn advanced_marker_query() -> String {
 /// 轮询等待服务就绪，然后把主窗口导航到 Web GUI；失败则跳错误页。
 /// `nport`/`ntoken` 是通知桥的端口与令牌，导航完成后才注入监听脚本。
 ///
-/// dsh 新版要求 process token：有 token 时两段式导航 ——
-/// 第一跳 `/?token=x`（303 Set-Cookie 换会话 cookie，重定向会剥掉 query 参数），
-/// 2.5s 后第二跳补上高级模式标记并重挂任务通知监听（标记 URL 在 cookie 会话下 200）；
-/// 无 token（老版 dsh）保持旧行为：一跳直达，标记参数随首跳携带。
+/// dsh 新版要求 process token：导航前先用 token 原生换会话 cookie 并种入
+/// webview（exchange_token_for_cookie + seed_session_cookie），然后一次性
+/// 导航到最终页（高级模式带标记）——全程无 401 中间页（无两段式跳转）。
+/// 无 token（老版 dsh）或原生种 cookie 失败时回退：token 随首跳、标记由
+/// 2.5s 补跳携带（旧行为）。
 async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
     // advanced 以当前接入模式为准（高级=带标记桌面 chrome；兼容=标准布局）
@@ -1421,12 +1493,33 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 continue;
             }
-            // URL 在导航时刻构建（token 可能在等待期间才被 stdout 线程捕获）
-            let url = desktop_url(
-                port,
-                advanced,
-                if web_token.is_empty() { None } else { Some(web_token.as_str()) },
-            );
+            // 导航前原生换 cookie：种入 webview 后首次请求即携带，无 401 中间页。
+            // 失败（如 Linux webkitgtk 不支持 set_cookie）回退两段式导航。
+            let mut seeded = false;
+            if !web_token.is_empty() {
+                if let Some((name, value)) =
+                    exchange_token_for_cookie(&format!("127.0.0.1:{port}"), &web_token)
+                {
+                    seed_session_cookie(&app, "127.0.0.1", port, &name, &value);
+                    seeded = true;
+                }
+            }
+            // URL 在导航时刻构建：cookie 已种好时直达最终页（带标记）；
+            // 未种成且有 token 时首跳只带 token（303 会剥参数），标记由补跳携带；
+            // 无 token（老版 dsh）维持旧行为。
+            let url = if seeded {
+                if advanced {
+                    format!("http://127.0.0.1:{port}/?{}", advanced_marker_query())
+                } else {
+                    format!("http://127.0.0.1:{port}/")
+                }
+            } else {
+                desktop_url(
+                    port,
+                    advanced,
+                    if web_token.is_empty() { None } else { Some(web_token.as_str()) },
+                )
+            };
             if let Some(w) = app.get_webview_window("main") {
                 let script = format!("window.location.replace({url:?});");
                 if let Err(e) = w.eval(&script) {
@@ -1437,10 +1530,9 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
                 // 导航后注入监听：0.3.0 在 setup 阶段提前注入，冷启动时脚本
                 // 落在加载页、随导航销毁（通知收不到的根因之二）。
                 inject_task_notifier(app.clone(), nport, &ntoken);
-                // 两段式第二跳：token 交换的 303 已把 query 剥干净，等 cookie 落地后
-                // 补跳带高级模式标记的 URL（此时无需 token，cookie 会话直接 200）。
-                // 兼容模式/老版 dsh（无 token）不补跳，维持单跳。
-                if !web_token.is_empty() && advanced {
+                // 回退路径的第二跳：首跳 token 换 cookie 的 303 会剥 query，等 cookie
+                // 落地后补跳带高级模式标记的 URL。原生种 cookie 成功（seeded）时无需补跳。
+                if !seeded && !web_token.is_empty() && advanced {
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
                         tokio::time::sleep(Duration::from_millis(2500)).await;
@@ -3314,6 +3406,65 @@ mod unit_tests {
     fn advanced_marker_query_contains_mode_and_platform() {
         let q = advanced_marker_query();
         assert!(q.starts_with("dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform="));
+    }
+
+    #[test]
+    fn exchange_token_for_cookie_against_live_dsh() {
+        // 起一个模拟 dsh 的最小 303+Set-Cookie 服务，验证裸 HTTP 交换与解析
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // 校验请求行携带 token
+            assert!(req.starts_with("GET /?token=testtok123 HTTP/1.1"), "请求行: {req}");
+            let resp = concat!(
+                "HTTP/1.1 303 See Other\r\n",
+                "cache-control: no-store\r\n",
+                "location: /\r\n",
+                "set-cookie: dsh-auth-127.0.0.1_3080=v1.abc.def; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict\r\n",
+                "\r\n"
+            );
+            sock.write_all(resp.as_bytes()).unwrap();
+        });
+        let got = exchange_token_for_cookie(&addr.to_string(), "testtok123");
+        server.join().unwrap();
+        assert_eq!(
+            got,
+            Some((
+                "dsh-auth-127.0.0.1_3080".to_string(),
+                "v1.abc.def".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn exchange_token_for_cookie_rejects_non_redirect() {
+        // 对端回 401（token 错）时应返回 None 而非 panic
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf);
+            let _ = sock.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        });
+        let got = exchange_token_for_cookie(&addr.to_string(), "badtoken");
+        server.join().unwrap();
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn exchange_token_for_cookie_unreachable_is_none() {
+        // 连接不存在的端口：应干净返回 None（不 panic、不超时挂死）
+        let got = exchange_token_for_cookie("127.0.0.1:1", "tok");
+        assert_eq!(got, None);
     }
 
     #[test]
