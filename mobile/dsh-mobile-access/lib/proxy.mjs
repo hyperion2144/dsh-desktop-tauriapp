@@ -99,7 +99,18 @@ function isHtmlRequest(req) {
  * @returns {server, listen(port?), close()}
  */
 export function createRewriteProxy(opts) {
-  const { upstreamHost = '127.0.0.1', upstreamPort = 3080, inject = [], auth = null, onInjectSkip = null } = opts;
+  const {
+    upstreamHost = '127.0.0.1',
+    upstreamPort = 3080,
+    inject = [],
+    auth = null,
+    onInjectSkip = null,
+    // dsh web 会话凭证持有者（dsh 0.1.2-rc.1+ 鉴权）：提供 applyTo/refresh/hasCredential；
+    // null = 无凭证模式（老版 dsh 无鉴权，行为同旧版）。
+    upstreamAuth = null,
+    // 401 重换重放的请求体缓存上限：chunked / 超限请求走流式直通（401 不重放，原样透传）。
+    replayBodyLimit = 8 * 1024 * 1024,
+  } = opts;
   const upstream = upstreamHost + ':' + upstreamPort;
 
   const server = http.createServer((req, res) => {
@@ -115,13 +126,22 @@ export function createRewriteProxy(opts) {
       if (r.setCookie) res.setHeader('set-cookie', r.setCookie);
     }
 
-    const headers = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
-    const targetPath = normalizeRemotePath(req.url);
-    const stripped = targetPath !== req.url ? ` (from ${req.url})` : '';
-    accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath + stripped]);
-    const proxyReq = http.request(
-      { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers, agent: false },
-      (proxyRes) => {
+    /**
+     * 转发到上游。allowRetry=true 且持有 upstreamAuth 时：上游 401（dsh 鉴权失效）→
+     * 单次重换凭证并原样重放；仍 401 → 原样透传。bodyBuf：Buffer = 已缓存请求体（可重放）；
+     * null = 流式管道（不可重放，原始 req.pipe 路径）。
+     */
+    const forward = (bodyBuf, allowRetry) => {
+      const buildHeaders = () => {
+        const h = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+        upstreamAuth?.applyTo(h);
+        return h;
+      };
+      const targetPath = normalizeRemotePath(req.url);
+      const stripped = targetPath !== req.url ? ` (from ${req.url})` : '';
+      accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath + stripped]);
+
+      const handleUpstreamResponse = (proxyRes) => {
         const contentType = String(proxyRes.headers['content-type'] ?? '');
         const htmlDoc = contentType.includes('text/html');
         const shouldInject = htmlDoc && !isCompressed(proxyRes.headers) && inject.length > 0;
@@ -188,14 +208,61 @@ export function createRewriteProxy(opts) {
         res.on('close', () => proxyRes.destroy());
         proxyRes.on('error', () => res.destroy());
         proxyRes.on('close', () => { if (!res.writableEnded) res.destroy(); });
-      },
-    );
-    proxyReq.on('error', (err) => {
-      accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath, '= ERR', err.code ?? err.message]);
-      if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      try { res.end(`dsh-mobile-access: 无法连接上游 ${upstream} | ${err.message}`); } catch { /* noop */ }
-    });
-    req.pipe(proxyReq);
+      };
+
+      const send = (isRetry) => {
+        const proxyReq = http.request(
+          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: false },
+          (proxyRes) => {
+            // dsh 401：凭证失效 → 单次重换（重新自取 token + 换新 cookie）并原样重放；仍 401 透传
+            if (!isRetry && allowRetry && upstreamAuth && proxyRes.statusCode === 401) {
+              proxyRes.pause();
+              void Promise.resolve()
+                .then(() => upstreamAuth.refresh())
+                .then((ok) => {
+                  if (ok) {
+                    accessLog(['  <-', 401, 'dsh-auth', '→ 凭证已重换，重放', targetPath]);
+                    try { proxyRes.destroy(); } catch { /* noop */ }
+                    send(true);
+                  } else {
+                    accessLog(['  <-', 401, 'dsh-auth', '→ 重换失败，透传', targetPath]);
+                    handleUpstreamResponse(proxyRes);
+                  }
+                })
+                .catch(() => {
+                  try { proxyRes.resume(); } catch { /* noop */ }
+                  handleUpstreamResponse(proxyRes);
+                });
+              return;
+            }
+            handleUpstreamResponse(proxyRes);
+          },
+        );
+        proxyReq.on('error', (err) => {
+          accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath, '= ERR', err.code ?? err.message]);
+          if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+          try { res.end(`dsh-mobile-access: 无法连接上游 ${upstream} | ${err.message}`); } catch { /* noop */ }
+        });
+        if (bodyBuf === null) req.pipe(proxyReq);
+        else proxyReq.end(bodyBuf);
+      };
+      send(false);
+    };
+
+    // 可重放通道判定：持有凭证持有者，且请求体有界可缓存（GET/HEAD 无体；有体需 content-length ≤ 上限）。
+    // chunked / 超限 / 无凭证 → 流式直通（401 不重放，行为同旧版）。
+    const declaredLen = Number(req.headers['content-length'] || 0);
+    const chunked = /chunked/i.test(String(req.headers['transfer-encoding'] ?? ''));
+    const bodiless = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+    if (!upstreamAuth || (!bodiless && (chunked || declaredLen > replayBodyLimit))) {
+      forward(null, false);
+      return;
+    }
+    const chunks = [];
+    let aborted = false;
+    req.on('data', (c) => chunks.push(c));
+    req.on('error', () => { aborted = true; try { res.destroy(); } catch { /* noop */ } });
+    req.on('end', () => { if (!aborted) forward(Buffer.concat(chunks), true); });
   });
 
   // WebSocket upgrade：全头回传 + 首帧先写（对齐 pocket）
@@ -210,6 +277,8 @@ export function createRewriteProxy(opts) {
       }
     }
     const headers = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+    // dsh 会话凭证：upgrade 请求同样附带（401 不重放——客户端重连即拿新凭证）
+    upstreamAuth?.applyTo(headers);
     const wsPath = normalizeRemotePath(req.url);
     accessLog(['WS', req.method, req.headers.host ?? '-', '->', wsPath]);
     const proxyReq = http.request({

@@ -75,6 +75,13 @@ if nc -z 127.0.0.1 "$LANE" 2>/dev/null; then
   MINT_CODE=$(echo "$MINT" | grep -o '"ok":true' | head -1 || true)
   if [ "$PAIR_CODE" = "200" ] && [ -n "$MINT_CODE" ]; then
     echo "移动 lane OK：/pair=$PAIR_CODE，mint 返回 ok:true ✓"
+    # dsh 会话凭证状态（dsh 0.1.2-rc.1+ token 鉴权：lane 应持凭证，否则手机访问上游 401）
+    INFO=$(curl -s --max-time 5 "http://127.0.0.1:$LANE/api/pair/info" 2>/dev/null || echo "")
+    case "$INFO" in
+      *'"dshAuth":true'*)  echo "移动 lane dshAuth=true ✓（凭证链路正常）" ;;
+      *'"dshAuth":false'*) echo "FAIL: 移动 lane dshAuth=false（dsh 未提供 token 或交换失败，手机访问将 401）"; exit 1 ;;
+      *)                   echo "WARN: info 无 dshAuth 字段（旧版 lane 或 dsh 无鉴权，跳过）" ;;
+    esac
   else
     echo "FAIL: 移动 lane 异常 —— /pair=$PAIR_CODE mint=${MINT_CODE:-无}"
     exit 1

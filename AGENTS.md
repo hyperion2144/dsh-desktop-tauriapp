@@ -70,7 +70,7 @@
   DSH_MOBILE_ENABLED / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN。
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + @dsh-external/dsh-mobile-nav）
   → materialize 挂共享池 → desktop-plugin-inject.yml 三行 --patch。
-- 设备会话在内存（重启需重配对）；持久化（$DSH_HOME 0600 文件）为待办。
+ - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
 - 测试：mobile-access `npm test`（node 18 例）、shell-web 3 例、vendor 1 例、
   expo-app `npm test`（vitest 7 例）；cargo test 10 例。
 
