@@ -891,7 +891,6 @@ name = "dsh-desktop-tauriapp"
 version = "0.7.0"
 dependencies = [
  "base64 0.22.1",
- "cookie",
  "libc",
  "log",
  "netstat2",

@@ -569,7 +569,14 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
         thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
+            // split(b'\n') + from_utf8_lossy：`.lines().map_while(Result::ok)` 遇到
+            // 非法 UTF-8 字节会静默终止整个转发循环（控制台输出中断的根因）
+            for raw in BufReader::new(out).split(b'\n') {
+                let Ok(bytes) = raw else { break };
+                let mut line = String::from_utf8_lossy(&bytes).to_string();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
@@ -584,7 +591,13 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
         thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
+            // 同 stdout：lossy 解码，非法字节不断流
+            for raw in BufReader::new(err).split(b'\n') {
+                let Ok(bytes) = raw else { break };
+                let mut line = String::from_utf8_lossy(&bytes).to_string();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
                 log::warn!("[dsh] {line}");
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
@@ -779,7 +792,13 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
         thread::spawn(move || {
-            for line in BufReader::new(out).lines().map_while(Result::ok) {
+            // split(b'\n') + from_utf8_lossy：非法 UTF-8 字节不断流（同 unix 分支）
+            for raw in BufReader::new(out).split(b'\n') {
+                let Ok(bytes) = raw else { break };
+                let mut line = String::from_utf8_lossy(&bytes).to_string();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
@@ -794,7 +813,13 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
         thread::spawn(move || {
-            for line in BufReader::new(err).lines().map_while(Result::ok) {
+            // 同 stdout：lossy 解码，非法字节不断流
+            for raw in BufReader::new(err).split(b'\n') {
+                let Ok(bytes) = raw else { break };
+                let mut line = String::from_utf8_lossy(&bytes).to_string();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
                 log::warn!("[dsh] {line}");
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
@@ -840,81 +865,6 @@ fn clear_web_token(app: &AppHandle) {
     *app.state::<DshState>().web_token.lock().unwrap() = String::new();
 }
 
-/// 用 token 向 dsh web 换取会话 cookie（裸 HTTP，不跟随重定向）。
-/// dsh 对 `GET /?token=x` 回 303 + Set-Cookie（dsh-auth-<authority>=v1.…，
-/// HttpOnly; SameSite=Strict; Path=/; Max-Age=30 天）。
-/// 返回 Set-Cookie 的 cookie 名与原始值（不含属性），失败返回 None。
-fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<(String, String)> {
-    use std::io::{Read, Write};
-    let mut stream = std::net::TcpStream::connect(host_port).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let req = format!(
-        "GET /?token={token} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
-    );
-    stream.write_all(req.as_bytes()).ok()?;
-    let mut buf = Vec::with_capacity(8192);
-    let mut tmp = [0u8; 4096];
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-        }
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break; // 响应头已完整（303 无 body）
-        }
-    }
-    let head = String::from_utf8_lossy(&buf);
-    let status = head.lines().next()?.split_whitespace().nth(1)?.parse::<u16>().ok()?;
-    if !(300..400).contains(&status) {
-        log::warn!("[token] 交换会话 cookie 失败：HTTP {status}");
-        return None;
-    }
-    let line = head
-        .lines()
-        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))?
-        .to_string();
-    let value_part = line.split_once(':')?.1.trim().to_string();
-    let (name, value_full) = value_part.split_once('=')?;
-    if name.trim().is_empty() {
-        return None;
-    }
-    // value 取到第一个 ';' 为止（后面是 Max-Age/Path 等属性，不能混入值）
-    let value = value_full.split(';').next().unwrap_or("").trim().to_string();
-    if value.is_empty() {
-        return None;
-    }
-    Some((name.trim().to_string(), value))
-}
-
-/// 把 dsh 会话 cookie 直接种进 webview 的 cookie 存储（WKHTTPCookieStore / WebView2）。
-///
-/// 为什么不走「导航到 ?token= 让 303 种 cookie」：加载页是 tauri://localhost，
-/// 首跳 127.0.0.1 是跨站导航；dsh 的 cookie 是 SameSite=Strict，303 跟随请求
-/// 与 WebKit 异步落库 cookie 存在竞态，抢跑的请求不带 cookie → 渲染 401 白屏，
-/// 等 2.5s 补跳才恢复。原生种 cookie 不经网络层，导航前 cookie 已就绪，
-/// 一次导航直达桌面，全程无白屏。
-fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) -> bool {
-    let Some(w) = app.get_webview_window("main") else { return false };
-    let mut cookie = cookie::Cookie::new(name.to_string(), value.to_string());
-    cookie.set_domain(host.to_string());
-    cookie.set_path("/");
-    cookie.set_http_only(true);
-    cookie.set_same_site(cookie::SameSite::Strict);
-    // 30 天，与 dsh 侧 maxAge 一致；过期则重新用 state 里的 token 换
-    cookie.set_max_age(cookie::time::Duration::days(30));
-    match w.set_cookie(cookie) {
-        // set_cookie 在 Linux 上（webkitgtk）可能不支持：失败则回退旧两段式导航路径
-        Err(e) => {
-            log::warn!("[token] 原生种会话 cookie 失败（回退两段式导航）：{e}");
-            false
-        }
-        Ok(()) => {
-            log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
-            true
-        }
-    }
-}
 
 /// 生成本地通知服务器的访问 token（防本机其它进程误触发；非加密学强度）。
 fn random_token() -> String {
@@ -1421,28 +1371,7 @@ fn strip_web_profile_plugin_bundle() {
     }
 }
 
-/// 桌面壳加载 Web GUI 的地址。
-/// `advanced=true`（本次由桌面壳 spawn 了实例）：附加 desktop 标记，插件 client
-/// 在原生布局内注入局部拖拽区（不禁用 ui-layout）；
-/// `advanced=false`（复用了外部已有实例）：不带标记，标准布局 + 系统原生标题栏。
-/// 普通浏览器/无标记访问不激活桌面 UI。
-/// `token` 为 dsh web 的 process token（新版本必需，否则 401；None/空 = 老版回退）。
-/// 注意：带 token 的 URL 经 303 重定向到 `/` 时 query 参数会被剥掉，因此有 token
-/// 时标记参数不与 token 同跳（wait_ready_and_navigate 的两段式导航负责补跳标记）。
-fn desktop_url(port: u16, advanced: bool, token: Option<&str>) -> String {
-    match token.filter(|t| !t.is_empty()) {
-        Some(tok) => format!("http://127.0.0.1:{port}/?token={tok}"),
-        None if advanced => {
-            let platform = desktop_platform_tag();
-            format!(
-                "http://127.0.0.1:{port}/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={platform}"
-            )
-        }
-        None => format!("http://127.0.0.1:{port}/"),
-    }
-}
-
-/// 当前平台的桌面标记值（client 端 environment.ts 按同名约定解析）。
+/// 当前平台的桌面标记值（get_desktop_client_environment 下发给 client）。
 fn desktop_platform_tag() -> &'static str {
     if cfg!(target_os = "macos") {
         "darwin"
@@ -1453,46 +1382,38 @@ fn desktop_platform_tag() -> &'static str {
     }
 }
 
-/// 在已建立的会话（cookie 已换到）之上追加高级模式标记参数。
-/// 无 token 的新版 dsh 上无意义（401），但有 token 交换后这是激活桌面 chrome 的唯一途径。
-fn advanced_marker_query() -> String {
-    format!(
-        "dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform={}",
-        desktop_platform_tag()
-    )
-}
-
 /// 轮询等待服务就绪，然后把主窗口导航到 Web GUI。
 /// `nport`/`ntoken` 是通知桥的端口与令牌，导航完成后才注入监听脚本。
 ///
-/// 启动无超时限制（产品要求）：spawn 场景必须等到 stdout 打印 process token、
-/// 并原生换取/种入会话 cookie 成功后，才离开启动界面一次性导航到最终页
-/// （高级模式带标记）。dsh 的 stdout 全程经 `dsh-console` 事件流式显示在
-/// 启动页控制台，dsh 未就绪/挂掉都停留在启动界面（只有启动界面与 webview
-/// 两个界面，不跳错误页）。仅平台不支持 set_cookie 时回退旧两段式
-/// （token 首跳 + 2.5s 补跳）；老版 dsh 复用外部实例时按无 token 直连（旧行为）。
+/// 启动无超时限制（产品要求）：spawn 场景必须等到 stdout 打印 process token
+/// 才导航。导航即直接打开 dsh 打印的启动地址（与浏览器打开行为一致：
+/// token 认证 → 303 换会话 cookie → 落到干净根路径），无中间跳转、无白屏。
+/// 等待期间 dsh 的 stdout 全程经 `dsh-console` 事件流式显示在启动页控制台；
+/// dsh 未就绪/挂掉都停留在启动界面（只有启动界面与 webview 两个界面）。
+/// 高级/兼容桌面 chrome 由 client 经 get_desktop_client_environment 查询
+/// 壳状态自行激活（不再使用 URL 标记）。
 async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
-    // advanced 以当前接入模式为准（高级=带标记桌面 chrome；兼容=标准布局）
-    let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
     // 远程模式：不探测/不 spawn 本地，直接导航远程页面
     if let Some(addr) = load_desktop_settings().remote_addr {
+        let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
         navigate_remote(&app, &addr, advanced);
         return;
     }
     // spawn 场景才等 stdout 的 token 行（外部复用场景的 token 只能来自粘贴）
     let expect_token = state.spawned_this_run.load(Ordering::SeqCst);
-    let mut exchange_attempts = 0u32;
     loop {
-        // spawn 本身失败：错误页已由 setup/重启流程显示，这里不再二次导航
+        // spawn 本身失败：错误提示已由 setup/重启流程给出，这里不再二次导航
         if state.spawn_failed.load(Ordering::SeqCst) {
             return;
         }
+        if state.quitting.load(Ordering::SeqCst) {
+            return;
+        }
         let web_token = state.web_token.lock().unwrap().clone();
-        let token_ready = !web_token.is_empty();
         // spawn 场景：无限等待 stdout 打印 token（无超时）；dsh 未就绪/挂掉都
         // 停留在启动界面（其输出已流式上屏，供用户查看）
-        if expect_token && !token_ready {
+        if expect_token && web_token.is_empty() {
             tokio::time::sleep(Duration::from_millis(400)).await;
             continue;
         }
@@ -1500,73 +1421,39 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
-        // 就绪：原生交换 cookie 并种入 webview；成功才离开启动界面。
-        // 交换失败（dsh 刚就绪的瞬时窗口）无限重试，同样停留在启动界面。
-        let mut seeded = false;
-        if token_ready {
-            match exchange_token_for_cookie(&format!("127.0.0.1:{port}"), &web_token) {
-                Some((name, value)) => {
-                    seeded = seed_session_cookie(&app, "127.0.0.1", port, &name, &value);
-                }
-                None => {
-                    exchange_attempts += 1;
-                    if exchange_attempts % 5 == 1 {
-                        log::warn!(
-                            "[token] 会话 cookie 交换未成功，继续等待（第 {exchange_attempts} 次）"
-                        );
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
-            }
-        }
-        // 最终 URL：种 cookie 成功 → 一次性直达（advanced 带标记）；
-        // 种失败（平台不支持）回退旧行为：token 随首跳、标记由补跳携带；
-        // 无 token（老版 dsh 外部实例）维持无 token 直连。
-        let url = if seeded {
-            if advanced {
-                format!("http://127.0.0.1:{port}/?{}", advanced_marker_query())
-            } else {
-                format!("http://127.0.0.1:{port}/")
-            }
+        // 一次导航直达：URL 即 dsh 打印的启动地址。认证/换 cookie 由 dsh 303
+        // 自然完成（与浏览器行为一致）；桌面 chrome 由 client 经 IPC 查询壳状态
+        // 自行激活，无二次跳转。
+        let url = if web_token.is_empty() {
+            format!("http://127.0.0.1:{port}/")
         } else {
-            desktop_url(
-                port,
-                advanced,
-                if token_ready { Some(web_token.as_str()) } else { None },
-            )
+            format!("http://127.0.0.1:{port}/?token={web_token}")
         };
         if let Some(w) = app.get_webview_window("main") {
-            let script = format!("window.location.replace({url:?});");
-            if let Err(e) = w.eval(&script) {
+            if let Err(e) = w.eval(&format!("window.location.replace({url:?});")) {
                 log::warn!("窗口导航失败：{e}");
-                // 窗口不可用即无界面可去：保持现状返回（不跳错误页）
                 return;
             }
-            // 导航后注入监听：0.3.0 在 setup 阶段提前注入，冷启动时脚本
-            // 落在加载页、随导航销毁（通知收不到的根因之二）。
-            inject_task_notifier(app.clone(), nport, &ntoken);
-            // 回退路径的第二跳：首跳 token 换 cookie 的 303 会剥 query，等 cookie
-            // 落地后补跳带高级模式标记的 URL。原生种 cookie 成功（seeded）时无需补跳。
-            if !seeded && token_ready && advanced {
-                let handle = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(2500)).await;
-                    let marked =
-                        format!("http://127.0.0.1:{port}/?{}", advanced_marker_query());
-                    if let Some(w) = handle.get_webview_window("main") {
-                        if let Err(e) =
-                            w.eval(&format!("window.location.replace({marked:?});"))
-                        {
-                            log::warn!("[nav] 高级模式标记补跳失败：{e}");
-                        } else {
-                            log::info!("[nav] 已补跳高级模式标记 URL");
-                        }
+            // 等 303 换 cookie 完成：主框架 URL 变为干净根路径（无超时限制，
+            // 退出/失败标志可打断）。此后才视为进入 webview。
+            loop {
+                if state.quitting.load(Ordering::SeqCst)
+                    || state.spawn_failed.load(Ordering::SeqCst)
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                if let Ok(u) = w.url() {
+                    if u.host_str() == Some("127.0.0.1")
+                        && u.port() == Some(port)
+                        && u.path() == "/"
+                        && u.query().is_none()
+                    {
+                        break;
                     }
-                    // 补跳会再次整页加载，任务通知监听随页面销毁，需要重挂
-                    inject_task_notifier(handle, nport, &ntoken);
-                });
+                }
             }
+            inject_task_notifier(app.clone(), nport, &ntoken);
         }
         log::info!("本地服务就绪，已导航到 {url}");
         set_status(&app, STATUS_READY, "运行中");
@@ -1574,7 +1461,6 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
         return;
     }
 }
-
 /// 主窗口跳转到本地错误页并发系统通知。
 fn show_error(app: &AppHandle, reason: &str) {
     if let Some(w) = app.get_webview_window("main") {
@@ -1913,6 +1799,18 @@ fn navigate_guard(url: &tauri::Url) -> bool {
 #[tauri::command]
 fn get_mode_prompt_needed(state: tauri::State<DshState>) -> bool {
     state.mode_prompt_needed.load(Ordering::SeqCst)
+}
+
+/// 查询桌面 client 渲染环境（替代 URL 标记）：
+/// token 交换的 303 重定向会剥掉 query 参数，URL 标记无法与 token 同跳，
+/// 故由壳按当前接入模式/平台直接下发。client 拿到 advanced 才装桌面 chrome。
+#[tauri::command]
+fn get_desktop_client_environment(state: tauri::State<DshState>) -> serde_json::Value {
+    let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
+    serde_json::json!({
+        "mode": if advanced { "advanced" } else { "compatibility" },
+        "platform": desktop_platform_tag(),
+    })
 }
 
 /// 客户端诊断上报：把页面侧外链拦截结果写进应用日志，便于排查「点击链接无反应」。
@@ -2354,29 +2252,6 @@ fn remote_host_port(addr: &str) -> String {
     addr.to_string()
 }
 
-/// 去掉 URL 查询串里的 token= 参数（保留其余参数），用于 cookie 建立后的干净导航。
-fn strip_token_query(url: &str) -> String {
-    match tauri::Url::parse(url) {
-        Ok(mut u) => {
-            let pairs: Vec<(String, String)> = u
-                .query_pairs()
-                .filter(|(k, _)| k != "token")
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect();
-            u.set_query(None);
-            if !pairs.is_empty() {
-                let q = pairs
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join("&");
-                u.set_query(Some(&q));
-            }
-            u.to_string()
-        }
-        Err(_) => url.to_string(),
-    }
-}
 
 /// 从用户粘贴的 dsh web 启动 URL 里提取 process token（没有则 None）。
 fn extract_token_from_url(input: &str) -> Option<String> {
@@ -2581,9 +2456,9 @@ fn remote_has_plugin(addr: &str) -> bool {
 }
 
 /// 导航到远程 dsh 页面。`addr` 为完整 URL（新版 dsh web 含 process token）
-/// 或旧格式 host:port（自动补 http://）。高级模式在无 token / 已带标记的场景外
-/// 统一两段式：token 交换的 303 会剥 query，2.5s 后补跳带标记 URL（cookie 会话 200）。
-/// 远程缺插件时提示建议切兼容，不阻塞。
+/// 或旧格式 host:port（自动补 http://）。
+/// 桌面 chrome 由 client 经 IPC 查询壳状态自行激活（不再使用 URL 标记，
+/// 也就不存在 303 剥参数后的二次补跳）。远程缺插件时提示建议切兼容，不阻塞。
 fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     let host_port = remote_host_port(addr);
     let host = host_port.split(':').next().unwrap_or(addr).to_string();
@@ -2597,8 +2472,8 @@ fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
         log::warn!("[remote] 远程未检测到 dsh-desktop-tauriapp 插件，建议使用兼容模式");
         show_notification(app, "远程 dsh 未安装桌面插件", "高级模式需要远程安装 dsh-desktop-tauriapp，建议改用兼容模式");
     }
-    // 基础 URL：完整 URL 原样用（含 token/旧参数）；旧格式补 scheme 与根路径。
-    let base = if tauri::Url::parse(addr)
+    // 完整 URL 原样用（含 token/旧参数）；旧格式补 scheme 与根路径
+    let url = if tauri::Url::parse(addr)
         .map(|u| u.scheme() == "http" || u.scheme() == "https")
         .unwrap_or(false)
     {
@@ -2606,38 +2481,8 @@ fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     } else {
         format!("http://{addr}/")
     };
-    let has_token = tauri::Url::parse(&base)
-        .ok()
-        .map(|u| u.query_pairs().any(|(k, _)| k == "token"))
-        .unwrap_or(false);
-    let mut url = base.clone();
-    let mut follow_up: Option<String> = None;
-    if advanced && !base.contains("dsh-desktop-tauriapp-mode=") {
-        if has_token {
-            // 有 token：首跳先交换 cookie（参数会被 303 剥掉），补跳再带标记
-            url = base.clone();
-            follow_up = Some(format!("{}?{}", strip_token_query(&base), advanced_marker_query()));
-        } else {
-            // 无 token（老版 dsh 或已建立 cookie 会话）：标记随首跳
-            let sep = if base.contains('?') { "&" } else { "?" };
-            url = format!("{base}{sep}{}", advanced_marker_query());
-        }
-    }
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.eval(&format!("window.location.replace({url:?});"));
-        if let Some(marked) = follow_up {
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(2500)).await;
-                if let Some(w) = handle.get_webview_window("main") {
-                    if let Err(e) = w.eval(&format!("window.location.replace({marked:?});")) {
-                        log::warn!("[remote] 高级模式标记补跳失败：{e}");
-                    } else {
-                        log::info!("[remote] 已补跳高级模式标记 URL");
-                    }
-                }
-            });
-        }
     }
     log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
     set_status(app, STATUS_REMOTE, &format!("远程 {}", remote_display(addr)));
@@ -2913,7 +2758,7 @@ fn toggle_desktop_mode(app: &AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -2931,10 +2776,18 @@ pub fn run() {
             tauri_plugin_window_state::Builder::default()
                 .with_denylist(&["pet"])
                 .build(),
-        )
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        );
+    // 测试钩子：DSH_DESKTOP_NO_SINGLETON=1 时跳过单实例互斥（隔离 E2E 用，
+    // 允许测试实例与正在运行的正式实例并行，互不干扰）
+    let builder = if std::env::var("DSH_DESKTOP_NO_SINGLETON").as_deref() == Ok("1") {
+        log::info!("[test] DSH_DESKTOP_NO_SINGLETON=1：跳过单实例互斥");
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main(app);
         }))
+    };
+    builder
         .invoke_handler(tauri::generate_handler![
             pet_show_main,
             pet_hide,
@@ -2944,6 +2797,7 @@ pub fn run() {
             open_external,
             choose_desktop_mode,
             get_mode_prompt_needed,
+            get_desktop_client_environment,
             log_diag,
             log_console,
             get_dsh_status,
@@ -3297,34 +3151,6 @@ mod unit_tests {
         assert_eq!(parse_web_token_line(""), None);
     }
 
-    #[test]
-    fn desktop_url_with_token_ignores_advanced_marker() {
-        // 有 token：URL 只带 token（标记由第二跳补上，303 会剥 query）
-        assert_eq!(
-            desktop_url(3080, true, Some("tok1")),
-            "http://127.0.0.1:3080/?token=tok1"
-        );
-        // 兼容模式 + token：同上
-        assert_eq!(
-            desktop_url(3080, false, Some("tok1")),
-            "http://127.0.0.1:3080/?token=tok1"
-        );
-    }
-
-    #[test]
-    fn desktop_url_without_token_keeps_legacy_behavior() {
-        // 老版 dsh（无 token）回退：高级带标记 / 兼容裸根
-        assert_eq!(
-            desktop_url(3080, true, None),
-            "http://127.0.0.1:3080/?dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform=darwin"
-        );
-        assert_eq!(desktop_url(3080, false, None), "http://127.0.0.1:3080/");
-        // 空 token 视同无 token
-        assert_eq!(
-            desktop_url(3080, true, Some("")),
-            desktop_url(3080, true, None)
-        );
-    }
 
     #[test]
     fn normalize_remote_url_accepts_full_and_legacy() {
@@ -3382,24 +3208,6 @@ mod unit_tests {
     }
 
     #[test]
-    fn strip_token_query_removes_only_token() {
-        assert_eq!(
-            strip_token_query("http://127.0.0.1:3080/?token=abc"),
-            "http://127.0.0.1:3080/"
-        );
-        assert_eq!(
-            strip_token_query("http://127.0.0.1:3080/?token=abc&keep=1"),
-            "http://127.0.0.1:3080/?keep=1"
-        );
-        assert_eq!(
-            strip_token_query("http://127.0.0.1:3080/?keep=1&token=abc&keep2=2"),
-            "http://127.0.0.1:3080/?keep=1&keep2=2"
-        );
-        // 旧格式原样返回
-        assert_eq!(strip_token_query("192.168.1.10:3080"), "192.168.1.10:3080");
-    }
-
-    #[test]
     fn extract_token_from_url_reads_query() {
         assert_eq!(
             extract_token_from_url("http://127.0.0.1:3080/?token=abc_DEF-1").as_deref(),
@@ -3408,71 +3216,6 @@ mod unit_tests {
         assert_eq!(extract_token_from_url("http://127.0.0.1:3080/"), None);
         assert_eq!(extract_token_from_url("http://h/?token="), None);
         assert_eq!(extract_token_from_url("not a url"), None);
-    }
-
-    #[test]
-    fn advanced_marker_query_contains_mode_and_platform() {
-        let q = advanced_marker_query();
-        assert!(q.starts_with("dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform="));
-    }
-
-    #[test]
-    fn exchange_token_for_cookie_against_live_dsh() {
-        // 起一个模拟 dsh 的最小 303+Set-Cookie 服务，验证裸 HTTP 交换与解析
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            // 校验请求行携带 token
-            assert!(req.starts_with("GET /?token=testtok123 HTTP/1.1"), "请求行: {req}");
-            let resp = concat!(
-                "HTTP/1.1 303 See Other\r\n",
-                "cache-control: no-store\r\n",
-                "location: /\r\n",
-                "set-cookie: dsh-auth-127.0.0.1_3080=v1.abc.def; Max-Age=2592000; Path=/; HttpOnly; SameSite=Strict\r\n",
-                "\r\n"
-            );
-            sock.write_all(resp.as_bytes()).unwrap();
-        });
-        let got = exchange_token_for_cookie(&addr.to_string(), "testtok123");
-        server.join().unwrap();
-        assert_eq!(
-            got,
-            Some((
-                "dsh-auth-127.0.0.1_3080".to_string(),
-                "v1.abc.def".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn exchange_token_for_cookie_rejects_non_redirect() {
-        // 对端回 401（token 错）时应返回 None 而非 panic
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (mut sock, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 2048];
-            let _ = sock.read(&mut buf);
-            let _ = sock.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
-        });
-        let got = exchange_token_for_cookie(&addr.to_string(), "badtoken");
-        server.join().unwrap();
-        assert_eq!(got, None);
-    }
-
-    #[test]
-    fn exchange_token_for_cookie_unreachable_is_none() {
-        // 连接不存在的端口：应干净返回 None（不 panic、不超时挂死）
-        let got = exchange_token_for_cookie("127.0.0.1:1", "tok");
-        assert_eq!(got, None);
     }
 
     #[test]
