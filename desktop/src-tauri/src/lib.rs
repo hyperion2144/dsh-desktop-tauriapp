@@ -865,6 +865,113 @@ fn clear_web_token(app: &AppHandle) {
     *app.state::<DshState>().web_token.lock().unwrap() = String::new();
 }
 
+/// 用 token 向 dsh web 换取会话 cookie（裸 HTTP GET，不跟随重定向）。
+/// dsh 对 `GET /?token=x` 回 303 + Set-Cookie（dsh-auth-<authority>=v1.…，
+/// HttpOnly; SameSite=Strict; Path=/; Max-Age=30 天）。
+/// 返回 Set-Cookie 的 cookie 名与值（不含属性），失败返回 None。
+fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<(String, String)> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(host_port).ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let req = format!(
+        "GET /?token={token} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut buf = Vec::with_capacity(8192);
+    let mut tmp = [0u8; 4096];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break; // 303 无 body，响应头收齐即止
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head.lines().next()?.split_whitespace().nth(1)?.parse::<u16>().ok()?;
+    if !(300..400).contains(&status) {
+        log::warn!("[token] 交换会话 cookie 失败：HTTP {status}");
+        return None;
+    }
+    let line = head
+        .lines()
+        .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))?
+        .to_string();
+    let value_part = line.split_once(':')?.1.trim().to_string();
+    let (name, value_full) = value_part.split_once('=')?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    // value 取到第一个 ';' 为止（后面是 Max-Age/Path 等属性，不能混入值）
+    let value = value_full.split(';').next().unwrap_or("").trim().to_string();
+    if value.is_empty() {
+        return None;
+    }
+    Some((name.trim().to_string(), value))
+}
+
+/// 把会话 cookie 直接种进主窗口 webview 的 cookie 存储（WKHTTPCookieStore /
+/// WebView2，与导航请求同一存储）。种入副本用 SameSite=Lax 而非 dsh 原响应的
+/// Strict：主窗口从加载页（tauri://localhost）导航到 127.0.0.1 是跨站顶层 GET
+/// 导航，Strict cookie 不随行（WebKit 拒发），Lax 顶层导航始终携带；dsh 侧
+/// 只按名字取值验签，不关心存储属性。成功返回 true。
+fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) -> bool {
+    let Some(w) = app.get_webview_window("main") else { return false };
+    let mut cookie = cookie::Cookie::new(name.to_string(), value.to_string());
+    cookie.set_domain(host.to_string());
+    cookie.set_path("/");
+    cookie.set_http_only(true);
+    cookie.set_same_site(cookie::SameSite::Lax);
+    // 30 天，与 dsh 侧 maxAge 一致；过期则重新用 state 里的 token 换
+    cookie.set_max_age(cookie::time::Duration::days(30));
+    match w.set_cookie(cookie) {
+        // set_cookie 在 Linux 上（webkitgtk）可能不支持：失败则回退旧导航路径
+        Err(e) => {
+            log::warn!("[token] 原生种会话 cookie 失败（回退 token 直开路径）：{e}");
+            false
+        }
+        Ok(()) => {
+            log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
+            true
+        }
+    }
+}
+
+/// 会话有效性验证：带上会话 cookie 请求根路径，服务端 200 = cookie 可通过认证。
+/// 全程 Rust 原生 HTTP，不依赖任何界面状态。
+fn session_cookie_accepts(host_port: &str, name: &str, value: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect(host_port) else { return false };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: {host_port}\r\nCookie: {name}={value}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    let mut buf = Vec::with_capacity(2048);
+    let mut tmp = [0u8; 2048];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+        }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    matches!(
+        head.lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse::<u16>().ok()),
+        Some(200)
+    )
+}
 
 /// 生成本地通知服务器的访问 token（防本机其它进程误触发；非加密学强度）。
 fn random_token() -> String {
@@ -1385,13 +1492,13 @@ fn desktop_platform_tag() -> &'static str {
 /// 轮询等待服务就绪，然后把主窗口导航到 Web GUI。
 /// `nport`/`ntoken` 是通知桥的端口与令牌，导航完成后才注入监听脚本。
 ///
-/// 启动无超时限制（产品要求）：spawn 场景必须等到 stdout 打印 process token
-/// 才导航。导航即直接打开 dsh 打印的启动地址（与浏览器打开行为一致：
-/// token 认证 → 303 换会话 cookie → 落到干净根路径），无中间跳转、无白屏。
-/// 等待期间 dsh 的 stdout 全程经 `dsh-console` 事件流式显示在启动页控制台；
-/// dsh 未就绪/挂掉都停留在启动界面（只有启动界面与 webview 两个界面）。
-/// 高级/兼容桌面 chrome 由 client 经 get_desktop_client_environment 查询
-/// 壳状态自行激活（不再使用 URL 标记）。
+/// 启动无超时限制（产品要求），且严格按「后台交换成功才进入」执行：
+/// ① spawn 场景无限等待 stdout 打印 process token（输出持续上屏）；
+/// ② 在后台用 token 原生换取会话 cookie（不经任何界面），种入 webview，
+///    并带 cookie 请求根路径确认服务端 200 —— 三步全绿才切换；
+/// ③ 任一步失败都留在启动界面重试（dsh 输出持续上屏），绝不带着失败
+///    状态跳转。成功后主窗口一次性直达根路径（cookie 随行，直接 200），
+///    桌面 chrome 由 client 经 IPC 查询壳状态自行激活。
 async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
     // 远程模式：不探测/不 spawn 本地，直接导航远程页面
@@ -1402,6 +1509,7 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
     }
     // spawn 场景才等 stdout 的 token 行（外部复用场景的 token 只能来自粘贴）
     let expect_token = state.spawned_this_run.load(Ordering::SeqCst);
+    let mut rounds = 0u32;
     loop {
         // spawn 本身失败：错误提示已由 setup/重启流程给出，这里不再二次导航
         if state.spawn_failed.load(Ordering::SeqCst) {
@@ -1421,37 +1529,60 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
-        // 一次导航直达：URL 即 dsh 打印的启动地址。认证/换 cookie 由 dsh 303
-        // 自然完成（与浏览器行为一致）；桌面 chrome 由 client 经 IPC 查询壳状态
-        // 自行激活，无二次跳转。
-        let url = if web_token.is_empty() {
-            format!("http://127.0.0.1:{port}/")
-        } else {
-            format!("http://127.0.0.1:{port}/?token={web_token}")
+        let host_port = format!("127.0.0.1:{port}");
+        // 无 token（老版 dsh 外部实例且未粘贴 token）：无鉴权直连（旧行为）
+        if web_token.is_empty() {
+            let url = format!("http://127.0.0.1:{port}/");
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval(&format!("window.location.replace({url:?});"));
+                inject_task_notifier(app.clone(), nport, &ntoken);
+            }
+            log::info!("本地服务就绪，已导航到 {url}");
+            set_status(&app, STATUS_READY, "运行中");
+            app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+            return;
+        }
+        rounds += 1;
+        // ①② 后台交换 cookie 并验证服务端接受（全程不经界面，启动界面保持显示）
+        let Some((name, value)) = exchange_token_for_cookie(&host_port, &web_token) else {
+            if rounds % 5 == 1 {
+                log::warn!("[nav] 会话 cookie 交换未成功，继续等待（第 {rounds} 轮）");
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
         };
+        if !seed_session_cookie(&app, "127.0.0.1", port, &name, &value) {
+            // set_cookie 平台不支持：回退 token 直开（此时会经 303 换 cookie，
+            // 可能有短暂白屏，属于平台能力降级而非常规路径）
+            log::warn!("[nav] 原生种 cookie 不可用，回退 token 直开路径");
+            let url = format!("http://127.0.0.1:{port}/?token={web_token}");
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.eval(&format!("window.location.replace({url:?});"));
+                inject_task_notifier(app.clone(), nport, &ntoken);
+            }
+            log::info!("本地服务就绪，已导航到 {url}");
+            set_status(&app, STATUS_READY, "运行中");
+            app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+            return;
+        }
+        // ③ 验证服务端确实接受种入的 cookie（不经验证不切换）
+        if !session_cookie_accepts(&host_port, &name, &value) {
+            if rounds <= 10 {
+                log::warn!("[nav] 第 {rounds} 轮会话验证未通过，留在启动界面重试");
+                set_status(&app, STATUS_STARTING, "重新建立会话…");
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                continue;
+            }
+            log::error!("[nav] 连续 {rounds} 轮会话验证失败，停留在启动界面（请查看 dsh 输出）");
+            return;
+        }
+        log::info!("[nav] 后台会话已建立并验证通过（第 {rounds} 轮），进入 Web GUI");
+        // ④ 后台全绿：主窗口一次性直达根路径（cookie 随行，直接 200）
+        let url = format!("http://127.0.0.1:{port}/");
         if let Some(w) = app.get_webview_window("main") {
             if let Err(e) = w.eval(&format!("window.location.replace({url:?});")) {
                 log::warn!("窗口导航失败：{e}");
                 return;
-            }
-            // 等 303 换 cookie 完成：主框架 URL 变为干净根路径（无超时限制，
-            // 退出/失败标志可打断）。此后才视为进入 webview。
-            loop {
-                if state.quitting.load(Ordering::SeqCst)
-                    || state.spawn_failed.load(Ordering::SeqCst)
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                if let Ok(u) = w.url() {
-                    if u.host_str() == Some("127.0.0.1")
-                        && u.port() == Some(port)
-                        && u.path() == "/"
-                        && u.query().is_none()
-                    {
-                        break;
-                    }
-                }
             }
             inject_task_notifier(app.clone(), nport, &ntoken);
         }
