@@ -4,6 +4,7 @@ import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { createRewriteProxy, POLYFILL, LOOPBACK_HOSTNAME_PATCH, THEME_SYNC_PATCH } from './proxy.mjs';
+import { createDshUpstreamAuth } from './dshauth.mjs';
 import { PairingStore, createFileStorage, deviceNameFromUA } from './pairing.mjs';
 import { selectLanIPv4, buildPairLink, buildHttpPairLink, normalizeRemote } from './links.mjs';
 import { readSettingsString, writeSettingsKey, readTopLevelBlockKey } from './settings.mjs';
@@ -31,13 +32,23 @@ export function createMobileAccessService(opts = {}) {
     storage = null,
     warn = null,
     fetchImpl = null,
+    authenticatedUrl = null,  // (origin) => 带 process token 的根 URL | null；生产由 apply 注入 ctx.connection.authenticatedUrl
   } = opts;
   const store = pairing ?? (storage
     ? new PairingStore({ storage })
     : new PairingStore({ storage: createFileStorage() }));
+  // dsh web 会话凭证（dsh 0.1.2-rc.1+ token 鉴权）：进程内自取 process token 换 cookie 存内存，
+  // 反代附带上游 + 上游 401 单次重换自愈。authenticatedUrl 未提供（老版 dsh / 独立运行）→ 无凭证模式，行为不变。
+  const dshAuth = createDshUpstreamAuth({
+    origin: `http://${upstreamHost}:${upstreamPort}`,
+    authenticatedUrl,
+    fetchImpl,
+    log: warn,
+  });
   const proxy = createRewriteProxy({
     upstreamHost,
     upstreamPort,
+    upstreamAuth: dshAuth,
     // 仅注入 POLYFILL + LOOPBACK_HOSTNAME_PATCH + THEME_SYNC_PATCH（顺序：补丁先于 polyfill、先于 dsh scripts）。
     // ⚠️ 不注入 desktopEnvPatchScript：对齐 pocket 行为——只在 DSH Desktop 壳内注入，
     // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
@@ -285,6 +296,7 @@ export function createMobileAccessService(opts = {}) {
         tunnelUrl: tunnel.url,
         customTunnelUrl,
         uiTheme: readUiThemePreference(),
+        dshAuth: dshAuth.hasCredential(),
       });
       return true;
     }
@@ -488,6 +500,7 @@ export function createMobileAccessService(opts = {}) {
   return {
     store,
     proxy,
+    dshAuth,
     routePairing,
     selectLanIPv4,
     buildPairLink,
@@ -554,6 +567,10 @@ function apply(ctx) {
     upstreamPort,
     platform,
     warn: (m) => { try { ctx?.logger?.warn?.(m); } catch { /* noop */ } },
+    // dsh 进程内自取 process token 的通道（connection 服务公开方法；缺失则 lane 无凭证运行）
+    authenticatedUrl: (origin) => {
+      try { return ctx?.connection?.authenticatedUrl?.(origin) ?? null; } catch { return null; }
+    },
   });
 
   // 同源 RPC handler（与 client 共享通道名 /dsh-mobile-access）：
@@ -590,6 +607,7 @@ function apply(ctx) {
               lanIp,
               tunnelUrl: svc.tunnel?.url ?? null,
               customTunnelUrl,
+              dshAuth: svc.dshAuth?.hasCredential() ?? false,
             });
           }
           case 'tunnel.probe': {
@@ -650,6 +668,8 @@ function apply(ctx) {
       return;
     }
     try { ctx?.logger?.info?.(`dsh-mobile-access: lane 改写反代已监听 127.0.0.1:${lanePort} → ${svc.proxy.upstream}`); } catch { /* noop */ }
+    // 预热 dsh 会话凭证（异步，失败不阻塞：首个上游 401 会触发自动重换）
+    void svc.dshAuth?.ensure?.();
     // 启动时按 env（桌面壳 spawn 注入）优先，其次 settings.yaml 持久化值；
     // 运行期变更走 POST /api/pair/cloudflared（立即生效 + 持久化）。
     let bin = process.env.DSH_CLOUDFLARED_BIN || '';
