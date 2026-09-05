@@ -205,8 +205,10 @@ test('cloudflared 控制端点：属主 GET 状态 + 隧道侧 401', async () =>
     const clear = await jget('http://127.0.0.1:' + lp + '/api/pair/cloudflared', { method: 'POST', body: JSON.stringify({ bin: '' }) });
     assert.equal(clear.status, 200);
     assert.equal(clear.body.running, false);
-    assert.equal(clear.body.bin, '');
+    // handler 契约：空 bin 返回 null（auto 模式语义）；并 stop 防自动解析拉起真隧道子进程阻塞进程退出
+    assert.equal(clear.body.bin, null);
   } finally {
+    await jget('http://127.0.0.1:' + lp + '/api/pair/cloudflared', { method: 'POST', body: JSON.stringify({ action: 'stop' }) }).catch(() => {});
     svc.proxy.server.closeAllConnections?.(); stub.closeAllConnections?.();
     await svc.close();
     stub.close();
@@ -367,5 +369,142 @@ test('第三方隧道地址保存：POST /api/pair/tunnel 持久化并经 info �
     svc.proxy.server.closeAllConnections?.(); stub.closeAllConnections?.();
     await svc.close();
     stub.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// dsh 0.1.2-rc.1+ 会话凭证（#26）：鉴权剧本 mock 上游 + lane 自愈链路
+//
+function startAuthStub() {
+  const state = { token: 'tok-1', secret: 'sig-1', tokenEnabled: true, exchangeCount: 0, unauthorizedCount: 0 };
+  const s = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    // dsh token 交换语义：GET /?token= 正确 → 303 + Set-Cookie；错误/缺失 → 无 Set-Cookie
+    if (req.method === 'GET' && u.pathname === '/' && u.searchParams.get('token')) {
+      state.exchangeCount++;
+      if (state.tokenEnabled && u.searchParams.get('token') === state.token) {
+        res.writeHead(303, { location: '/', 'set-cookie': 'dshtest=' + state.secret + '; Path=/; HttpOnly; SameSite=Strict' });
+      } else {
+        res.writeHead(401, { 'content-type': 'text/plain' });
+      }
+      res.end();
+      return;
+    }
+    const authed = String(req.headers.cookie ?? '').includes('dshtest=' + state.secret);
+    if (!authed) {
+      state.unauthorizedCount++;
+      res.writeHead(401, { 'content-type': 'text/plain' });
+      res.end('dsh web authentication required');
+      return;
+    }
+    if (u.pathname === '/api/echo' && req.method === 'POST') {
+      let b = '';
+      req.on('data', (c) => { b += c; });
+      req.on('end', () => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ got: b })); });
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><head></head><body>hello</body></html>');
+  });
+  s.state = state;
+  return s;
+}
+
+async function makeAuthedPair() {
+  const stub = startAuthStub();
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  return {
+    stub,
+    opts: {
+      storage: createMemoryStorage(),
+      upstreamPort: stub.address().port,
+      authenticatedUrl: () => (stub.state.tokenEnabled
+        ? 'http://127.0.0.1:' + stub.address().port + '/?token=' + stub.state.token
+        : null),
+    },
+  };
+}
+
+async function pairDevice(svc, lp) {
+  const token = svc.store.mint();
+  const acc = await jget('http://127.0.0.1:' + lp + '/api/pair/accept', { method: 'POST', body: JSON.stringify({ token }) });
+  assert.equal(acc.status, 200);
+  return acc.setCookie.split(';')[0];
+}
+
+test('dsh 鉴权自愈：首访上游 401 → lane 自动交换 → 重放成功；info 暴露 dshAuth 状态', async () => {
+  const pair = await makeAuthedPair();
+  const svc = createMobileAccessService(pair.opts);
+  const lp = await svc.listen();
+  try {
+    const cookie = await pairDevice(svc, lp);
+    // 首访：lane 尚无凭证 → 上游 401 → 自动交换 → 原样重放 → 手机拿到页面
+    const page = await textGet('http://127.0.0.1:' + lp + '/', {
+      headers: { Host: 'xxxx.trycloudflare.com', 'x-forwarded-for': '203.0.113.7', cookie },
+    });
+    assert.equal(page.status, 200, '首访经自愈后应拿到页面');
+    assert.ok(page.text.includes('hello'), '页面内容来自上游');
+    assert.equal(svc.dshAuth.hasCredential(), true, 'lane 已持凭证');
+    // 排查可见性：属主 info 端点暴露 dshAuth 布尔
+    const info = await jget('http://127.0.0.1:' + lp + '/api/pair/info');
+    assert.equal(info.body.dshAuth, true);
+  } finally {
+    svc.proxy.server.closeAllConnections?.(); pair.stub.closeAllConnections?.();
+    await svc.close();
+    pair.stub.close();
+  }
+});
+
+test('dsh 鉴权自愈：凭证轮换 → 下一请求 401 → 重换 → GET/POST 原样重放（POST 体不丢）', async () => {
+  const pair = await makeAuthedPair();
+  const svc = createMobileAccessService(pair.opts);
+  const lp = await svc.listen();
+  try {
+    const cookie = await pairDevice(svc, lp);
+    const tunnel = { Host: 'xxxx.trycloudflare.com', 'x-forwarded-for': '203.0.113.7', cookie };
+    // 先建立有效凭证
+    assert.equal((await textGet('http://127.0.0.1:' + lp + '/', { headers: tunnel })).status, 200);
+    // dsh 重启剧本：token + secret 双双轮换
+    pair.stub.state.token = 'tok-2';
+    pair.stub.state.secret = 'sig-2';
+    // GET：401 → 重换 → 重放
+    const page = await textGet('http://127.0.0.1:' + lp + '/', { headers: tunnel });
+    assert.equal(page.status, 200, '轮换后 GET 自愈成功');
+    // POST：请求体缓存重放，上游回显一致
+    const payload = JSON.stringify({ k: 'v', n: 1 });
+    const echo = await jget('http://127.0.0.1:' + lp + '/api/echo', { method: 'POST', headers: tunnel, body: payload });
+    assert.equal(echo.status, 200, '轮换后 POST 自愈成功');
+    assert.equal(echo.body.got, payload, '重放后请求体原样到达上游');
+    assert.ok(pair.stub.state.exchangeCount >= 2, '交换发生至少两次（初始 + 重换）');
+  } finally {
+    svc.proxy.server.closeAllConnections?.(); pair.stub.closeAllConnections?.();
+    await svc.close();
+    pair.stub.close();
+  }
+});
+
+test('dsh 鉴权降级：token 撤销 → 401 原样透传给手机（只重试一次，不死循环）', async () => {
+  const pair = await makeAuthedPair();
+  const svc = createMobileAccessService(pair.opts);
+  const lp = await svc.listen();
+  try {
+    const cookie = await pairDevice(svc, lp);
+    const tunnel = { Host: 'xxxx.trycloudflare.com', 'x-forwarded-for': '203.0.113.7', cookie };
+    assert.equal((await textGet('http://127.0.0.1:' + lp + '/', { headers: tunnel })).status, 200);
+    // dsh 侧凭证失效 + connection 不再提供 token：重换必败 → 透传 401
+    pair.stub.state.secret = 'sig-3';
+    pair.stub.state.tokenEnabled = false;
+    const before = pair.stub.state.unauthorizedCount;
+    const res = await textGet('http://127.0.0.1:' + lp + '/', { headers: tunnel });
+    assert.equal(res.status, 401, '重换失败时上游 401 原样透传');
+    assert.ok(res.text.includes('dsh web authentication required'), '透传上游 401 响应体');
+    assert.equal(svc.dshAuth.hasCredential(), false, '无凭证状态可观测');
+    assert.ok(pair.stub.state.unauthorizedCount <= before + 2, '单次重换上限：不产生重试风暴');
+    const info = await jget('http://127.0.0.1:' + lp + '/api/pair/info');
+    assert.equal(info.body.dshAuth, false, 'info 反映降级状态');
+  } finally {
+    svc.proxy.server.closeAllConnections?.(); pair.stub.closeAllConnections?.();
+    await svc.close();
+    pair.stub.close();
   }
 });
