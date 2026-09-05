@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop-tauriapp"
-version = "0.7.0"
+version = "0.7.1"
 description = "DeepSeek Harness Desktop —— DeepSeek Harness desktop client (auto-spawn local dsh web service, system tray resident)"
 authors = ["ArcReel"]
 edition = "2021"
