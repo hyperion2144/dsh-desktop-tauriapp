@@ -174,8 +174,6 @@ fn app_port() -> u16 {
     configured_port()
 }
 
-/// 等待服务就绪的超时时间。
-const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 从 nvm 版本目录名（如 v22.12.0）解析可比较的版本键；无法解析的返回 (0,0,0)。
 /// 注意：目录名必须按 semver 比较排序，字符串排序会把 v9.11.0 排在 v22.12.0 之后。
@@ -896,8 +894,8 @@ fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<(String, St
 /// 与 WebKit 异步落库 cookie 存在竞态，抢跑的请求不带 cookie → 渲染 401 白屏，
 /// 等 2.5s 补跳才恢复。原生种 cookie 不经网络层，导航前 cookie 已就绪，
 /// 一次导航直达桌面，全程无白屏。
-fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) {
-    let Some(w) = app.get_webview_window("main") else { return };
+fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) -> bool {
+    let Some(w) = app.get_webview_window("main") else { return false };
     let mut cookie = cookie::Cookie::new(name.to_string(), value.to_string());
     cookie.set_domain(host.to_string());
     cookie.set_path("/");
@@ -905,11 +903,16 @@ fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value
     cookie.set_same_site(cookie::SameSite::Strict);
     // 30 天，与 dsh 侧 maxAge 一致；过期则重新用 state 里的 token 换
     cookie.set_max_age(cookie::time::Duration::days(30));
-    if let Err(e) = w.set_cookie(cookie) {
+    match w.set_cookie(cookie) {
         // set_cookie 在 Linux 上（webkitgtk）可能不支持：失败则回退旧两段式导航路径
-        log::warn!("[token] 原生种会话 cookie 失败（回退两段式导航）：{e}");
-    } else {
-        log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
+        Err(e) => {
+            log::warn!("[token] 原生种会话 cookie 失败（回退两段式导航）：{e}");
+            false
+        }
+        Ok(()) => {
+            log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
+            true
+        }
     }
 }
 
@@ -1459,14 +1462,15 @@ fn advanced_marker_query() -> String {
     )
 }
 
-/// 轮询等待服务就绪，然后把主窗口导航到 Web GUI；失败则跳错误页。
+/// 轮询等待服务就绪，然后把主窗口导航到 Web GUI。
 /// `nport`/`ntoken` 是通知桥的端口与令牌，导航完成后才注入监听脚本。
 ///
-/// dsh 新版要求 process token：导航前先用 token 原生换会话 cookie 并种入
-/// webview（exchange_token_for_cookie + seed_session_cookie），然后一次性
-/// 导航到最终页（高级模式带标记）——全程无 401 中间页（无两段式跳转）。
-/// 无 token（老版 dsh）或原生种 cookie 失败时回退：token 随首跳、标记由
-/// 2.5s 补跳携带（旧行为）。
+/// 启动无超时限制（产品要求）：spawn 场景必须等到 stdout 打印 process token、
+/// 并原生换取/种入会话 cookie 成功后，才离开启动界面一次性导航到最终页
+/// （高级模式带标记）。dsh 的 stdout 全程经 `dsh-console` 事件流式显示在
+/// 启动页控制台，dsh 未就绪/挂掉都停留在启动界面（只有启动界面与 webview
+/// 两个界面，不跳错误页）。仅平台不支持 set_cookie 时回退旧两段式
+/// （token 首跳 + 2.5s 补跳）；老版 dsh 复用外部实例时按无 token 直连（旧行为）。
 async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
     // advanced 以当前接入模式为准（高级=带标记桌面 chrome；兼容=标准布局）
@@ -1476,94 +1480,98 @@ async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: 
         navigate_remote(&app, &addr, advanced);
         return;
     }
-    // spawn 场景才等 stdout 的 token 行（外部复用场景永远等不到，token 只能来自粘贴）
+    // spawn 场景才等 stdout 的 token 行（外部复用场景的 token 只能来自粘贴）
     let expect_token = state.spawned_this_run.load(Ordering::SeqCst);
-    // 端口监听可能先于 stdout 的 token 行就绪（实测出现过）：spawn 场景给 5s 宽限，
-    // 新版 dsh 通常 <1s 内到达；老版 dsh（无 token 机制）最多多等 5s 再按回退路径导航。
-    let token_grace_deadline = Instant::now() + Duration::from_secs(5);
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let mut exchange_attempts = 0u32;
     loop {
+        // spawn 本身失败：错误页已由 setup/重启流程显示，这里不再二次导航
         if state.spawn_failed.load(Ordering::SeqCst) {
-            // 错误页已由 setup 按具体原因（not-found / spawn-failed）显示，这里不再二次导航
             return;
         }
-        if port_open(port) {
-            let web_token = state.web_token.lock().unwrap().clone();
-            if expect_token && web_token.is_empty() && Instant::now() < token_grace_deadline {
-                tokio::time::sleep(Duration::from_millis(300)).await;
-                continue;
-            }
-            // 导航前原生换 cookie：种入 webview 后首次请求即携带，无 401 中间页。
-            // 失败（如 Linux webkitgtk 不支持 set_cookie）回退两段式导航。
-            let mut seeded = false;
-            if !web_token.is_empty() {
-                if let Some((name, value)) =
-                    exchange_token_for_cookie(&format!("127.0.0.1:{port}"), &web_token)
-                {
-                    seed_session_cookie(&app, "127.0.0.1", port, &name, &value);
-                    seeded = true;
+        let web_token = state.web_token.lock().unwrap().clone();
+        let token_ready = !web_token.is_empty();
+        // spawn 场景：无限等待 stdout 打印 token（无超时）；dsh 未就绪/挂掉都
+        // 停留在启动界面（其输出已流式上屏，供用户查看）
+        if expect_token && !token_ready {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            continue;
+        }
+        if !port_open(port) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        // 就绪：原生交换 cookie 并种入 webview；成功才离开启动界面。
+        // 交换失败（dsh 刚就绪的瞬时窗口）无限重试，同样停留在启动界面。
+        let mut seeded = false;
+        if token_ready {
+            match exchange_token_for_cookie(&format!("127.0.0.1:{port}"), &web_token) {
+                Some((name, value)) => {
+                    seeded = seed_session_cookie(&app, "127.0.0.1", port, &name, &value);
+                }
+                None => {
+                    exchange_attempts += 1;
+                    if exchange_attempts % 5 == 1 {
+                        log::warn!(
+                            "[token] 会话 cookie 交换未成功，继续等待（第 {exchange_attempts} 次）"
+                        );
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
                 }
             }
-            // URL 在导航时刻构建：cookie 已种好时直达最终页（带标记）；
-            // 未种成且有 token 时首跳只带 token（303 会剥参数），标记由补跳携带；
-            // 无 token（老版 dsh）维持旧行为。
-            let url = if seeded {
-                if advanced {
-                    format!("http://127.0.0.1:{port}/?{}", advanced_marker_query())
-                } else {
-                    format!("http://127.0.0.1:{port}/")
-                }
+        }
+        // 最终 URL：种 cookie 成功 → 一次性直达（advanced 带标记）；
+        // 种失败（平台不支持）回退旧行为：token 随首跳、标记由补跳携带；
+        // 无 token（老版 dsh 外部实例）维持无 token 直连。
+        let url = if seeded {
+            if advanced {
+                format!("http://127.0.0.1:{port}/?{}", advanced_marker_query())
             } else {
-                desktop_url(
-                    port,
-                    advanced,
-                    if web_token.is_empty() { None } else { Some(web_token.as_str()) },
-                )
-            };
-            if let Some(w) = app.get_webview_window("main") {
-                let script = format!("window.location.replace({url:?});");
-                if let Err(e) = w.eval(&script) {
-                    log::warn!("窗口导航失败：{e}");
-                    show_error(&app, "spawn-failed");
-                    return;
-                }
-                // 导航后注入监听：0.3.0 在 setup 阶段提前注入，冷启动时脚本
-                // 落在加载页、随导航销毁（通知收不到的根因之二）。
-                inject_task_notifier(app.clone(), nport, &ntoken);
-                // 回退路径的第二跳：首跳 token 换 cookie 的 303 会剥 query，等 cookie
-                // 落地后补跳带高级模式标记的 URL。原生种 cookie 成功（seeded）时无需补跳。
-                if !seeded && !web_token.is_empty() && advanced {
-                    let handle = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(Duration::from_millis(2500)).await;
-                        let marked =
-                            format!("http://127.0.0.1:{port}/?{}", advanced_marker_query());
-                        if let Some(w) = handle.get_webview_window("main") {
-                            if let Err(e) =
-                                w.eval(&format!("window.location.replace({marked:?});"))
-                            {
-                                log::warn!("[nav] 高级模式标记补跳失败：{e}");
-                            } else {
-                                log::info!("[nav] 已补跳高级模式标记 URL");
-                            }
-                        }
-                        // 补跳会再次整页加载，任务通知监听随页面销毁，需要重挂
-                        inject_task_notifier(handle, nport, &ntoken);
-                    });
-                }
+                format!("http://127.0.0.1:{port}/")
             }
-            log::info!("本地服务就绪，已导航到 {url}");
-            set_status(&app, STATUS_READY, "运行中");
-            app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
-            return;
+        } else {
+            desktop_url(
+                port,
+                advanced,
+                if token_ready { Some(web_token.as_str()) } else { None },
+            )
+        };
+        if let Some(w) = app.get_webview_window("main") {
+            let script = format!("window.location.replace({url:?});");
+            if let Err(e) = w.eval(&script) {
+                log::warn!("窗口导航失败：{e}");
+                // 窗口不可用即无界面可去：保持现状返回（不跳错误页）
+                return;
+            }
+            // 导航后注入监听：0.3.0 在 setup 阶段提前注入，冷启动时脚本
+            // 落在加载页、随导航销毁（通知收不到的根因之二）。
+            inject_task_notifier(app.clone(), nport, &ntoken);
+            // 回退路径的第二跳：首跳 token 换 cookie 的 303 会剥 query，等 cookie
+            // 落地后补跳带高级模式标记的 URL。原生种 cookie 成功（seeded）时无需补跳。
+            if !seeded && token_ready && advanced {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(2500)).await;
+                    let marked =
+                        format!("http://127.0.0.1:{port}/?{}", advanced_marker_query());
+                    if let Some(w) = handle.get_webview_window("main") {
+                        if let Err(e) =
+                            w.eval(&format!("window.location.replace({marked:?});"))
+                        {
+                            log::warn!("[nav] 高级模式标记补跳失败：{e}");
+                        } else {
+                            log::info!("[nav] 已补跳高级模式标记 URL");
+                        }
+                    }
+                    // 补跳会再次整页加载，任务通知监听随页面销毁，需要重挂
+                    inject_task_notifier(handle, nport, &ntoken);
+                });
+            }
         }
-        if Instant::now() >= deadline {
-            log::error!("等待本地服务就绪超时（{}s）", READY_TIMEOUT.as_secs());
-            set_status(&app, STATUS_STALE, "就绪超时");
-            show_error(&app, "timeout");
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        log::info!("本地服务就绪，已导航到 {url}");
+        set_status(&app, STATUS_READY, "运行中");
+        app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+        return;
     }
 }
 
