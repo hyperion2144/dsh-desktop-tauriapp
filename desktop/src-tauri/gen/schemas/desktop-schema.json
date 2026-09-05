@@ -183,6 +183,12 @@
           "markdownDescription": "允许加载页切换兼容/高级接入模式"
         },
         {
+          "description": "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）",
+          "type": "string",
+          "const": "allow-get-desktop-client-environment",
+          "markdownDescription": "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）"
+        },
+        {
           "description": "允许查询 dsh 服务状态（侧边栏状态标识）",
           "type": "string",
           "const": "allow-get-dsh-status",

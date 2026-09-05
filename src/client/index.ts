@@ -2,10 +2,10 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { installExternalLinkHandler } from './external-links.ts'
-import { parseDesktopClientEnvironment } from './environment.ts'
+import { requestDesktopClientEnvironment } from './environment.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
-export { parseDesktopClientEnvironment } from './environment.ts'
+export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './environment.ts'
 export type { DesktopClientEnvironment, DesktopClientMode, DesktopClientPlatform } from './environment.ts'
 
 /** Services required by advanced presentation. */
@@ -107,7 +107,12 @@ export function apply(ctx: ClientContext): void {
   installNoRubberBand()
   // 桌面 webview（含复用降级/无标记场景）都接管外链打开；纯浏览器无 Tauri IPC 时 no-op
   installExternalLinkHandler()
-  const environment = parseDesktopClientEnvironment(window.location.search)
-  if (!environment) return
-  if (environment.mode === 'advanced') applyAdvancedShell(ctx, environment)
+  // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
+  // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；
+  // 模式/平台本就是壳的运行状态，由壳下发。纯浏览器无 IPC → 不激活（原语义不变）。
+  void requestDesktopClientEnvironment()
+    .then((environment) => {
+      if (environment?.mode === 'advanced') applyAdvancedShell(ctx, environment)
+    })
+    .catch(() => {})
 }

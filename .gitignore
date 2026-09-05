@@ -17,3 +17,9 @@ whale-iconset-tmp/
 zz-test-relative.txt
 # DSH visualize cards (session workspace copies)
 viz/
+
+# DSH 插件运行时产物（本仓库以 dsh web 为宿主运行时生成）
+.mnemon/
+.dsh_hashline_edittool/
+desktop/.mnemon/
+desktop/package-lock.json

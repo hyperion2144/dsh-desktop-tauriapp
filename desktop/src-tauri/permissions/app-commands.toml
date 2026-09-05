@@ -7,6 +7,10 @@ commands = { allow = ["open_external"] }
 identifier = "allow-log-diag"
 description = "允许桌面 client 把诊断信息写入应用日志"
 commands = { allow = ["log_diag"] }
+[[permission]]
+identifier = "allow-get-desktop-client-environment"
+description = "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）"
+commands = { allow = ["get_desktop_client_environment"] }
 
 [[permission]]
 identifier = "allow-log-console"
