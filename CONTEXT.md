@@ -25,3 +25,11 @@ _Avoid_: 轻量编辑器、简易编辑器
 `mexiaosqwq/dsh-web-mobile`（git 子模块 `mobile/dsh-mobile-nav`，上游 v2.3.0 起包名
 `dsh-web-mobile`，前名 `@dsh-external/dsh-mobile-nav`）原样提供，本仓库不再自研移动布局；桌面 ≥1024px 完全 no-op。
 _Avoid_: 移动端自建布局（重做布局）、移动三页导航（已废弃）
+
+**Process Token（dsh 启动凭证）**:
+dsh web 进程启动时生成、随进程存续的随机凭证；经 `GET /?token=` 可反复换取绑定 Host authority 的会话 cookie。由 lane 进程内自取（connection 服务），不落盘、不进日志。
+_Avoid_: 一次性 token（实际可反复使用）、dsh 登录密码
+
+**配对 Token（Pairing Token）**:
+lane 生成的 10 分钟 TTL 一次性配对凭证，手机扫码/贴码换取 lane 会话 cookie；与 process token 是两套独立凭证，互不替代。
+_Avoid_: dsh token、启动 token（指 process token 时）
