@@ -65,4 +65,19 @@ commands = { allow = ["restart_dsh_service"] }
 [[permission]]
 identifier = "allow-ui-input-confirm"
 description = "允许输入弹窗回填（新建 profile/新增远程/设置端口）"
-commands = { allow = ["ui_input_confirm"] }
+ commands = { allow = ["ui_input_confirm"] }
+
+[[permission]]
+identifier = "allow-get-proxy-settings"
+description = "允许查询代理设置与当前生效预览（设置表单回显）"
+commands = { allow = ["get_proxy_settings"] }
+
+[[permission]]
+identifier = "allow-save-proxy-settings"
+description = "允许保存代理设置（托盘代理设置表单提交）"
+commands = { allow = ["save_proxy_settings"] }
+
+[[permission]]
+identifier = "allow-test-proxy-connectivity"
+description = "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）"
+commands = { allow = ["test_proxy_connectivity"] }
