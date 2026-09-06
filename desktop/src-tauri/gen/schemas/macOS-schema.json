@@ -201,6 +201,12 @@
           "markdownDescription": "允许加载页轮询模式选择提示状态"
         },
         {
+          "description": "允许查询代理设置与当前生效预览（设置表单回显）",
+          "type": "string",
+          "const": "allow-get-proxy-settings",
+          "markdownDescription": "允许查询代理设置与当前生效预览（设置表单回显）"
+        },
+        {
           "description": "允许 WebView initialization_script 把 console.* 写入 ~/.dsh/dsh-desktop-webview.log",
           "type": "string",
           "const": "allow-log-console",
@@ -247,6 +253,18 @@
           "type": "string",
           "const": "allow-restart-dsh-service",
           "markdownDescription": "允许请求重启 dsh 服务（状态标识点击）"
+        },
+        {
+          "description": "允许保存代理设置（托盘代理设置表单提交）",
+          "type": "string",
+          "const": "allow-save-proxy-settings",
+          "markdownDescription": "允许保存代理设置（托盘代理设置表单提交）"
+        },
+        {
+          "description": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）",
+          "type": "string",
+          "const": "allow-test-proxy-connectivity",
+          "markdownDescription": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）"
         },
         {
           "description": "允许切换缩放",
