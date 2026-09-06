@@ -235,6 +235,15 @@ fn proxy_url_from_authority(scheme: &str, authority: &str, default_port: &str) -
         Some(idx) => &authority[idx + 3..],
         None => authority,
     };
+    // 代理 URL 含内嵌凭据（user:pass@host）：env 无法安全携带凭据（研究边界 10），剥离并记日志。
+    // 只取最后一个 @ 之后的部分：userinfo 里可能含 @，主机段不会。
+    let authority = match authority.rfind('@') {
+        Some(at) => {
+            log::warn!("[proxy] 代理 URL 含内嵌凭据，已剥离（env 不携带凭据）");
+            &authority[at + 1..]
+        }
+        None => authority,
+    };
     if authority.is_empty() {
         return None;
     }
@@ -288,10 +297,12 @@ fn normalize_no_proxy_entries(raw: &str) -> Vec<String> {
             if !suffix.is_empty() {
                 out.push(format!(".{suffix}"));
             }
-        } else if lower == "*" || !lower.contains('/') {
+        } else if lower.contains('/') {
+            // CIDR（如 192.168.0.0/16）在 NO_PROXY 无标准语义，按研究边界 9 丢弃并记日志
+            log::warn!("[proxy] NO_PROXY 条目 {entry} 为 CIDR，已丢弃");
+        } else {
             out.push(lower);
         }
-        // 含 '/' 的 CIDR：丢弃
     }
     out
 }
@@ -2504,16 +2515,10 @@ async fn test_proxy_connectivity(url: String) -> Result<u128, String> {
         .ok_or_else(|| format!("代理 URL 非法（需 http/https/socks5://host:port）：{url}"))?;
     let authority = normalized.split("://").nth(1).unwrap_or_default();
     let (host, port) = split_authority(authority);
-    let default_port = if normalized.starts_with("https://") {
-        "443"
-    } else if normalized.starts_with("socks5://") {
-        "1080"
-    } else {
-        "80"
+    // normalize_proxy_url 输出恒带端口；万一缺失/非法按参数错误处理，不做静默端口兜底
+    let Some(port) = port.and_then(|p| p.parse::<u16>().ok()) else {
+        return Err(format!("代理 URL 缺少有效端口：{normalized}"));
     };
-    let port: u16 = port
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| default_port.parse().unwrap_or(80));
     let addr = format!("{host}:{port}");
     let started = std::time::Instant::now();
     let attempt = tokio::time::timeout(
@@ -4129,6 +4134,25 @@ mod tests {
     assert_eq!(merged, ".local,localhost,127.0.0.1,::1,foo.example.com");
     // 空输入也保证回环保底（有代理注入时 NO_PROXY 恒非空）
     assert_eq!(merge_no_proxy_entries(Vec::new()), "localhost,127.0.0.1,::1");
+  }
+
+  #[test]
+  fn proxy_url_with_embedded_credentials_strips_userinfo() {
+    // 研究边界 10：env 不携带凭据——manual 输入含 user:pass@host 时剥离 userinfo
+    assert_eq!(
+      normalize_proxy_url("http://user:pa%40ss@127.0.0.1:7890").as_deref(),
+      Some("http://127.0.0.1:7890")
+    );
+    // userinfo 里含 @ 时取最后一个 @
+    assert_eq!(
+      normalize_proxy_url("socks5://u@p@proxy.corp:1080").as_deref(),
+      Some("socks5://proxy.corp:1080")
+    );
+    // 无凭据不受影响
+    assert_eq!(
+      normalize_proxy_url("http://127.0.0.1:7890").as_deref(),
+      Some("http://127.0.0.1:7890")
+    );
   }
 
   // scutil --proxy 真实输出样例（研究 §1.2：全协议禁用）

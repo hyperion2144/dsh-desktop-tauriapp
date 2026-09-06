@@ -65,7 +65,7 @@ commands = { allow = ["restart_dsh_service"] }
 [[permission]]
 identifier = "allow-ui-input-confirm"
 description = "允许输入弹窗回填（新建 profile/新增远程/设置端口）"
- commands = { allow = ["ui_input_confirm"] }
+commands = { allow = ["ui_input_confirm"] }
 
 [[permission]]
 identifier = "allow-get-proxy-settings"
