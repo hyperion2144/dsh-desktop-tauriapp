@@ -20,6 +20,9 @@
     "allow-pet-hide",
     "allow-pet-quit",
     "allow-pet-toggle-passthrough",
-    "allow-toggle-zoom"
+    "allow-toggle-zoom",
+    "allow-get-proxy-settings",
+    "allow-save-proxy-settings",
+    "allow-test-proxy-connectivity"
   ]
 }
