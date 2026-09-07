@@ -31,6 +31,18 @@
   cloudflared；`ctx dispose` 时关闭 lane 并回收隧道子进程。配置经环境变量
   `DSH_MOBILE_ENABLED / DSH_MOBILE_LANE_PORT / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN` 注入。
 
+## 隧道与连接稳定性（WS 保活）
+
+dsh 客户端对 `/api/remote.mux` 复用 WebSocket 无应用层心跳，中间隧道/代理（cpolar、
+cloudflared、反代等）对静默连接的空闲超时会揧断长连接，手机端表现为 dsh「连接异常」
+反复出现。lane 反代在 upgrade 后对 上游→客户端 方向做帧感知泵：空闲时在帧边界注入
+WS ping（浏览器按 RFC 6455 自动回 pong），任意中间环节的空闲计时都会被重置；pong
+超时则判定链路死亡并主动断开，让 dsh 客户端秒级重连。
+
+settings.yaml（`dsh-desktop-tauriapp:` 块）：`ws_keepalive_ms`（ping 间隔，默认 15000，
+0=关闭）、`ws_pong_timeout_ms`（判死超时，默认 10000）。注意：若隧道服务另有**非空闲类**
+限制（如单连接时长上限、带宽限制），保活无法规避，需更换隧道方案或升级服务档位。
+
 ## 结构
 
 - lib/index.mjs —— 插件入口（host 半区：装配反代/配对/SSE/隧道）
