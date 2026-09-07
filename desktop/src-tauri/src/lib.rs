@@ -3004,6 +3004,30 @@ fn set_port_flow(app: &AppHandle) {
     });
 }
 
+/// 打开代理设置窗口（单例：已开则聚焦，不重建）。
+fn open_proxy_settings(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("proxy-settings") {
+        // 窗口已存在：聚焦即可
+        let _ = w.show();
+        let _ = w.set_focus();
+        return;
+    }
+    // 创建新窗口（用 App 路径，Tauri 自动按平台解析 tauri://localhost 或 http://tauri.localhost）
+    let url = tauri::WebviewUrl::App("proxy-settings.html".into());
+    match tauri::WebviewWindowBuilder::new(app, "proxy-settings", url)
+        .title("代理设置")
+        .inner_size(520.0, 480.0)
+        .resizable(false)
+        .maximizable(false)
+        .minimizable(false)
+        .center()
+        .build()
+    {
+        Ok(_) => log::info!("[tray] 代理设置窗口已打开"),
+        Err(e) => log::error!("[tray] 打开代理设置窗口失败：{e}"),
+    }
+}
+
 /// 远程首页是否挂载了本插件的 client（GET / 并从响应里检索挂载串）。
 /// `addr` 可为完整 URL（新版，带 token 时跟随 303 换 cookie；探活页只需要 200 首页）
 /// 或 host:port（旧格式）。
@@ -3194,12 +3218,20 @@ fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let profile_menu = profile_builder.build()?;
 
     let port_item = MenuItem::with_id(app, "set-port", format!("本地端口… {port}"), true, None::<&str>)?;
+
+    // 代理设置菜单项：标签显示当前代理模式
+    let proxy_mode_label = match settings.proxy_mode.as_deref() {
+        Some("system") => "继承系统代理",
+        Some("manual") => "手动代理",
+        _ => "直连",
+    };
+    let proxy_item = MenuItem::with_id(app, "proxy-settings", format!("代理设置…（{proxy_mode_label}）"), true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
     Ok(Menu::with_items(
         app,
-        &[&show, &pet, &remote_menu, &profile_menu, &port_item, &restart, &toggle, &quit],
+        &[&show, &pet, &remote_menu, &profile_menu, &port_item, &proxy_item, &restart, &toggle, &quit],
     )?)
 }
 
@@ -3243,6 +3275,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "remote-add" => add_remote_flow(app),
             "new-profile" => create_profile_flow(app),
             "set-port" => set_port_flow(app),
+            "proxy-settings" => open_proxy_settings(app),
             id if id.starts_with("profile:") => {
                 switch_profile(app, &id["profile:".len()..]);
             }

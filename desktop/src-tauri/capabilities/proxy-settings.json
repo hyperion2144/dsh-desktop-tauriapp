@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "proxy-settings",
+  "description": "代理设置窗口能力：读写代理设置 + 测试连接 + 重启 dsh 服务",
+  "windows": ["proxy-settings"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "allow-get-proxy-settings",
+    "allow-save-proxy-settings",
+    "allow-test-proxy-connectivity",
+    "allow-restart-dsh-service"
+  ]
+}

@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>代理设置 — DeepSeek Harness Desktop</title>
+    <style>
+      :root {
+        --bg: #1e1e2e;
+        --fg: #cdd6f4;
+        --muted: #a6adc8;
+        --accent: #89b4fa;
+        --border: #45475a;
+        --error: #f38ba8;
+        --ok: #a6e3a1;
+        --card: #313244;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        padding: 24px;
+        font-size: 14px;
+      }
+      h1 { font-size: 18px; margin-bottom: 20px; }
+      .form-group { margin-bottom: 18px; }
+      label { display: block; margin-bottom: 6px; font-weight: 600; }
+      .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+      input[type="text"], input[type="url"] {
+        width: 100%;
+        padding: 8px 12px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--fg);
+        font-size: 14px;
+        outline: none;
+      }
+      input[type="text"]:focus, input[type="url"]:focus {
+        border-color: var(--accent);
+      }
+      input:disabled { opacity: 0.4; cursor: not-allowed; }
+      .radio-group { display: flex; flex-direction: column; gap: 10px; }
+      .radio-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        padding: 8px 12px;
+        border-radius: 6px;
+        transition: background 0.15s;
+      }
+      .radio-item:hover { background: var(--card); }
+      .radio-item input[type="radio"] { accent-color: var(--accent); }
+      .radio-item .desc { font-size: 12px; color: var(--muted); margin-left: 4px; }
+      .actions { display: flex; gap: 12px; margin-top: 24px; }
+      button {
+        padding: 10px 24px;
+        border: none;
+        border-radius: 6px;
+        font-size: 14px;
+        cursor: pointer;
+        transition: opacity 0.15s;
+      }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      .btn-primary { background: var(--accent); color: var(--bg); }
+      .btn-secondary { background: var(--card); color: var(--fg); border: 1px solid var(--border); }
+      .result {
+        margin-top: 12px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 13px;
+        display: none;
+      }
+      .result.show { display: block; }
+      .result.ok { background: rgba(166, 227, 161, 0.15); color: var(--ok); }
+      .result.err { background: rgba(243, 139, 168, 0.15); color: var(--error); }
+      .effective {
+        margin-top: 12px;
+        padding: 10px 14px;
+        background: var(--card);
+        border-radius: 6px;
+        font-size: 12px;
+        color: var(--muted);
+        display: none;
+      }
+      .effective.show { display: block; }
+      .effective code { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <h1>代理设置</h1>
+
+    <div class="form-group">
+      <label>代理模式</label>
+      <div class="radio-group">
+        <label class="radio-item">
+          <input type="radio" name="mode" value="off" />
+          直连（不使用代理）
+          <span class="desc">不注入任何代理环境变量</span>
+        </label>
+        <label class="radio-item">
+          <input type="radio" name="mode" value="system" />
+          继承系统代理
+          <span class="desc">启动时自动读取系统代理设置</span>
+        </label>
+        <label class="radio-item">
+          <input type="radio" name="mode" value="manual" />
+          手动指定
+          <span class="desc">填写代理 URL，如 http://proxy.example.com:8080</span>
+        </label>
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label for="proxy-url">代理 URL</label>
+      <input type="url" id="proxy-url" placeholder="http://proxy.example.com:8080" disabled />
+      <div class="hint">支持 http / https / socks5 / socks 协议</div>
+    </div>
+
+    <div class="form-group">
+      <label for="no-proxy">NO_PROXY（不代理的地址）</label>
+      <input type="text" id="no-proxy" placeholder="localhost,127.0.0.1,::1,.internal.example.com" />
+      <div class="hint">逗号分隔；localhost / 127.0.0.1 / ::1 始终包含</div>
+    </div>
+
+    <div id="effective" class="effective"></div>
+    <div id="test-result" class="result"></div>
+
+    <div class="actions">
+      <button id="btn-test" class="btn-secondary" disabled>测试连接</button>
+      <button id="btn-save" class="btn-primary">保存并重启</button>
+    </div>
+
+    <script>
+      const invoke = window.__TAURI__.invoke;
+      const $ = (id) => document.getElementById(id);
+
+      let currentMode = "off";
+
+      // 初始化：加载当前设置
+      async function init() {
+        try {
+          const data = await invoke("get_proxy_settings");
+          currentMode = data.proxy_mode || "off";
+          const modeRadios = document.querySelectorAll('input[name="mode"]');
+          modeRadios.forEach((r) => { r.checked = (r.value === currentMode); });
+          $("proxy-url").value = data.proxy_url || "";
+          $("no-proxy").value = data.no_proxy || "";
+          updateModeUI();
+
+          // 显示当前生效预览
+          if (data.effective) {
+            const eff = data.effective;
+            const el = $("effective");
+            el.innerHTML = "当前生效：<code>" +
+              (eff.http || eff.all || "(无代理)") + "</code>" +
+              (eff.no_proxy ? "<br>NO_PROXY: <code>" + eff.no_proxy + "</code>" : "");
+            el.classList.add("show");
+          }
+        } catch (e) {
+          showResult("加载设置失败：" + e, false);
+        }
+      }
+
+      function updateModeUI() {
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "off";
+        const urlInput = $("proxy-url");
+        const testBtn = $("btn-test");
+        if (mode === "manual") {
+          urlInput.disabled = false;
+          testBtn.disabled = false;
+        } else {
+          urlInput.disabled = true;
+          testBtn.disabled = true;
+        }
+      }
+
+      function showResult(msg, ok) {
+        const el = $("test-result");
+        el.textContent = msg;
+        el.className = "result show " + (ok ? "ok" : "err");
+      }
+
+      // 模式切换
+      document.querySelectorAll('input[name="mode"]').forEach((r) => {
+        r.addEventListener("change", updateModeUI);
+      });
+
+      // 测试连接
+      $("btn-test").addEventListener("click", async () => {
+        const url = $("proxy-url").value.trim();
+        if (!url) { showResult("请先填写代理 URL", false); return; }
+        showResult("正在测试…", true);
+        $("btn-test").disabled = true;
+        try {
+          const ms = await invoke("test_proxy_connectivity", { url });
+          showResult("连接成功（耗时 " + ms + "ms）", true);
+        } catch (e) {
+          showResult("连接失败：" + e, false);
+        } finally {
+          $("btn-test").disabled = false;
+        }
+      });
+
+      // 保存并重启
+      $("btn-save").addEventListener("click", async () => {
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || "off";
+        const url = $("proxy-url").value.trim();
+        const noProxy = $("no-proxy").value.trim();
+        $("btn-save").disabled = true;
+        $("btn-save").textContent = "保存中…";
+        try {
+          await invoke("save_proxy_settings", {
+            proxyMode: mode,
+            proxyUrl: url,
+            noProxy: noProxy,
+          });
+          showResult("设置已保存，正在重启 dsh 服务…", true);
+          try {
+            await invoke("restart_dsh_service");
+            showResult("设置已保存，dsh 服务正在重启", true);
+          } catch (e) {
+            showResult("设置已保存，但重启失败：" + e, false);
+          }
+        } catch (e) {
+          showResult("保存失败：" + e, false);
+        } finally {
+          $("btn-save").disabled = false;
+          $("btn-save").textContent = "保存并重启";
+        }
+      });
+
+      init();
+    </script>
+  </body>
+</html>
