@@ -62,17 +62,23 @@ test('WebSocket upgrade 透传：101 + 字节回声', async () => {
   try {
     const echo = await upgradeEcho('http://127.0.0.1:' + lp + '/ws', { Origin: 'https://ext.cpolar.cn' });
     assert.equal(echo.status, 101);
-    assert.equal(echo.echo, 'ping-payload');
+    assert.ok(echo.echo.equals(maskedPingFrame(Buffer.from('ping-payload'))), '回声必须逐字节等于发出的掩码帧');
   } finally { proxy.server.closeAllConnections?.(); proxy.server.close(); up.closeAll(); }
 });
 
+/** 客户端→服务器方向的合法 WS 帧（必须掩码；全零掩码 = 载荷原样）。 */
+function maskedPingFrame(payload, opcode = 0x89) {
+  const mask = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+  return Buffer.concat([Buffer.from([0x80 | opcode, 0x80 | payload.length]), mask, payload]);
+}
 function upgradeEcho(u, headers) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('upgrade timeout')), 5000);
     const req = http.request(u, { headers: { ...headers, Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'AQIDBAUGBwgJCgsMDQ4P' } });
     req.on('upgrade', (res, socket) => {
-      socket.write(Buffer.from('ping-payload'));
-      socket.once('data', (d) => { clearTimeout(timer); resolve({ status: res.statusCode, echo: d.toString() }); socket.destroy(); });
+      const probe = maskedPingFrame(Buffer.from('ping-payload'));
+      socket.write(probe);
+      socket.once('data', (d) => { clearTimeout(timer); resolve({ status: res.statusCode, echo: d }); socket.destroy(); });
     });
     req.on('error', (e) => { clearTimeout(timer); reject(e); });
     req.end();
@@ -112,7 +118,7 @@ test('WS 传输中客户端暴力断开：不产生未捕获异常（EPIPE 崩�
   const upstream = http.createServer((_q, _r) => { _r.end(); });
   upstream.on('upgrade', (_req, sock) => {
     sock.on('error', () => {}); // 客户端暴力断开后上游写 EPIPE，静默（测试夹具自身）
-    const timer = setInterval(() => { try { sock.write('x'); } catch { /* noop */ } }, 10);
+    const timer = setInterval(() => { try { sock.write(Buffer.from([0x81, 0x01, 0x78])); } catch { /* noop */ } }, 10); // 合法 text 帧 'x'（上游→客户端帧感知泵要求帧化数据）
     sock.on('close', () => clearInterval(timer));
     sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: test\r\n\r\n');
   });
@@ -177,6 +183,46 @@ test('大 JSON/文本响应流式压缩（gzip），SSE 原样透传', async () 
     // 小文本（chunked 无 content-length）→ 压缩无害，内容必须正确
     const small = await fetch('http://127.0.0.1:' + lp + '/small', { headers: { 'accept-encoding': 'gzip' } });
     assert.equal(await small.text(), 'small');
+  } finally {
+    proxy.server.closeAllConnections?.(); proxy.server.close();
+    up.closeAllConnections?.(); up.close();
+  }
+});
+
+test('401 重换重放 + 流式响应：重放后逐块到达、不破坏流', async () => {
+  // 验收③：上游 401 → lane 重换凭证 → 原样重放 → 重放响应为 chunked 流式且逐块透传
+  let refreshes = 0;
+  const upstreamAuth = {
+    applyTo(h) { if (refreshes > 0) h.cookie = 'dsh-session=replayed'; },
+    async refresh() { refreshes += 1; return true; },
+    hasCredential() { return true; },
+  };
+  const up = http.createServer((q, res) => {
+    if (refreshes === 0) {
+      res.writeHead(401, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"events":["a","b"');
+    setTimeout(() => res.write(',"c"]'), 60);
+    setTimeout(() => res.end('}'), 140);
+  });
+  await new Promise((r) => up.listen(0, '127.0.0.1', r));
+  const proxy = createRewriteProxy({ upstreamHost: '127.0.0.1', upstreamPort: up.address().port, upstreamAuth });
+  const lp = await listen(proxy.server);
+  try {
+    const chunks = [];
+    await new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${lp}/api/events`, { headers: { 'accept-encoding': 'identity' } }, (res) => {
+        assert.equal(res.statusCode, 200, '重换后重放应成功（401 不透传）');
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', resolve);
+      }).on('error', reject);
+    });
+    assert.ok(chunks.length >= 2, `流式响应应逐块到达（重放未破坏流），实际 ${chunks.length} 块`);
+    assert.equal(Buffer.concat(chunks).toString(), '{"events":["a","b","c"]}');
+    assert.equal(refreshes, 1, '只重试一次（不死循环）');
   } finally {
     proxy.server.closeAllConnections?.(); proxy.server.close();
     up.closeAllConnections?.(); up.close();
