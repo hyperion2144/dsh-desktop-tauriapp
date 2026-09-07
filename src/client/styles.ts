@@ -8,8 +8,13 @@ const ADVANCED_STYLES = `
 body[data-dsh-desktop-tauriapp-mode="advanced"] { margin: 0; }
 .dshDesktopChromeHost { position: fixed; inset: 0; z-index: 45; pointer-events: none; }
 .dshDesktopChromeStrip { position: absolute; display: flex; align-items: stretch; pointer-events: auto; }
+/* 拖拽条背景：按平台匹配所覆盖区域的主题背景（macOS 覆盖侧边栏、Win/Linux 覆盖中间区）。
+   对齐 better-sidebar 做法：注入元素显式设 --dsw-alias-bg-* / --dsw-specific-* 而非透明依赖底层透出。 */
+body[data-dsh-desktop-platform="darwin"] .dshDesktopChromeStrip { background: var(--dsw-specific-sidebar-fill); }
+body[data-dsh-desktop-platform="win32"] .dshDesktopChromeStrip,
+body[data-dsh-desktop-platform="linux"] .dshDesktopChromeStrip { background: var(--dsw-alias-bg-base); }
 .dshDesktopChromeDrag { user-select: none; }
-.dshDesktopStatusBar { position: absolute; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; line-height: 1; color: var(--dsw-alias-label-secondary, currentColor); border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); pointer-events: auto; user-select: none; }
+.dshDesktopStatusBar { position: absolute; background: var(--dsw-specific-sidebar-fill); display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; line-height: 1; color: var(--dsw-alias-label-secondary, currentColor); border-top: 1px solid var(--dsw-alias-border-l1, rgba(128,128,128,0.25)); pointer-events: auto; user-select: none; }
 .dshDesktopStatusDot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
 /* 设置弹窗左侧 tab 列可滚动（dsh 上游 navList 无 overflow，tab 多了被截断）：
    用弹窗稳定标记定位，不依赖 hash 类名。 */
