@@ -68,11 +68,15 @@
 - lane 改写反代默认 127.0.0.1:3091（settings.yaml dsh-desktop-tauriapp: lane_port，env
   DSH_MOBILE_LANE_PORT 优先）；桌面 spawn dsh 时注入 DSH_MOBILE_LANE_PORT /
   DSH_MOBILE_ENABLED / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN。
+- WS 空闲保活：lane 反代对 upgrade 后的 WebSocket 空闲时在帧边界注入 ping（防中间代理空闲
+  超时揧断 dsh /api/remote.mux 复用长连接——手机端「连接异常」循环的对策）；pong 超时判死主动
+  断开触发 dsh 客户端快速重连。settings.yaml dsh-desktop-tauriapp: ws_keepalive_ms（ping 间隔
+  ms，0=关闭，默认 15000）、ws_pong_timeout_ms（判死超时 ms，默认 10000），改动重启 lane 生效。
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + @dsh-external/dsh-mobile-nav）
   → materialize 挂共享池 → desktop-plugin-inject.yml 三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
-- 测试：mobile-access `npm test`（node 18 例）、shell-web 3 例、vendor 1 例、
-  expo-app `npm test`（vitest 7 例）；cargo test 10 例。
+ - 测试：mobile-access `npm test`（node 47 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、vendor 1 例、
+   expo-app `npm test`（vitest 7 例）；cargo test 32 例。
 
 ## 已知注意事项（血泪坑）
 

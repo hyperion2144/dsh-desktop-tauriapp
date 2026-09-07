@@ -3,6 +3,7 @@
 //   - 入站 Host/Origin 改写成 upstream（loopback），使 dsh /api 信任栅栏看到 loopback；
 //   - HTML 注入到 <head> 之后并修正 Content-Length（不破坏页面）；
 //   - WebSocket upgrade 全头回传 + 首帧（head）先于 end() 写上游（mux 初始 RPC 不丢）；
+//   - WS 空闲保活：upgrade 后上游→客户端做帧感知泵，空闲时在帧边界注入 ping（pong 超时断开）；
 //   - 连接级跟踪：所有 socket 挂 error 静默（防 EPIPE 打崩 dsh 进程），close 时全销毁。
 // 额外保留：可选 auth 钩子（配对 cookie 门禁，dsh-mobile-access 自用）。
 import http from 'node:http';
@@ -94,6 +95,142 @@ function isHtmlRequest(req) {
 }
 
 /**
+ * WS 空闲保活（手机链路对策）：dsh 客户端对 /api/remote.mux 的复用 WebSocket 没有应用层
+ * 心跳，中间代理（cpolar/cloudflared 等）对静默连接的空闲超时会掐断长连接，手机端即表现
+ * 为「连接异常」重连循环。lane 在 upgrade 后的 上游→客户端 方向做帧感知泵：完整帧原样
+ * 转发，空闲时在帧边界注入 WS ping（服务器→客户端未掩码 2 字节；浏览器协议栈按 RFC 6455
+ * 自动回 pong，无需页面配合）；发出 ping 后 pongTimeoutMs 内客户端无任何入站字节即判定
+ * 链路死亡，主动断开让 dsh 客户端走指数退避快速重连，而不是挂在僵尸连接上。
+ */
+export const WS_PING_FRAME = Buffer.from([0x89, 0x00]);
+/** wsFrameLength 结果哨兵：-1 帧/头不完整；-2 帧头声明非法（超长），调用方回退 raw 透传。 */
+export const FRAME_INCOMPLETE = -1;
+export const FRAME_INVALID = -2;
+/** 单帧声明长度的安全上限（2GB-1）：防异常/恶意帧头把 lane 内存撑爆。 */
+const FRAME_LENGTH_CAP = 0x7fffffff;
+
+/**
+ * 计算 offset 处一个 WebSocket 帧的完整字节数（只解析信封，不解释 RSV/扩展——
+ * permessage-deflate 等扩展改变载荷语义，不改变信封长度；对「服务器帧带掩码」的非法
+ * 输入保持宽容，按存在掩码键解析，保证透传字节不变）。
+ * @returns 完整帧字节数；FRAME_INCOMPLETE；FRAME_INVALID。
+ */
+export function wsFrameLength(buf, offset) {
+  if (buf.length - offset < 2) return FRAME_INCOMPLETE;
+  const masked = (buf[offset + 1] & 0x80) !== 0;
+  const len7 = buf[offset + 1] & 0x7f;
+  let headerLen = 2 + (masked ? 4 : 0);
+  let payloadLen = len7;
+  if (len7 === 126) {
+    if (buf.length - offset < headerLen + 2) return FRAME_INCOMPLETE;
+    payloadLen = buf.readUInt16BE(offset + 2);
+    headerLen += 2;
+  } else if (len7 === 127) {
+    if (buf.length - offset < headerLen + 8) return FRAME_INCOMPLETE;
+    const hi = buf.readUInt32BE(offset + 2);
+    const lo = buf.readUInt32BE(offset + 6);
+    if (hi > 0 || lo > FRAME_LENGTH_CAP) return FRAME_INVALID;
+    payloadLen = lo;
+    headerLen += 8;
+  }
+  if (payloadLen > FRAME_LENGTH_CAP) return FRAME_INVALID;
+  return headerLen + payloadLen;
+}
+
+/**
+ * 上游→客户端的帧感知泵。onData 收上游字节，按帧边界整帧转发（字节保真，含分片帧/
+ * 控制帧/压缩帧）；空闲 pingIntervalMs 且无半帧积压时注入 WS_PING_FRAME；发出 ping 后
+ * pongTimeoutMs 内 noteClientActivity 未被调用（客户端无任何入站字节）则回调 onPongTimeout。
+ * 帧头解析失败（FRAME_INVALID）一次性回退 raw 透传，保证未知协议扩展下字节不丢不乱。
+ */
+function createWsKeepalivePump({ target, pingIntervalMs, pongTimeoutMs, onPongTimeout, onFallbackRaw }) {
+  let buf = null;
+  let paused = false;
+  let rawMode = false;
+  let stopped = false;
+  let idleTimer = null;
+  let pongTimer = null;
+  const clearTimers = () => {
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+  };
+  const unref = (t) => { if (t && typeof t.unref === 'function') t.unref(); return t; };
+  // 空闲计时：上游静默超过 pingIntervalMs 且无半帧积压时注入 ping。创建即武装（上游可能
+  // 从头到尾静默）；每次上游有新字节都重置。计时器全部 unref，绝不拖住 dsh 进程退出。
+  const armIdle = () => {
+    if (stopped || rawMode || pingIntervalMs <= 0) return;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = unref(setTimeout(() => {
+      idleTimer = null;
+      if (stopped || rawMode || paused) return;
+      if (buf === null || buf.length === 0) {
+        try { target.write(WS_PING_FRAME); } catch { /* 断连由 teardown 清理 */ }
+        // pong 计时只在「首个未应答 ping」时武装：后续 ping 不重置 deadline（否则
+        // pingIntervalMs < pongTimeoutMs 时计时器被无限滑动，判死永不触发）。
+        // 客户端任意入站字节经 noteClientActivity 清除；清空后由下一个 ping 重新武装。
+        if (pongTimer === null) {
+          pongTimer = unref(setTimeout(() => { pongTimer = null; if (!stopped) onPongTimeout(); }, pongTimeoutMs));
+        }
+      }
+      armIdle();
+    }, pingIntervalMs));
+  };
+  // 创建即武装：上游可能从头到尾静默（纯事件监听连接），首个 ping 不应依赖 onData 触发。
+  armIdle();
+  return {
+    /** 上游新到字节：攒帧、按帧边界转发；上游活跃即重置空闲计时。 */
+    onData(chunk) {
+      if (stopped) return;
+      if (rawMode) { target.write(chunk); return; }
+      buf = buf === null ? chunk : Buffer.concat([buf, chunk]);
+      if (paused) return;
+      this.processBuf();
+      armIdle();
+    },
+    processBuf() {
+      if (stopped || paused || rawMode || buf === null || buf.length === 0) return;
+      let offset = 0;
+      while (true) {
+        const n = wsFrameLength(buf, offset);
+        if (n === FRAME_INVALID) {
+          // 异常帧头：一次性回退 raw 透传（先把积压原样写出去，后续 chunk 不再解析）。
+          if (onFallbackRaw) onFallbackRaw();
+          rawMode = true;
+          clearTimers();
+          if (!target.write(buf)) {
+            paused = true;
+            target.once('drain', () => { paused = false; });
+          }
+          buf = null;
+          return;
+        }
+        if (n === FRAME_INCOMPLETE) break;
+        offset += n;
+      }
+      if (offset === 0) return;
+      const out = buf.subarray(0, offset);
+      buf = offset >= buf.length ? null : buf.subarray(offset);
+      if (!target.write(out)) {
+        paused = true;
+        target.once('drain', () => { paused = false; this.processBuf(); });
+      }
+    },
+    /** 客户端入站任意字节 = 存活（pong 或业务帧），清除 pong 超时判定。已知边角：客户端
+    * 单向喋喋不休而返程半死时不判死——但 ping 写不进对端时 TCP 重传/超时会兜底断开。 */
+    noteClientActivity() {
+      if (pongTimer) { clearTimeout(pongTimer); pongTimer = null; }
+    },
+    /** 上游 EOF：把残余字节转发完并传播 FIN（对齐原 pipe 的 end 行为）。 */
+    onUpstreamEnd() {
+      if (stopped) return;
+      if (buf !== null && buf.length > 0) { try { target.write(buf); } catch { /* noop */ } buf = null; }
+      try { target.end(); } catch { /* noop */ }
+    },
+    stop() { stopped = true; clearTimers(); },
+  };
+}
+
+/**
  * 创建改写反代服务（对齐 dsh-pocket proxy.mjs 的转发行为）。
  * @param opts { upstreamHost, upstreamPort, inject: string[], auth: (req) => {ok, setCookie} | null, onInjectSkip: fn }
  * @returns {server, listen(port?), close()}
@@ -110,6 +247,11 @@ export function createRewriteProxy(opts) {
     upstreamAuth = null,
     // 401 重换重放的请求体缓存上限：chunked / 超限请求走流式直通（401 不重放，原样透传）。
     replayBodyLimit = 8 * 1024 * 1024,
+    // WS 空闲保活（手机链路对策，见 createWsKeepalivePump）：空闲时在帧边界注入 ping，
+    // 防中间代理（cpolar 等）空闲超时掐断 dsh /api/remote.mux 复用长连接；0 = 关闭（raw pipe）。
+    wsPingIntervalMs = 15000,
+    // 发出 ping 后等待客户端入站字节（pong）的超时；超时判定链路死亡并主动断开。
+    wsPongTimeoutMs = 10000,
   } = opts;
   const upstream = upstreamHost + ':' + upstreamPort;
 
@@ -293,7 +435,27 @@ export function createRewriteProxy(opts) {
       }
       socket.write(`${raw.join('\r\n')}\r\n\r\n`);
       if (proxyHead?.length) socket.write(proxyHead);
-      proxySocket.pipe(socket);
+      // 上游→客户端：帧感知泵（空闲 ping 保活 + pong 超时判死）；wsPingIntervalMs=0 时
+      // 保持原 raw pipe 行为。客户端→上游：原始管道不动（客户端帧带掩码；浏览器协议栈
+      // 对 ping 自动回 pong，无需页面配合）。
+      let pump = null;
+      if (wsPingIntervalMs > 0) {
+        pump = createWsKeepalivePump({
+          target: socket,
+          pingIntervalMs: wsPingIntervalMs,
+          pongTimeoutMs: wsPongTimeoutMs,
+          onPongTimeout: () => {
+            accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= pong 超时：判定手机链路死亡（中间代理空闲掐断），主动断开触发 dsh 客户端快速重连']);
+            teardown();
+          },
+          onFallbackRaw: () => accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= 帧信封解析失败，回退 raw 透传（字节保真不受影响）']),
+        });
+        proxySocket.on('data', (c) => pump.onData(c));
+        socket.on('data', () => pump.noteClientActivity());
+        proxySocket.on('end', () => pump.onUpstreamEnd());
+      } else {
+        proxySocket.pipe(socket);
+      }
       socket.pipe(proxySocket);
       // 任一端断开都要清理另一端（避免上游残留僵尸连接占用 dsh 连接槽）
       // 对上游用 end()（FIN 优雅关闭），客户端侧已断直接 destroy；
@@ -303,6 +465,7 @@ export function createRewriteProxy(opts) {
       socket.on('error', quiet);
       const teardown = () => {
         try { proxySocket.unpipe?.(); socket.unpipe?.(); } catch { /* noop */ }
+        pump?.stop();
         try { proxySocket.end(); } catch { /* noop */ }
         const force = setTimeout(() => { try { if (!proxySocket.destroyed) proxySocket.destroy(); } catch { /* noop */ } }, 2000);
         if (force.unref) force.unref();
