@@ -129,6 +129,16 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   bar.innerHTML = '<span class="dshDesktopStatusDot" aria-hidden="true"></span><span class="dshDesktopStatusText"></span>'
   host.appendChild(bar)
 
+  // 折叠加宽区两侧装饰条（darwin 折叠时定位）：与顶部条/状态条同一层主题填充，
+  // 保证整条轨道叠加层数一致（皮肤为半透明多层叠加主题，见 #37）。
+  const railPadLeft = document.createElement('div')
+  const railPadRight = document.createElement('div')
+  railPadLeft.className = 'dshDesktopRailPad'
+  railPadRight.className = 'dshDesktopRailPad'
+  railPadLeft.style.display = 'none'
+  railPadRight.style.display = 'none'
+  host.append(railPadLeft, railPadRight)
+
   const refreshStatus = () => {
     const invoke = tauriInvoke()
     if (!invoke) return
@@ -251,6 +261,24 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       const sidePad = collapsed ? (MACOS_COLLAPSED_SIDEBAR - COLLAPSED_RAIL) / 2 : 0
       sidebar.style.paddingLeft = sidePad ? `${sidePad}px` : ''
       sidebar.style.paddingRight = sidePad ? `${sidePad}px` : ''
+      // 折叠加宽区（#37 残留）：两侧 17px 条带用与顶部条/状态条同一层主题填充
+      // （dshDesktopRailPad，样式见 styles.ts）补齐，使整条轨道叠加层数一致
+      // （皮肤为半透明多层叠加主题，fill 带透明度）。条带只铺在顶部条与状态条
+      // 之间，完全不触碰 dsh 任何元素的布局；展开态隐藏。
+      if (collapsed) {
+        railPadLeft.style.cssText = `left:0;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`
+        railPadRight.style.cssText = `left:${sidebarWidth - sidePad}px;top:${height}px;width:${sidePad}px;bottom:${STATUS_BAR_HEIGHT}px;`
+      } else {
+        railPadLeft.style.display = 'none'
+        railPadRight.style.display = 'none'
+      }
+      // 折叠态隐藏侧栏列 border-right（stock 分隔线）：加宽后它会裸露在轨道右缘
+      // 中段（顶部条/状态条区域已被同色覆盖），视觉上像残留分割线；展开态还原。
+      if (collapsed) {
+        sidebar.style.setProperty('border-right', 'none', 'important')
+      } else {
+        sidebar.style.removeProperty('border-right')
+      }
       if (collapsed) widenCollapsedRail(frame)
     } else {
       strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`
@@ -326,6 +354,13 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
     if (found !== null) {
       found.sidebar.style.paddingTop = ''
       found.sidebar.style.paddingBottom = ''
+      // 折叠加宽区残留一并清理（#37）：列内联背景、左右 padding，以及 frame 上的
+      // transition / grid-template-columns important 覆盖，HMR/停用后不留痕。
+      found.sidebar.style.paddingLeft = ''
+      found.sidebar.style.paddingRight = ''
+      found.sidebar.style.removeProperty('border-right')
+      found.frame.style.removeProperty('transition')
+      found.frame.style.removeProperty('grid-template-columns')
       if (found.center !== null) found.center.style.paddingTop = ''
     }
     // 还原侧边栏宽度修复（HMR/停用后不留内联样式与标记）
