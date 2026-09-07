@@ -45,10 +45,35 @@ export function createMobileAccessService(opts = {}) {
     fetchImpl,
     log: warn,
   });
+
+  // WS 空闲保活间隔（ms）：见 proxy.mjs createWsKeepalivePump——手机链路中间代理（cpolar 等）
+  // 对静默连接的空闲超时会掐断 dsh /api/remote.mux 复用 WebSocket（dsh 客户端无应用层心跳），
+  // 手机端表现为「连接异常」重连循环；lane 空闲注入 ping 即可保活，pong 超时则主动断开触发
+  // 客户端快速重连。settings 键：ws_keepalive_ms = ping 注入间隔 ms（参数 wsPingIntervalMs）、
+  // ws_pong_timeout_ms = pong 判死超时 ms（参数 wsPongTimeoutMs）；优先级：opts（测试注入）>
+  // settings.yaml > proxy.mjs 缺省（15000/10000——默认值单一来源在 proxy 侧，此处不落地默认值）。
+  // ws_keepalive_ms 0 = 关闭保活。有意不提供 env 通道（调优参数，非部署参数，区别于 lane_port）。
+  // 改动需重启 lane（随 dsh 进程）生效。
+  let wsPingIntervalMs = opts.wsPingIntervalMs;
+  if (wsPingIntervalMs === undefined) {
+    try {
+      const v = Number(readSettingsString('ws_keepalive_ms') ?? '');
+      if (Number.isFinite(v) && v >= 0) wsPingIntervalMs = v;
+    } catch { /* noop */ }
+  }
+  let wsPongTimeoutMs = opts.wsPongTimeoutMs;
+  if (wsPongTimeoutMs === undefined) {
+    try {
+      const v = Number(readSettingsString('ws_pong_timeout_ms') ?? '');
+      if (Number.isFinite(v) && v > 0) wsPongTimeoutMs = v;
+    } catch { /* noop */ }
+  }
   const proxy = createRewriteProxy({
     upstreamHost,
     upstreamPort,
     upstreamAuth: dshAuth,
+    ...(wsPingIntervalMs !== undefined ? { wsPingIntervalMs } : {}),
+    ...(wsPongTimeoutMs !== undefined ? { wsPongTimeoutMs } : {}),
     // 仅注入 POLYFILL + LOOPBACK_HOSTNAME_PATCH + THEME_SYNC_PATCH（顺序：补丁先于 polyfill、先于 dsh scripts）。
     // ⚠️ 不注入 desktopEnvPatchScript：对齐 pocket 行为——只在 DSH Desktop 壳内注入，
     // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
