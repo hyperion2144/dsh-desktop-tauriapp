@@ -25,13 +25,14 @@ class PairStorageAdapter implements PairStorage {
   }
 
   getItem(key: string): string | null {
-    const cached = this.mem.get(key);
-    if (cached !== undefined) return cached;
+    // preferences 是唯一事实源：AddPair 等独立页面会各自写入偏好，
+    // mem 只是 pref 未就绪期间的过渡缓存。读取若先走 mem，过期快照
+    // 会在 remove/save 时整体覆盖磁盘——删除一条 = 抹掉其它页面新写的全部配对。
     if (this.pref != null) {
       const v = this.pref.getSync(key, '') as string;
-      if (v !== '') return v;
+      return v !== '' ? v : null;
     }
-    return null;
+    return this.mem.get(key) ?? null;
   }
 
   setItem(key: string, value: string): void {

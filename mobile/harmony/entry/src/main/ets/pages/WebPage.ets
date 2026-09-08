@@ -32,6 +32,11 @@ struct WebPage {
           console.error('[dsh-mobile] main frame load error: ' +
             (event?.error?.getErrorInfo?.() ?? String(event?.error?.getErrorCode?.() ?? '')));
         })
+        .onConsole((event) => {
+          // #35 诊断：把 dsh 页面内 console 转发到 hilog，用 hdc hilog 抓取壳内客户端的连接日志
+          console.info('[dsh-web][' + (event?.message?.getMessageLevel?.() ?? '') + '] ' + (event?.message?.getMessage?.() ?? ''));
+          return false;
+        })
         .layoutWeight(1)
         // 关键：让 Web 组件自身延伸到底部安全区（home indicator 之下），
         // 而不是根 Column 的背景色兜底——否则 webview 底部会留一条黑/背景色带。
