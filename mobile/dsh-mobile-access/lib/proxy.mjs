@@ -138,12 +138,45 @@ export function wsFrameLength(buf, offset) {
 }
 
 /**
+ * 解码一帧「客户端→服务器」方向的 WS 帧（带掩码）：供诊断与帧级处理使用。
+ * 返回 { opcode, fin, payload, total }；null = 帧/头不完整；undefined = 帧头非法。
+ */
+function decodeClientFrame(buf, offset) {
+  if (buf.length - offset < 2) return null;
+  const b0 = buf[offset];
+  const b1 = buf[offset + 1];
+  const masked = (b1 & 0x80) !== 0;
+  const len7 = b1 & 0x7f;
+  let headerLen = 2 + (masked ? 4 : 0);
+  let payloadLen = len7;
+  if (len7 === 126) {
+    if (buf.length - offset < headerLen + 2) return null;
+    payloadLen = buf.readUInt16BE(offset + 2);
+    headerLen += 2;
+  } else if (len7 === 127) {
+    if (buf.length - offset < headerLen + 8) return null;
+    const hi = buf.readUInt32BE(offset + 2);
+    if (hi > 0) return undefined;
+    payloadLen = buf.readUInt32BE(offset + 6);
+    headerLen += 8;
+  }
+  if (payloadLen > 0x7fffffff) return undefined;
+  if (buf.length - offset < headerLen + payloadLen) return null;
+  const payload = Buffer.from(buf.subarray(offset + headerLen, offset + headerLen + payloadLen));
+  if (masked) {
+    const mask = buf.subarray(offset + headerLen - 4, offset + headerLen);
+    for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+  }
+  return { opcode: b0 & 0x0f, fin: (b0 & 0x80) !== 0, payload, total: headerLen + payloadLen };
+}
+
+/**
  * 上游→客户端的帧感知泵。onData 收上游字节，按帧边界整帧转发（字节保真，含分片帧/
  * 控制帧/压缩帧）；空闲 pingIntervalMs 且无半帧积压时注入 WS_PING_FRAME；发出 ping 后
  * pongTimeoutMs 内 noteClientActivity 未被调用（客户端无任何入站字节）则回调 onPongTimeout。
  * 帧头解析失败（FRAME_INVALID）一次性回退 raw 透传，保证未知协议扩展下字节不丢不乱。
  */
-function createWsKeepalivePump({ target, pingIntervalMs, pongTimeoutMs, onPongTimeout, onFallbackRaw }) {
+function createWsKeepalivePump({ target, pingIntervalMs, pongTimeoutMs, onPongTimeout, onFallbackRaw, onUpstreamFrame }) {
   let buf = null;
   let paused = false;
   let rawMode = false;
@@ -205,6 +238,12 @@ function createWsKeepalivePump({ target, pingIntervalMs, pongTimeoutMs, onPongTi
           return;
         }
         if (n === FRAME_INCOMPLETE) break;
+        if (onUpstreamFrame) {
+          const fStart = offset;
+          const len7 = buf[fStart + 1] & 0x7f;
+          const hLen = 2 + (len7 === 126 ? 2 : len7 === 127 ? 8 : 0);
+          try { onUpstreamFrame(buf[fStart] & 0x0f, buf.subarray(fStart + hLen, fStart + n)); } catch { /* 诊断回调不抛出 */ }
+        }
         offset += n;
       }
       if (offset === 0) return;
@@ -423,6 +462,11 @@ export function createRewriteProxy(opts) {
     upstreamAuth?.applyTo(headers);
     const wsPath = normalizeRemotePath(req.url);
     accessLog(['WS', req.method, req.headers.host ?? '-', '->', wsPath]);
+    // 诊断（#35）：壳内 WS 异常仅在 App WebView 出现、浏览器环境无——记录 upgrade 请求的
+    // 凭证/来源头特征与上游应答码，定位 ArkWeb 握手与浏览器差异。
+    if (wsPath === '/api/remote.mux') {
+      accessLog(['  ..', 'diag', `cookie=${req.headers.cookie ? 'yes' : 'none'}`, `origin=${req.headers.origin ?? 'none'}`, `sfs=${req.headers['sec-fetch-site'] ?? 'none'}`, `ua=${req.headers['user-agent'] ? String(req.headers['user-agent']).slice(0, 20) : 'none'}`]);
+    }
     const proxyReq = http.request({
       host: upstreamHost, port: upstreamPort, method: req.method, path: normalizeRemotePath(req.url), headers, agent: false,
     });
@@ -434,11 +478,17 @@ export function createRewriteProxy(opts) {
         raw.push(`${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
       }
       socket.write(`${raw.join('\r\n')}\r\n\r\n`);
-      if (proxyHead?.length) socket.write(proxyHead);
       // 上游→客户端：帧感知泵（空闲 ping 保活 + pong 超时判死）；wsPingIntervalMs=0 时
       // 保持原 raw pipe 行为。客户端→上游：原始管道不动（客户端帧带掩码；浏览器协议栈
       // 对 ping 自动回 pong，无需页面配合）。
       let pump = null;
+      // #35 帧级诊断：mux 连接的前几帧（双向）与关闭事件
+      const muxT0 = Date.now();
+      const muxSeq = (globalThis.__dshMuxDiagSeq = (globalThis.__dshMuxDiagSeq || 0) + 1);
+      const muxLog = (msg) => accessLog(['  ..', `mux#${muxSeq}`, `${((Date.now() - muxT0) / 1000).toFixed(1)}s`, msg]);
+      let muxClosed = false;
+      const muxClose = (who) => { if (!muxClosed) { muxClosed = true; muxLog(`关闭（先关闭侧=${who}）`); } };
+      let uFrames = 0;
       if (wsPingIntervalMs > 0) {
         pump = createWsKeepalivePump({
           target: socket,
@@ -449,12 +499,35 @@ export function createRewriteProxy(opts) {
             teardown();
           },
           onFallbackRaw: () => accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= 帧信封解析失败，回退 raw 透传（字节保真不受影响）']),
+          onUpstreamFrame: (op, payload) => { uFrames++; if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`); },
         });
         proxySocket.on('data', (c) => pump.onData(c));
         socket.on('data', () => pump.noteClientActivity());
+        let cFrames = 0, cAccum = null;
+        socket.on('data', (chunk) => {
+          pump.noteClientActivity();
+          if (cFrames >= 3) return;
+          try {
+          cAccum = cAccum === null ? chunk : Buffer.concat([cAccum, chunk]);
+          let off = 0;
+          for (;;) {
+            const f = decodeClientFrame(cAccum, off);
+            if (f === null) break;
+            if (f === undefined) { muxLog('client 帧信封非法，停止帧级记录'); cFrames = 99; break; }
+            cFrames++;
+            muxLog(`client帧#${cFrames} op=${f.opcode} len=${f.payload.length} :: ${f.payload.toString('utf8').slice(0, 140)}`);
+            off += f.total;
+            if (cFrames >= 3) break;
+          }
+          cAccum = off > 0 ? (off >= cAccum.length ? null : cAccum.subarray(off)) : cAccum;
+          } catch (e) { muxLog(`client 帧解析异常：${String(e?.message ?? e)}`); cFrames = 99; }
+        });
         proxySocket.on('end', () => pump.onUpstreamEnd());
+        // proxyHead 同样喂给泵（保持与后续 data 相同的帧边界语义）
+        if (proxyHead?.length) pump.onData(proxyHead);
       } else {
         proxySocket.pipe(socket);
+        if (proxyHead?.length) socket.write(proxyHead);
       }
       socket.pipe(proxySocket);
       // 任一端断开都要清理另一端（避免上游残留僵尸连接占用 dsh 连接槽）
@@ -476,6 +549,7 @@ export function createRewriteProxy(opts) {
     });
     // 上游返回普通 HTTP 响应（非 101）：把状态码/头回写后断开，别让客户端永久挂起
     proxyReq.on('response', (proxyRes) => {
+      if (wsPath === '/api/remote.mux') accessLog(['  ..', 'diag', `上游应答（非101，将透传给客户端）: ${proxyRes.statusCode}`]);
       if (proxyRes.statusCode === 101) return;
       try {
         const raw = [`HTTP/1.1 ${proxyRes.statusCode} ${proxyRes.statusMessage ?? ''}`.trim()];

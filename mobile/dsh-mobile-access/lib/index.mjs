@@ -57,15 +57,23 @@ export function createMobileAccessService(opts = {}) {
   let wsPingIntervalMs = opts.wsPingIntervalMs;
   if (wsPingIntervalMs === undefined) {
     try {
-      const v = Number(readSettingsString('ws_keepalive_ms') ?? '');
-      if (Number.isFinite(v) && v >= 0) wsPingIntervalMs = v;
+      // 键不存在时 readSettingsString 返 null：必须保持 undefined（用 proxy 缺省 15000），
+      // 不能把 null 当空串 Number 成 0——否则保活泵被默认关闭（曾致产线零 ping）。
+      const raw = readSettingsString('ws_keepalive_ms');
+      if (raw != null) {
+        const v = Number(raw);
+        if (Number.isFinite(v) && v >= 0) wsPingIntervalMs = v;
+      }
     } catch { /* noop */ }
   }
   let wsPongTimeoutMs = opts.wsPongTimeoutMs;
   if (wsPongTimeoutMs === undefined) {
     try {
-      const v = Number(readSettingsString('ws_pong_timeout_ms') ?? '');
-      if (Number.isFinite(v) && v > 0) wsPongTimeoutMs = v;
+      const rawPong = readSettingsString('ws_pong_timeout_ms');
+      if (rawPong != null) {
+        const v = Number(rawPong);
+        if (Number.isFinite(v) && v > 0) wsPongTimeoutMs = v;
+      }
     } catch { /* noop */ }
   }
   const proxy = createRewriteProxy({
@@ -149,6 +157,8 @@ export function createMobileAccessService(opts = {}) {
           actualBin = result.path
           tunnel.bin = actualBin
           tunnel.detail = `${result.source === 'PATH' ? 'PATH 已有' : result.source === 'cache' ? '使用缓存' : '已下载'}：${actualBin}`
+          // 自动解析成功后持久化解析结果：dsh 重启后 boot() 据此自动拉起隧道（常驻）
+          try { writeSettingsKey('cloudflared_bin', JSON.stringify(actualBin)); } catch { /* noop */ }
         } else {
           tunnel.bin = actualBin
         }
@@ -672,8 +682,9 @@ function apply(ctx) {
             return ok({ bin: t.bin || null, running: !!t.child, phase: t.phase ?? 'resolving' });
           }
           case 'cloudflared.stop':
+            // 显式停止 = 同时清掉持久化 bin：重启后不再自动拉起（保留「停止」的语义）
+            try { writeSettingsKey('cloudflared_bin', JSON.stringify('')); } catch { /* noop */ }
             svc.stopTunnel();
-            return ok(true);
           default:
             return errRpc('unknown-endpoint');
         }
