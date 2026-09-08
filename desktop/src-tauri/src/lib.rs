@@ -53,6 +53,10 @@ struct DesktopSettings {
     proxy_url: Option<String>,
     /// 不走代理的地址（NO_PROXY 标准格式，逗号分隔，支持 host / *.domain / IP）。
     no_proxy: Option<String>,
+    /// 代理认证用户名（system/manual 模式下注入到 HTTP_PROXY 等 env 的 userinfo 段）。
+    proxy_user: Option<String>,
+    /// 代理认证密码（与 proxy_user 配对；空=无认证）。
+    proxy_pass: Option<String>,
 }
 
 fn settings_path() -> PathBuf {
@@ -539,12 +543,34 @@ fn system_proxy_env() -> Option<ProxyEnv> {
     None
 }
 
+/// 把 user:pass@ 注入代理 URL 的 userinfo 段：http://proxy:8080 → http://user:pass@proxy:8080。
+/// user 为空或 URL 已含 userinfo（有 @）则原样返回。
+fn inject_proxy_credentials(url: &str, user: &str, pass: &str) -> String {
+    if user.is_empty() {
+        return url.to_string();
+    }
+    let Some(idx) = url.find("://") else { return url.to_string(); };
+    let after_scheme = idx + 3;
+    let authority = &url[after_scheme..];
+    // 已有 userinfo 则不重复注入
+    if authority.contains('@') {
+        return url.to_string();
+    }
+    let userinfo = if pass.is_empty() {
+        format!("{user}@")
+    } else {
+        format!("{user}:{pass}@")
+    };
+    format!("{}{userinfo}{}", &url[..after_scheme], authority)
+}
+
 /// 按设置解析应注入的代理环境：
 /// - off / 未知值 → None；
 /// - manual → 校验 URL（非法 → None）；http/https URL 注 http+https，socks5 URL 注 all；
 /// - system → 实时读系统代理（检测失败 → None，记日志）。
+/// 末尾按 proxy_user/proxy_pass 给所有代理 URL 注入凭据（userinfo 段）。
 fn resolved_proxy_env(settings: &DesktopSettings) -> Option<ProxyEnv> {
-    match settings.proxy_mode.as_deref().unwrap_or(PROXY_MODE_OFF) {
+    let mut env = match settings.proxy_mode.as_deref().unwrap_or(PROXY_MODE_OFF) {
         PROXY_MODE_MANUAL => {
             let url = normalize_proxy_url(settings.proxy_url.as_deref().unwrap_or(""))?;
             let entries = settings
@@ -573,7 +599,23 @@ fn resolved_proxy_env(settings: &DesktopSettings) -> Option<ProxyEnv> {
             }
         },
         _ => None,
+    }?;
+    // 凭据注入：proxy_user 非空时给所有代理 URL 拼接 user:pass@
+    if let Some(user) = settings.proxy_user.as_deref() {
+        if !user.is_empty() {
+            let pass = settings.proxy_pass.as_deref().unwrap_or("");
+            if let Some(ref mut url) = env.http {
+                *url = inject_proxy_credentials(url, user, pass);
+            }
+            if let Some(ref mut url) = env.https {
+                *url = inject_proxy_credentials(url, user, pass);
+            }
+            if let Some(ref mut url) = env.all {
+                *url = inject_proxy_credentials(url, user, pass);
+            }
+        }
     }
+    Some(env)
 }
 
 /// 把解析出的代理环境写入子进程 env（大小写各一：Unix 工具惯用小写，Windows 工具惯用大写，研究边界 11）。
@@ -1223,6 +1265,8 @@ fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child
     }
     // 代理继承：同 unix 分支，按设置注入代理环境变量；off/检测失败不注入
     inject_proxy_env(&mut cmd);
+    // Node.js fetch 走代理：--use-env-proxy 让 Node.js 读取 HTTP_PROXY/HTTPS_PROXY 等环境变量
+    cmd.env("NODE_OPTIONS", "--use-env-proxy");
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(dsh_home());
     cmd.stdout(Stdio::piped())
@@ -2479,6 +2523,8 @@ fn get_proxy_settings() -> serde_json::Value {
         "proxy_mode": settings.proxy_mode.unwrap_or_else(|| PROXY_MODE_OFF.to_string()),
         "proxy_url": settings.proxy_url.unwrap_or_default(),
         "no_proxy": settings.no_proxy.unwrap_or_default(),
+        "proxy_user": settings.proxy_user.unwrap_or_default(),
+        "proxy_pass": settings.proxy_pass.unwrap_or_default(),
         "effective": effective,
     })
 }
@@ -2490,9 +2536,15 @@ fn non_empty(s: String) -> Option<String> {
 }
 
 /// 保存代理设置（供设置表单提交）：校验模式与手动 URL 后沿 load→改→save 合并链路持久化，
-/// 不触碰 settings.yaml 其他键。proxy_url/no_proxy 存原值（注入时再规范化），空串归一为 None。
+/// 不触碰 settings.yaml 其他键。proxy_url/no_proxy/proxy_user/proxy_pass 存原值，空串归一为 None。
 #[tauri::command]
-fn save_proxy_settings(proxy_mode: String, proxy_url: String, no_proxy: String) -> Result<(), String> {
+fn save_proxy_settings(
+    proxy_mode: String,
+    proxy_url: String,
+    no_proxy: String,
+    proxy_user: String,
+    proxy_pass: String,
+) -> Result<(), String> {
     if !matches!(proxy_mode.as_str(), PROXY_MODE_OFF | PROXY_MODE_SYSTEM | PROXY_MODE_MANUAL) {
         return Err(format!("未知代理模式：{proxy_mode}"));
     }
@@ -2504,6 +2556,8 @@ fn save_proxy_settings(proxy_mode: String, proxy_url: String, no_proxy: String) 
     settings.proxy_mode = Some(proxy_mode);
     settings.proxy_url = non_empty(proxy_url);
     settings.no_proxy = non_empty(no_proxy);
+    settings.proxy_user = non_empty(proxy_user);
+    settings.proxy_pass = non_empty(proxy_pass);
     save_desktop_settings(&settings);
     Ok(())
 }

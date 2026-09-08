@@ -26,7 +26,7 @@
       .form-group { margin-bottom: 18px; }
       label { display: block; margin-bottom: 6px; font-weight: 600; }
       .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
-      input[type="text"], input[type="url"] {
+      input[type="text"], input[type="url"], input[type="password"] {
         width: 100%;
         padding: 8px 12px;
         background: var(--card);
@@ -36,7 +36,7 @@
         font-size: 14px;
         outline: none;
       }
-      input[type="text"]:focus, input[type="url"]:focus {
+      input[type="text"]:focus, input[type="url"]:focus, input[type="password"]:focus {
         border-color: var(--accent);
       }
       input:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -124,6 +124,13 @@
       <div class="hint">逗号分隔；localhost / 127.0.0.1 / ::1 始终包含</div>
     </div>
 
+    <div class="form-group">
+      <label>代理认证（可选）</label>
+      <input type="text" id="proxy-user" placeholder="用户名" style="margin-bottom: 8px;" />
+      <input type="password" id="proxy-pass" placeholder="密码" />
+      <div class="hint">需认证的代理填写用户名密码；system 模式下 Windows 注册表不存凭据，需手动填写</div>
+    </div>
+
     <div id="effective" class="effective"></div>
     <div id="test-result" class="result"></div>
 
@@ -147,6 +154,8 @@
           modeRadios.forEach((r) => { r.checked = (r.value === currentMode); });
           $("proxy-url").value = data.proxy_url || "";
           $("no-proxy").value = data.no_proxy || "";
+          $("proxy-user").value = data.proxy_user || "";
+          $("proxy-pass").value = data.proxy_pass || "";
           updateModeUI();
 
           // 显示当前生效预览
@@ -208,6 +217,8 @@
         const mode = document.querySelector('input[name="mode"]:checked')?.value || "off";
         const url = $("proxy-url").value.trim();
         const noProxy = $("no-proxy").value.trim();
+        const proxyUser = $("proxy-user").value.trim();
+        const proxyPass = $("proxy-pass").value;
         $("btn-save").disabled = true;
         $("btn-save").textContent = "保存中…";
         try {
@@ -215,6 +226,8 @@
             proxyMode: mode,
             proxyUrl: url,
             noProxy: noProxy,
+            proxyUser: proxyUser,
+            proxyPass: proxyPass,
           });
           showResult("设置已保存，正在重启 dsh 服务…", true);
           try {
