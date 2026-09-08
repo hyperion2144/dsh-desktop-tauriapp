@@ -3662,6 +3662,32 @@ pub fn run() {
                     handle.exit(0);
                 });
             }
+            // 测试钩子：DSH_DESKTOP_PROXY_RESTART_TEST=1 时复现「设置表单保存 → 自动重启」链路
+            //（acceptance-proxy.sh 专用）：直接调 save_proxy_settings + restart_dsh_service 两个真实命令，
+            // 验证保存持久化 + 重启后新代理注入生效。表单 JS（proxy-settings.html）对这两个命令只是薄封装。
+            if std::env::var("DSH_DESKTOP_PROXY_RESTART_TEST").as_deref() == Ok("1") {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // 等首次 spawn 完成就绪导航（restarting 标志复位）再触发，模拟用户在表单点「保存」
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    let url = std::env::var("DSH_DESKTOP_PROXY_RESTART_URL").unwrap_or_default();
+                    let no_proxy = std::env::var("DSH_DESKTOP_PROXY_RESTART_NO_PROXY").unwrap_or_default();
+                    if let Err(e) = save_proxy_settings("manual".into(), url, no_proxy, String::new(), String::new()) {
+                        log::error!("[proxy-restart-test] 保存代理设置失败：{e}");
+                        return;
+                    }
+                    log::info!("[proxy-restart-test] 已保存新代理设置，触发 dsh 重启");
+                    // restarting 标志尚未复位时短暂重试（与表单行为一致：保存成功即调重启命令）
+                    for _ in 0..3 {
+                        match restart_dsh_service(handle.clone()) {
+                            Ok(()) => return,
+                            Err(e) => log::warn!("[proxy-restart-test] 重启暂不可用：{e}"),
+                        }
+                        tokio::time::sleep(Duration::from_millis(1500)).await;
+                    }
+                    log::error!("[proxy-restart-test] 重启多次被拒，验收链路中断");
+                });
+            }
             // 测试钩子：DSH_DESKTOP_NOTIFY_TEST=1 时延迟触发一次通知（验证通知链路）
             if std::env::var("DSH_DESKTOP_NOTIFY_TEST").as_deref() == Ok("1") {
                 let handle = app.handle().clone();
@@ -3985,8 +4011,6 @@ mod unit_tests {
     }
 
     #[test]
-
-    #[test]
     fn dsh_state_default_field_types() {
         // DshState 新增字段（notify_port / notify_token / restarting）默认值校验。
         use std::sync::atomic::Ordering;
@@ -4148,6 +4172,8 @@ mod tests {
       proxy_mode: Some("off".into()),
       proxy_url: Some("http://192.168.1.1:7890".into()),
       no_proxy: Some("*.corp".into()),
+      proxy_user: Some("alice".into()),
+      proxy_pass: Some("s3cret".into()),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
@@ -4159,6 +4185,8 @@ mod tests {
     assert_eq!(back.proxy_mode.as_deref(), Some("off"));
     assert_eq!(back.proxy_url.as_deref(), Some("http://192.168.1.1:7890"));
     assert_eq!(back.no_proxy.as_deref(), Some("*.corp"));
+    assert_eq!(back.proxy_user.as_deref(), Some("alice"));
+    assert_eq!(back.proxy_pass.as_deref(), Some("s3cret"));
   }
 
   // ==================== 代理设置测试 ====================
