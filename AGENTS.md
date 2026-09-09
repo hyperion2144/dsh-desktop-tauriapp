@@ -29,7 +29,7 @@
 
 ## 代码风格与约定
 
-- Rust 注释用中文；核心逻辑在单文件 desktop/src-tauri/src/lib.rs（约 2400 行，按功能分区）。
+- Rust 注释用中文；桌面壳后端为模块化结构（desktop/src-tauri/src/ 下 19 个 mod 文件），lib.rs（约 1300 行）保留 run() 入口 + 状态管理 + generate_handler! 聚合，各功能区域迁移至独立模块（settings/proxy/lifecycle/probing/web_token/tray/pet/nav_guard/notify/plugin/platform/commands/profiles/remote/error/phase/state）。
 - 异步统一走 tauri::async_runtime::spawn；阻塞操作（如 dsh plugin add）用 spawn_blocking。
 - 托盘菜单「刷新」= refresh_tray_mode（现在重建整个菜单，不是只刷标签）。
 - 状态机：STATUS_* 常量 + set_status（写 DshState + emit dsh-status 事件）。
@@ -44,7 +44,11 @@
 - src/client/ —— 浏览器侧插件 client（index / advanced-shell / local-chrome /
   external-links / styles；=外链拦截、局部拖拽 chrome、状态条）
 - desktop/src-tauri/ —— Rust 桌面壳主体
-  - src/lib.rs 全部逻辑；build.rs 负责在构建期 staging 内嵌插件（embedded/，gitignore）
+  - src/lib.rs 入口聚合（run() + 状态管理 + generate_handler!）；build.rs 负责在构建期 staging 内嵌插件（embedded/，gitignore）
+  - src/{settings,proxy,lifecycle,probing,web_token,tray,pet,nav_guard,notify,plugin,platform,commands,profiles,remote,error,phase,state}.rs —— 各功能模块
+  - src/error.rs —— thiserror 域错误（SpawnError/ProxyError/NavigationError/SettingsError/TransitionError）
+  - src/phase.rs —— DshPhase 状态机 enum + transition()
+  - src/state.rs —— DshState 结构 + 常量
   - capabilities/ —— default.json（主窗本地）、pet.json（桌宠）、remote-desktop.json（远程页 ACL）
   - permissions/app-commands.toml —— 应用自命令权限清单
 - desktop/scripts/ —— 验收脚本与 Windows 无管理员工具链模板

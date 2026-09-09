@@ -890,6 +890,7 @@ dependencies = [
 name = "dsh-desktop-tauriapp"
 version = "0.7.5"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "cookie",
  "libc",
@@ -904,6 +905,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "thiserror 2.0.20",
  "tokio",
  "windows-sys 0.61.2",
 ]
