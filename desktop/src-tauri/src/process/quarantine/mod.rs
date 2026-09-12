@@ -89,11 +89,24 @@ pub fn fuse_settings(s: &DesktopSettings) -> (bool, Vec<String>, u8) {
     )
 }
 
-fn is_first_party(id: &str, name: &str, protect_first_party: bool) -> bool {
-    (protect_first_party
-        && (id.starts_with("@deepseek-ai/") || name.starts_with("@deepseek-ai/")))
-        || BUILTIN_PROTECTED.contains(&id)
+/// 不得自动禁用的条目：cordis 内部 loader entry（include/cordis:* ——禁掉会带走
+/// 全部 profile 插件）、桌面壳内建注入（materialize 会重写，禁了白禁且弄坏 chrome）、
+/// @deepseek-ai/* 第一方（可开关，默认保护）。
+fn is_protected_entry(id: &str, name: &str, key: &str, protect_first_party: bool) -> bool {
+    if BUILTIN_PROTECTED.contains(&id)
         || BUILTIN_PROTECTED.contains(&name)
+        || BUILTIN_PROTECTED.contains(&key)
+    {
+        return true;
+    }
+    if id == "include"
+        || name == "cordis:include"
+        || id.starts_with("cordis:")
+        || name.starts_with("cordis:")
+    {
+        return true;
+    }
+    protect_first_party && (id.starts_with("@deepseek-ai/") || name.starts_with("@deepseek-ai/"))
 }
 
 /// profile 的 cordis.patch.yml 路径（`base` = dsh home）。
@@ -135,40 +148,39 @@ pub fn run_cycle(
     // 排除，永不成为隔离目标（materialize 每次 spawn 都会重写它）。
     let mut disable_ids: Vec<String> = patchfile::managed_ids(&patch_text);
     for f in &quarantineable {
-        // 归因：优先 entry_id，其次 name（与 patch 行的 id/name 对照）；统一用
-        // 归因：优先 entry_id，其次 name（与 patch 行的 id/name 对照）；统一用
-        // as_deref 比较，避免 Option<&Option<String>> 的类型套娃
+        // 归因：通过 `dsh plugin add` 安装的插件不在 patch 行里（走 profile include
+        // 机制加载）——dsh-safe 的做法是不管来源，按 id 直接追加托管禁用（patch 层
+        // 作用于整棵 entry 树，启动时 disabled 条目跳过 import）。patch 行对照仅
+        // 用于：把 file:// 式 name 解析回真实行 id，以及识别原行已禁用的情况。
         let matches_row = |r: &patchfile::PatchRow| {
             f.entry_id.as_deref() == Some(r.id.as_str())
                 || f.name.as_deref() == Some(r.id.as_str())
+                || f.name.as_deref() == Some(r.name.as_deref().unwrap_or_default())
         };
-        let mut hit = rows.iter().find(|r| matches_row(r));
-        if hit.is_none() {
-            hit = rows
-                .iter()
-                .find(|r| f.name.as_deref() == Some(r.name.as_deref().unwrap_or_default()));
-        }
-        let Some(row) = hit else {
-            // 与 patch 行对不上的失败（外部实例的插件等）：记 skipped，不盲禁
-            outcome.skipped.push(format!(
-                "{}（{}）不在 {} 的 patch 行内，跳过自动禁用",
-                f.entry_id.clone().or_else(|| f.name.clone()).unwrap_or_default(),
-                f.kind,
-                patch_path.display()
-            ));
+        let row = rows.iter().find(|r| matches_row(r));
+        let key = row
+            .map(|r| r.id.clone())
+            .unwrap_or_else(|| {
+                f.entry_id
+                    .clone()
+                    .or_else(|| f.name.clone())
+                    .unwrap_or_default()
+            });
+        let name = row
+            .and_then(|r| r.name.clone())
+            .unwrap_or_else(|| f.name.clone().unwrap_or_default());
+        if key.is_empty() {
             continue;
-        };
-        let id = row.id.clone();
-        let name = row.name.clone().unwrap_or_default();
-        if rows.iter().any(|r| r.id == id && r.disabled == Some(true)) {
+        }
+        if rows.iter().any(|r| r.id == key && r.disabled == Some(true)) {
             continue; // 同 id 任一行已禁用（含托管区块）：还失败就不是这条的问题
         }
-        if is_first_party(&id, &name, protect_fp) {
-            outcome.skipped.push(format!("{id}（第一方/内建保护）"));
+        if is_protected_entry(&key, &name, &key, protect_fp) {
+            outcome.skipped.push(format!("{key}（第一方/内建保护）"));
             continue;
         }
-        if exclude.iter().any(|x| x == &id || (name.len() > 1 && x == &name)) {
-            outcome.skipped.push(format!("{id}（排除名单）"));
+        if exclude.iter().any(|x| x == &key || (name.len() > 1 && x == &name)) {
+            outcome.skipped.push(format!("{key}（排除名单）"));
             continue;
         }
         // dedupe：重复挂载且 patch 侧有同名 insert 来源 → 摘除该来源（取代禁用：
@@ -177,24 +189,24 @@ pub fn run_cycle(
         if f.kind == failures::kind::DUPLICATE_ID {
             let patch_side = patchfile::scan_patch_rows(&patch_text)
                 .iter()
-                .any(|r| r.in_insert && r.id == id);
+                .any(|r| r.in_insert && r.id == key);
             if patch_side {
-                outcome.deduped |= repair::dedupe_patch_side(&patch_path, &id);
+                outcome.deduped |= repair::dedupe_patch_side(&patch_path, &key);
                 if outcome.deduped {
                     patch_text = std::fs::read_to_string(&patch_path).unwrap_or(patch_text);
-                    outcome.skipped.push(format!("{id}（重复挂载：已摘除 patch 侧 insert 来源）"));
+                    outcome.skipped.push(format!("{key}（重复挂载：已摘除 patch 侧 insert 来源）"));
                     continue;
                 }
             } else {
                 // 注入清单/materialize 重写：不能自动摘除，只提示
-                outcome.skipped.push(format!("{id}（重复来源疑似桌面注入清单，需人工核查）"));
+                outcome.skipped.push(format!("{key}（重复来源疑似桌面注入清单，需人工核查）"));
                 continue;
             }
         }
         // 记账 + 加入托管禁用名单
         let reason = failures::summarize_line(&f.line);
         let entry = ledger::make_entry(
-            id.clone(),
+            key.clone(),
             name.clone(),
             reason.clone(),
             f.kind.to_string(),
@@ -202,8 +214,8 @@ pub fn run_cycle(
             patch_path.display().to_string(),
         );
         outcome.disabled.push(entry);
-        if !disable_ids.contains(&id) {
-             disable_ids.push(id.clone());
+        if !disable_ids.contains(&key) {
+            disable_ids.push(key.clone());
         }
     }
     // 注入清单里的命中只提示（见上），从待禁用名单剔除
@@ -366,6 +378,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+
+    #[test]
+    fn cycle_disables_include_loaded_plugin_not_in_patch_rows() {
+        // 用户实测场景（2026-09-12）：dsh plugin add 装的插件不在 patch 行里
+        // （走 profile include 机制）——必须照样按 id 追加托管禁用。
+        let base = tmp_base("include-loaded");
+        let patch = profile_patch_path(&base, "web");
+        std::fs::write(&patch, "[]\n").unwrap();
+        let stderr = "Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include): failed to import loader entry dsh-subagent-pro (dsh-subagent-pro): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'installSettingsSection'";
+        let outcome = run_cycle(&base, "web", None, stderr, &settings(true, &[], 2));
+        assert_eq!(outcome.disabled.len(), 1, "{outcome:?}");
+        assert_eq!(outcome.disabled[0].id, "dsh-subagent-pro");
+        // include（cordis 内部 loader entry）必须受保护，绝不能被禁
+        assert!(
+            outcome.skipped.iter().any(|s| s.contains("include")),
+            "include 应被内建保护跳过：{outcome:?}"
+        );
+        let text = std::fs::read_to_string(&patch).unwrap();
+        assert!(text.contains("- id: dsh-subagent-pro\n  disabled: true"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
     #[test]
     fn restore_all_clears_managed_block_and_ledger() {
         let base = tmp_base("restore");
