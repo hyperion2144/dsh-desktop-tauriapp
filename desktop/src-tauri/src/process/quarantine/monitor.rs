@@ -98,17 +98,18 @@ async fn monitor(app: AppHandle) {
         );
         if !outcome.disabled.is_empty() && used < max_retries {
             let names: Vec<String> = outcome.disabled.iter().map(|e| e.id.clone()).collect();
+            let note = format!(
+                "已禁用 {}，正在重试启动（第 {}/{} 次）",
+                names.join("、"),
+                used + 1,
+                max_retries
+            );
             show_notification(
                 &app,
                 "插件保险丝 · 已自动禁用不兼容插件",
-                &format!(
-                    "已禁用 {}，正在重试启动（第 {}/{} 次）",
-                    names.join("、"),
-                    used + 1,
-                    max_retries
-                ),
+                &format!("{note}"),
             );
-            respawn(&app, configured_port()).await;
+            respawn(&app, configured_port(), note).await;
             continue;
         }
         // 无可隔离 / 重试预算用尽 → 停在错误页
@@ -136,7 +137,7 @@ fn fail_closed(app: &AppHandle, reason: &str) {
 }
 
 /// 隔离后重试：确保端口释放 → 清 token → 重新 spawn → 重新进入就绪导航。
-async fn respawn(app: &AppHandle, port: u16) {
+async fn respawn(app: &AppHandle, port: u16, note: String) {
     let state = app.state::<DshState>();
     // 旧子进程已退出，但端口可能仍被占用（TIME_WAIT/晚退出的子进程）：
     // stop_port_owner 会先 SIGTERM 再 SIGKILL，纯代码跨平台。
@@ -160,6 +161,27 @@ async fn respawn(app: &AppHandle, port: u16) {
             state.spawn_failed.store(false, Ordering::SeqCst);
             drop(state);
             navigate_to_loading(app);
+            // 内嵌加载页的事件监听需要 ~1s 才就绪；就绪后重放缓冲尾部 + 保险丝状态行，
+            // 否则重试实例的早期输出全部丢失，加载页日志看起来像卡死（用户实测）。
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let tail = app
+                .state::<DshState>()
+                .stderr_buf
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|b| b.lock().unwrap().tail_lines(40))
+                .unwrap_or_default();
+            for line in &tail {
+                let _ = app.emit(
+                    "dsh-console",
+                    serde_json::json!({ "stream": "stderr", "line": line }),
+                );
+            }
+            let _ = app.emit(
+                "dsh-console",
+                serde_json::json!({ "stream": "stdout", "line": format!("[保险丝] {note}——以上为重放日志，下方为新实例输出") }),
+            );
             let nport = app.state::<DshState>().notify_port.load(Ordering::SeqCst);
             let ntoken = app.state::<DshState>().notify_token.lock().unwrap().clone();
             let h = app.clone();

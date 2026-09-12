@@ -603,3 +603,24 @@ pub(crate) fn save_quarantine_settings(
     crate::settings::save_desktop_settings(&s);
     serde_json::json!({ "ok": true })
 }
+
+#[cfg(test)]
+mod fuse_doctor_tests {
+    // 复现用户实测「点运行体检无结果」：直接调命令函数，看 panic/异常
+    #[test]
+    fn run_doctor_returns_checks() {
+        let v = super::run_doctor();
+        let checks = v.get("checks").and_then(|c| c.as_array()).expect("checks 应为数组");
+        assert!(!checks.is_empty(), "doctor checks 不应为空：{v}");
+        for c in checks {
+            assert!(c.get("label").is_some(), "每项应有 label：{c}");
+        }
+    }
+
+    #[test]
+    fn list_quarantine_returns_shape() {
+        let v = super::list_quarantine(None);
+        assert!(v.get("entries").is_some(), "应有 entries：{v}");
+        assert!(v.get("profile").is_some(), "应有 profile：{v}");
+    }
+}

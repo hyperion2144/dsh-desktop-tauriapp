@@ -166,6 +166,8 @@ function buildPanel(): HTMLElement {
     showSettings: false,
     showRaw: true,
     doctorError: null as string | null,
+    repairBusy: null as string | null,
+    repairMsg: null as { ok: boolean; text: string } | null,
   }
 
   const root = el('div', undefined, 'display:flex;flex-direction:column;gap:12px;max-width:900px;font-size:13px;')
@@ -357,7 +359,8 @@ function buildPanel(): HTMLElement {
       // 操作行
       const actions = el('div', undefined, 'display:flex;gap:8px;flex-wrap:wrap;')
       if (e.repairable) {
-        const btn = el('button', '修复')
+        const btn = el('button', state.repairBusy === e.id ? '修复中…' : '修复')
+        if (state.repairBusy === e.id) btn.setAttribute('disabled', 'true')
         btn.className = 'pf-btn ghost'
         btn.addEventListener('click', () => void doRepair(e.id))
         actions.appendChild(btn)
@@ -372,6 +375,9 @@ function buildPanel(): HTMLElement {
       actions.appendChild(restore)
       right.appendChild(actions)
       const st = state.explain[e.id]
+      if (state.repairMsg) {
+        right.appendChild(el('div', state.repairMsg.text, `font-size:12px;white-space:pre-wrap;border:1px solid ${state.repairMsg.ok ? 'var(--dsw-alias-state-success-primary,#2fbf71)' : 'var(--dsw-alias-state-danger-primary,#e5534b)'};border-radius:12px;padding:10px 14px;word-break:break-all;`))
+      }
       if (st === 'loading') {
         right.appendChild(el('div', 'AI 解读中…（deepseek-v4-flash）', 'font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
       } else if (typeof st === 'string') {
@@ -404,12 +410,17 @@ function buildPanel(): HTMLElement {
   }
 
   async function doRepair(id: string): Promise<void> {
+    if (state.repairBusy) return
+    state.repairBusy = id
+    state.repairMsg = { ok: true, text: '修复已派发：dsh plugin add @latest 安装中，通常需 10–30 秒，请勿关闭设置…' }
+    render()
     try {
       const r = await invoke<{ ok: boolean; message?: string; error?: string }>('repair_plugin', { id })
-      root.appendChild(el('div', r.ok ? `修复完成：${r.message ?? ''}` : `修复失败：${r.error ?? ''}`, `font-size:12px;color:${r.ok ? 'var(--dsw-alias-state-success-primary,#2fbf71)' : 'var(--dsw-alias-state-danger-primary,#e5534b)'};`))
+      state.repairMsg = { ok: !!r.ok, text: r.ok ? (r.message ?? '修复完成，重启 dsh 后生效') : `修复失败：${r.error ?? '未知'}` }
     } catch (err) {
-      root.appendChild(el('div', `修复失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
+      state.repairMsg = { ok: false, text: `修复失败：${String(err)}` }
     }
+    state.repairBusy = null
     await reload()
     render()
   }

@@ -51,6 +51,12 @@ impl StderrBuffer {
         }
     }
 
+    /// 尾部 n 行（供 respawn 后向加载页重放，日志流接续不卡住）。
+    pub fn tail_lines(&self, n: usize) -> Vec<String> {
+        let start = self.lines.len().saturating_sub(n);
+        self.lines[start..].to_vec()
+    }
+
     /// 完整快照（丢弃行以头部省略号标记）。
     pub fn snapshot(&self) -> String {
         let mut s = String::new();

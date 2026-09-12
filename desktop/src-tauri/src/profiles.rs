@@ -13,7 +13,7 @@ use crate::dsh_home;
 #[cfg(target_os = "windows")]
 use crate::process::lifecycle::{find_node, find_dsh_bin_js};
 #[cfg(not(target_os = "windows"))]
-use crate::process::lifecycle::find_dsh_bin;
+use crate::process::lifecycle::{find_dsh_bin, dsh_runtime_path};
 /// 扫描 $DSH_HOME/profiles 下的可 boot-profile（bundles 顺序先 base 后 web-app 才可选）。
 #[derive(serde::Serialize)]
 pub(crate) struct ProfileInfo {
@@ -87,6 +87,8 @@ pub(crate) fn run_profile_plugin_add(profile: &str, pkg: &str) -> bool {
     {
         let Some(dsh) = find_dsh_bin() else { return false };
         std::process::Command::new(&dsh)
+            // GUI 启动的 app PATH 缺 nvm/homebrew node：dsh 内部转发 pnpm 需要可用 node
+            .env("PATH", dsh_runtime_path(&dsh))
             .args(["plugin", "--profile", profile, "add", "--config.minimumReleaseAge=0"])
             .arg(pkg)
             .status()
