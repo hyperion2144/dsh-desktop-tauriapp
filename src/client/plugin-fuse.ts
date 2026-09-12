@@ -129,6 +129,32 @@ function FusePanel(): React.ReactElement {
   return React.createElement('div', { ref })
 }
 
+let panelStylesInstalled = false
+/** 面板交互样式：hover/active 反馈必须走真样式表（内联 cssText 写不了伪类）。 */
+function ensurePanelStyles(): void {
+  if (panelStylesInstalled) return
+  panelStylesInstalled = true
+  const style = document.createElement('style')
+  style.dataset.pluginFuseStyles = '1'
+  style.textContent = `
+[data-plugin-fuse] .pf-btn { background:var(--dsw-alias-brand-primary-new-color,#4176e6); border:none; color:#fff; border-radius:8px; padding:6px 13px; font-size:12px; cursor:pointer; transition:filter .12s, transform .06s, background .12s; }
+[data-plugin-fuse] .pf-btn:hover { filter:brightness(1.12); }
+[data-plugin-fuse] .pf-btn:active { transform:translateY(1px); filter:brightness(.95); }
+[data-plugin-fuse] .pf-btn.ghost { background:transparent; border:1px solid var(--dsw-alias-border-l,#ffffff1f); color:var(--dsw-alias-label-primary,#e7eaf0); }
+[data-plugin-fuse] .pf-btn.ghost:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); filter:none; }
+[data-plugin-fuse] .pf-btn.ghost:active { background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12)); transform:translateY(1px); filter:none; }
+[data-plugin-fuse] .pf-btn.danger { background:transparent; border:1px solid var(--dsw-alias-state-danger-primary,#e5534b); color:var(--dsw-alias-state-danger-primary,#e5534b); }
+[data-plugin-fuse] .pf-btn.danger:hover { background:rgba(229,83,75,.12); filter:none; }
+[data-plugin-fuse] .pf-btn.danger:active { transform:translateY(1px); background:rgba(229,83,75,.2); filter:none; }
+[data-plugin-fuse] .pf-btn.sm { padding:2px 8px; font-size:11px; border-radius:6px; }
+[data-plugin-fuse] .pf-row { transition:background .12s; }
+[data-plugin-fuse] .pf-row:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06)); }
+[data-plugin-fuse] .pf-chip { transition:background .12s; border-radius:6px; }
+[data-plugin-fuse] .pf-chip:hover { background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07)); }
+`
+  document.head.appendChild(style)
+}
+
 function buildPanel(): HTMLElement {
   const state = {
     selected: 0,
@@ -142,6 +168,8 @@ function buildPanel(): HTMLElement {
   }
 
   const root = el('div', undefined, 'display:flex;flex-direction:column;gap:12px;max-width:900px;font-size:13px;')
+  root.dataset.pluginFuse = '1'
+  ensurePanelStyles()
 
   async function reload(): Promise<void> {
     try {
@@ -182,6 +210,7 @@ function buildPanel(): HTMLElement {
     }
     state.entries.forEach((e, i) => {
       const row = el('div', undefined, `padding:11px 13px;border-bottom:1px solid var(--dsw-alias-border-l,#ffffff1f);cursor:pointer;${i === state.selected ? 'background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.06));box-shadow:inset 3px 0 0 var(--dsw-alias-brand-primary-new-color,#4176e6);' : ''}`)
+      row.className = 'pf-row'
       const top = el('div', undefined, 'display:flex;justify-content:space-between;gap:8px;align-items:center;')
       top.appendChild(el('b', e.id, 'font-size:12.5px;'))
       top.appendChild(el('span', TYPE_LABEL[e.failure_type] || e.failure_type, 'font-size:11px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:6px;padding:1px 7px;color:var(--dsw-alias-label-secondary,#9aa4b2);white-space:nowrap;'))
@@ -214,7 +243,8 @@ function buildPanel(): HTMLElement {
       }
     }
     const doctorBtn = el('button', state.doctor === 'running' ? '体检中…' : '运行体检')
-    doctorBtn.style.cssText = 'background:transparent;border:1px solid var(--dsw-alias-border-l,#ffffff1f);color:inherit;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;margin-top:8px;'
+    doctorBtn.className = 'pf-btn ghost'
+    doctorBtn.style.marginTop = '8px'
     doctorBtn.addEventListener('click', () => void runDoctor())
     doctorCard.appendChild(doctorBody)
     doctorCard.appendChild(doctorBtn)
@@ -249,9 +279,8 @@ function buildPanel(): HTMLElement {
       rtRow.appendChild(el('span', '启动失败最大重试次数'))
       const rt = el('span', undefined, 'display:flex;gap:6px;align-items:center;')
       const minus = el('button', '−'); const plus = el('button', '＋')
-      const btnCss = 'background:transparent;border:1px solid var(--dsw-alias-border-l,#ffffff1f);color:inherit;border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer;'
-      minus.style.cssText = btnCss
-      plus.style.cssText = btnCss
+      minus.className = 'pf-btn ghost sm'
+      plus.className = 'pf-btn ghost sm'
       minus.addEventListener('click', () => {
         state.settings!.max_retries = Math.max(0, state.settings!.max_retries - 1)
         void saveSettings()
@@ -269,6 +298,7 @@ function buildPanel(): HTMLElement {
       const chips = el('div', undefined, 'display:flex;flex-wrap:wrap;gap:6px;')
       for (const x of state.settings.exclude) {
         const chip = el('span', `${x} ✕`, 'font-size:11px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:6px;padding:2px 7px;cursor:pointer;color:var(--dsw-alias-label-secondary,#9aa4b2);')
+        chip.className = 'pf-chip'
         chip.addEventListener('click', () => {
           state.settings!.exclude = state.settings!.exclude.filter((y) => y !== x)
           void saveSettings()
@@ -276,6 +306,7 @@ function buildPanel(): HTMLElement {
         chips.appendChild(chip)
       }
       const addChip = el('span', '＋ 添加', 'font-size:11px;border:1px dashed var(--dsw-alias-border-l,#ffffff1f);border-radius:6px;padding:2px 7px;cursor:pointer;color:var(--dsw-alias-label-secondary,#9aa4b2);')
+      addChip.className = 'pf-chip'
       addChip.addEventListener('click', () => {
         const v = window.prompt('排除的插件 id 或包名：')
         if (v && v.trim()) {
@@ -320,20 +351,18 @@ function buildPanel(): HTMLElement {
       right.appendChild(meta)
       // 操作行
       const actions = el('div', undefined, 'display:flex;gap:8px;flex-wrap:wrap;')
-      const solid = 'background:var(--dsw-alias-brand-primary-new-color,#4176e6);border:none;color:#fff;border-radius:8px;padding:6px 13px;font-size:12px;cursor:pointer;'
-      const ghost = 'background:transparent;border:1px solid var(--dsw-alias-border-l,#ffffff1f);color:inherit;border-radius:8px;padding:6px 13px;font-size:12px;cursor:pointer;'
       if (e.repairable) {
         const btn = el('button', '修复')
-        btn.style.cssText = ghost
+        btn.className = 'pf-btn ghost'
         btn.addEventListener('click', () => void doRepair(e.id))
         actions.appendChild(btn)
       }
       const ai = el('button', state.explain[e.id] === 'loading' ? 'AI 解读中…' : 'AI 解读')
-      ai.style.cssText = ghost
+      ai.className = 'pf-btn ghost'
       ai.addEventListener('click', () => void doExplain(e.id))
       actions.appendChild(ai)
       const restore = el('button', '恢复')
-      restore.style.cssText = 'background:transparent;border:1px solid var(--dsw-alias-state-danger-primary,#e5534b);color:var(--dsw-alias-state-danger-primary,#e5534b);border-radius:8px;padding:6px 13px;font-size:12px;cursor:pointer;'
+      restore.className = 'pf-btn danger'
       restore.addEventListener('click', () => void askRestore(e.id))
       actions.appendChild(restore)
       right.appendChild(actions)
@@ -348,7 +377,6 @@ function buildPanel(): HTMLElement {
     }
     wrap.appendChild(right)
     root.appendChild(wrap)
-    root.appendChild(el('div', '原型定稿：变体 A（分栏主从）· wayfinder #53 / #55', 'font-size:10.5px;color:var(--dsw-alias-label-secondary,#9aa4b2);opacity:.7;'))
   }
 
   async function runDoctor(): Promise<void> {
