@@ -165,6 +165,7 @@ function buildPanel(): HTMLElement {
     settings: null as FuseSettings | null,
     showSettings: false,
     showRaw: true,
+    doctorError: null as string | null,
   }
 
   const root = el('div', undefined, 'display:flex;flex-direction:column;gap:12px;max-width:900px;font-size:13px;')
@@ -177,6 +178,7 @@ function buildPanel(): HTMLElement {
       state.profile = resp.profile
       state.entries = resp.entries
     } catch (err) {
+      console.error('[plugin-fuse] list_quarantine 失败：', err)
       state.entries = []
       root.appendChild(el('div', `读取隔离名单失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
     }
@@ -229,6 +231,9 @@ function buildPanel(): HTMLElement {
     const doctorBody = el('div', undefined, 'margin-top:8px;display:flex;flex-direction:column;gap:6px;')
     if (state.doctor === 'idle' || state.doctor === null) {
       doctorBody.appendChild(el('div', '尚未体检：检查 dsh 版本、DSH_HOME、profiles、台账一致性、托管区块健康。', 'font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
+      if (state.doctorError) {
+        doctorBody.appendChild(el('div', `上次体检失败：${state.doctorError}`, 'font-size:12px;color:var(--dsw-alias-state-danger-primary,#e5534b);word-break:break-all;'))
+      }
     } else if (state.doctor === 'running') {
       doctorBody.appendChild(el('div', '体检中…', 'font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
     } else {
@@ -382,12 +387,17 @@ function buildPanel(): HTMLElement {
   async function runDoctor(): Promise<void> {
     if (state.doctor === 'running') return
     state.doctor = 'running'
+    state.doctorError = null
     render()
     try {
       const r = await invoke<{ checks: DoctorCheck[] }>('run_doctor')
       state.doctor = r.checks
+      console.info('[plugin-fuse] run_doctor 完成：', Array.isArray(r.checks) ? `${r.checks.length} 项` : JSON.stringify(r))
     } catch (err) {
       state.doctor = 'idle'
+      state.doctorError = String(err)
+      // 错误必须可观测：console 镜像会把这条写进 ~/.dsh/dsh-desktop-webview.log
+      console.error('[plugin-fuse] run_doctor 失败：', err)
       root.appendChild(el('div', `体检失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
     }
     render()
