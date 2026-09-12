@@ -3,6 +3,7 @@
 // 数据经 Tauri IPC 与 Rust 后端通信；纯浏览器（无 IPC）不注册。
 // 主题只用 --dsw-alias-* 变量（带回退值），禁止 hash 类名（仓库血泪坑 #8）。
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import React from 'react'
 
 export const inject = ['slots']
 
@@ -103,21 +104,29 @@ export function registerFusePanel(ctx: ClientContext): void {
   )
 }
 
-/** React 容器契约：渲染容器 + useEffect 挂 DOM 面板（同 mobile-access）。 */
-function FusePanel(): HTMLElement {
-  const host = document.createElement('div')
-  const mount = (): void => {
-    if (!host.isConnected) return
+/** React 容器契约（同 mobile-access）：返回 React 元素（不能返回裸 HTMLElement——
+ * React 无法渲染真实 DOM 节点，会直接报错变空白）；useEffect 内挂 DOM 面板。 */
+function FusePanel(): React.ReactElement {
+  const ref = React.useRef<HTMLDivElement | null>(null)
+  React.useEffect(() => {
+    const host = ref.current
+    if (!host || host.childNodes.length) return
+    let panel: HTMLElement
     try {
-      const panel = buildPanel()
-      host.appendChild(panel)
+      panel = buildPanel()
     } catch (err) {
-      host.appendChild(el('div', `插件保险丝面板初始化失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
+      panel = el('div', `插件保险丝面板初始化失败：${String(err)}`, 'color:#e5534b;font-size:12px;')
     }
-  }
-  // settings.section 的 React 容器在挂载后立即调用（mobile-access 同款时序）
-  queueMicrotask(mount)
-  return host
+    host.appendChild(panel)
+    return () => {
+      try {
+        panel.remove()
+      } catch {
+        /* noop */
+      }
+    }
+  }, [])
+  return React.createElement('div', { ref })
 }
 
 function buildPanel(): HTMLElement {
