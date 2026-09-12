@@ -23,6 +23,14 @@
     "allow-toggle-zoom",
     "allow-get-proxy-settings",
     "allow-save-proxy-settings",
-    "allow-test-proxy-connectivity"
+    "allow-test-proxy-connectivity",
+    "allow-list-quarantine",
+    "allow-restore-quarantine",
+    "allow-repair-plugin",
+    "allow-run-doctor",
+    "allow-explain-failure",
+    "allow-get-fuse-summary",
+    "allow-get-quarantine-settings",
+    "allow-save-quarantine-settings"
   ]
 }

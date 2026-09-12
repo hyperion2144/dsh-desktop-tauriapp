@@ -68,6 +68,9 @@ use commands::{
     log_diag, log_console, get_dsh_status, restart_dsh_service,
     get_proxy_settings, save_proxy_settings, test_proxy_connectivity,
     ui_input_confirm, choose_desktop_mode,
+    list_quarantine, restore_quarantine, repair_plugin,
+    run_doctor, explain_failure, get_fuse_summary,
+    get_quarantine_settings, save_quarantine_settings,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -99,7 +102,9 @@ use process::lifecycle::version_key;
 #[cfg(test)]
 use network::web_token::random_token;
 #[cfg(test)]
-use process::plugin::{desktop_plugin_dir, mobile_package_dir, materialize_pool_package, copy_dir_all, desktop_platform_tag};
+use process::plugin::{desktop_plugin_dir, mobile_package_dir, materialize_pool_package, desktop_platform_tag};
+#[cfg(windows)] // copy_dir_all 仅 Windows 实现存在；macOS/Linux 测试构建会因导入不存在项而失败
+use process::plugin::copy_dir_all;
 #[cfg(test)]
 use network::remote::{normalize_remote_url, extract_token_from_url, remote_has_plugin};
 
@@ -154,7 +159,15 @@ pub fn run() {
             ui_input_confirm,
             get_proxy_settings,
             save_proxy_settings,
-            test_proxy_connectivity
+            test_proxy_connectivity,
+            list_quarantine,
+            restore_quarantine,
+            repair_plugin,
+            run_doctor,
+            explain_failure,
+            get_fuse_summary,
+            get_quarantine_settings,
+            save_quarantine_settings
         ])
 .manage(DshState {
             child: Mutex::new(None),
@@ -176,6 +189,9 @@ pub fn run() {
             notify_token: Mutex::new(String::new()),
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
+            stderr_buf: Mutex::new(None),
+            fuse_retries: AtomicU8::new(0),
+            fuse_summary: Mutex::new(None),
         })
         .setup(|app| {
             let port = app_port();
@@ -310,6 +326,9 @@ pub fn run() {
                 });
             }
             // 守护器：周期探测 dsh 服务。判定规则（防误杀/防抖动循环）：
+            // 启动保险丝监控（#58）：dsh 子进程退出且非 0 → 隔离坏插件 → 自动重试。
+            // 常驻任务，重启/重试后的新实例也在它的视野内。
+            process::quarantine::monitor::start(app.handle());
             // - 健康 = TCP 连接成功（监听 socket 高负载也接受连接；HTTP 状态仅作日志）；
             // - 连续 3 次连接失败（≈15s）才算一次异常事件，且两次自动重启间隔 ≥60s；
             // - 复用外部实例/远程：只提示、绝不代拉自动重启（不误杀用户自管实例）；

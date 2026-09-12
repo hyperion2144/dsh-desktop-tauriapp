@@ -287,6 +287,16 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     // 无此问题，因为终端 cwd 是可写目录）。显式把子进程 cwd 设为 dsh home：
     // .mnemon 等工作区相对产物统一落进 $DSH_HOME/.mnemon，归属 harness 单一根。
     cmd.current_dir(crate::dsh_home());
+    // 启动保险丝（#58）：为本实例建 stderr 累积缓冲——转发线程逐行写入，
+    // 保险丝监控任务在子进程退出后取快照做失败检测。
+    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    );
+    *app
+        .state::<crate::runtime::state::DshState>()
+        .stderr_buf
+        .lock()
+        .unwrap() = Some(stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
     {
@@ -343,6 +353,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     }
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
+        let stderr_buf = stderr_buf.clone();
         thread::spawn(move || {
             // 同 stdout：lossy 解码，非法字节不断流
             for raw in BufReader::new(err).split(b'\n') {
@@ -352,6 +363,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
                     line.pop();
                 }
                 log::warn!("[dsh] {line}");
+                stderr_buf.lock().unwrap().push(&line);
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
             }
@@ -555,6 +567,15 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     cmd.env("NODE_OPTIONS", "--use-env-proxy");
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(crate::dsh_home());
+    // 启动保险丝（#58）：同 unix 分支，建 stderr 累积缓冲。
+    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    );
+    *app
+        .state::<crate::runtime::state::DshState>()
+        .stderr_buf
+        .lock()
+        .unwrap() = Some(stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -590,6 +611,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     }
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
+        let stderr_buf = stderr_buf.clone();
         thread::spawn(move || {
             // 同 stdout：lossy 解码，非法字节不断流
             for raw in BufReader::new(err).split(b'\n') {
@@ -599,6 +621,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
                     line.pop();
                 }
                 log::warn!("[dsh] {line}");
+                stderr_buf.lock().unwrap().push(&line);
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
             }

@@ -80,4 +80,44 @@ commands = { allow = ["save_proxy_settings"] }
 [[permission]]
 identifier = "allow-test-proxy-connectivity"
 description = "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）"
-commands = { allow = ["test_proxy_connectivity"] }
+ commands = { allow = ["test_proxy_connectivity"] }
+
+[[permission]]
+identifier = "allow-list-quarantine"
+description = "允许读取插件保险丝隔离名单"
+commands = { allow = ["list_quarantine"] }
+
+[[permission]]
+identifier = "allow-restore-quarantine"
+description = "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）"
+commands = { allow = ["restore_quarantine"] }
+
+[[permission]]
+identifier = "allow-repair-plugin"
+description = "允许触发插件修复（dsh plugin add 重装）"
+commands = { allow = ["repair_plugin"] }
+
+[[permission]]
+identifier = "allow-run-doctor"
+description = "允许运行插件保险丝环境体检"
+commands = { allow = ["run_doctor"] }
+
+[[permission]]
+identifier = "allow-explain-failure"
+description = "允许 AI 解读隔离记录（复用 dsh 凭据）"
+commands = { allow = ["explain_failure"] }
+
+[[permission]]
+identifier = "allow-get-fuse-summary"
+description = "允许读取最近一次启动的隔离事件摘要"
+commands = { allow = ["get_fuse_summary"] }
+
+[[permission]]
+identifier = "allow-get-quarantine-settings"
+description = "允许读取保险丝设置（第一方保护/排除名单/重试次数）"
+commands = { allow = ["get_quarantine_settings"] }
+
+[[permission]]
+identifier = "allow-save-quarantine-settings"
+description = "允许保存保险丝设置"
+commands = { allow = ["save_quarantine_settings"] }

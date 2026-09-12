@@ -34,12 +34,48 @@ pub struct DesktopSettings {
     pub proxy_user: Option<String>,
     /// 代理认证密码（与 proxy_user 配对；空=无认证）。
     pub proxy_pass: Option<String>,
+    /// 保险丝：第一方插件（@deepseek-ai/*）保护开关（默认开）。
+    pub quarantine_first_party_protection: Option<bool>,
+    /// 保险丝：排除名单（永不自动禁用的插件 id/包名）。
+    pub quarantine_exclude: Option<Vec<String>>,
+    /// 保险丝：启动失败最大重试次数（默认 2，0-5）。
+    pub quarantine_max_retries: Option<u8>,
 }
 
 pub fn settings_path() -> PathBuf {
     dsh_home().join("settings.yaml")
 }
 
+/// dsh 数据目录（$DSH_HOME 或 ~/.dsh）。
+///
+/// 注意：`DSH_HOME` 支持 `~` 前缀展开——dsh 的 resolveDshHome() 会展开（#56），
+/// 若这里不展开，同一环境变量下桌面壳与 dsh 会各写各的目录（实测分歧）。
+pub(crate) fn expand_home(p: &str) -> PathBuf {
+    if p == "~" {
+        return home_base();
+    }
+    if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
+        return home_base().join(rest);
+    }
+    PathBuf::from(p)
+}
+
+fn home_base() -> PathBuf {
+    #[cfg(windows)]
+    let base = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
+    #[cfg(not(windows))]
+    let base = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
+    base
+}
+
+pub(crate) fn dsh_home() -> PathBuf {
+    if let Ok(h) = std::env::var("DSH_HOME") {
+        if !h.trim().is_empty() {
+            return expand_home(h.trim());
+        }
+    }
+    home_base().join(".dsh")
+}
 /// 读取桌面壳设置（文件缺失或 `dsh-desktop-tauriapp:` 键缺失 → 默认值；解析失败 → 默认值）。
 pub fn load_desktop_settings() -> DesktopSettings {
     let path = settings_path();
@@ -153,19 +189,6 @@ pub fn configured_cloudflared_bin() -> String {
     load_desktop_settings().cloudflared_bin.unwrap_or_default()
 }
 
-/// dsh 数据目录（$DSH_HOME 或 ~/.dsh）。
-pub(crate) fn dsh_home() -> PathBuf {
-    if let Ok(h) = std::env::var("DSH_HOME") {
-        if !h.trim().is_empty() {
-            return PathBuf::from(h);
-        }
-    }
-    #[cfg(windows)]
-    let base = std::env::var("USERPROFILE").map(PathBuf::from).unwrap_or_default();
-    #[cfg(not(windows))]
-    let base = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-    base.join(".dsh")
-}
 
 /// dsh 服务端口（= configured_port）。端口策略：
 /// 已有 dsh web → 复用并降级接入；空闲/高级 → 由本应用 spawn 实例并注入桌面 chrome。
@@ -206,6 +229,9 @@ mod tests {
       no_proxy: Some("*.corp".into()),
       proxy_user: Some("alice".into()),
       proxy_pass: Some("s3cret".into()),
+      quarantine_first_party_protection: Some(true),
+      quarantine_exclude: Some(vec!["noisy".into()]),
+      quarantine_max_retries: Some(3),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
@@ -219,6 +245,20 @@ mod tests {
     assert_eq!(back.no_proxy.as_deref(), Some("*.corp"));
     assert_eq!(back.proxy_user.as_deref(), Some("alice"));
     assert_eq!(back.proxy_pass.as_deref(), Some("s3cret"));
+    assert_eq!(back.quarantine_first_party_protection, Some(true));
+    assert_eq!(back.quarantine_exclude, Some(vec!["noisy".to_string()]));
+    assert_eq!(back.quarantine_max_retries, Some(3));
+  }
+
+  #[test]
+  fn expand_home_supports_tilde() {
+    // #56 实测分歧：dsh 的 resolveDshHome() 会展开 ~，桌面壳此前不会——
+    // 用户设 DSH_HOME=~/x 时两者会各写各的目录。纯函数测试，不动环境变量
+    // （并行测试下改 DSH_HOME 会串扰其它设置测试）。
+    assert_eq!(expand_home("~/dsh-alt"), home_base().join("dsh-alt"));
+    assert_eq!(expand_home("~"), home_base());
+    assert_eq!(expand_home("/abs/path"), PathBuf::from("/abs/path"));
+    assert_eq!(expand_home("rel"), PathBuf::from("rel"));
   }
 
   // ==================== 代理设置测试 ====================

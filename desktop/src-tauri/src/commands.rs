@@ -437,3 +437,169 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
         _ => Err(format!("未知的桌面接入模式：{mode}")),
     }
 }
+
+// ══ 插件保险丝（#59）：IPC 命令 ═══════════════════════════════
+
+use crate::process::quarantine;
+use crate::profiles::scan_profiles;
+use crate::settings::DesktopSettings;
+
+fn active_profile() -> String {
+    configured_profile()
+}
+
+/// 隔离名单（含 repairable 判定，供 UI 决定是否展示「修复」）。
+#[tauri::command]
+pub(crate) fn list_quarantine(profile: Option<String>) -> serde_json::Value {
+    let profile = profile.unwrap_or_else(active_profile);
+    let entries = quarantine::ledger::list_entries(&dsh_home(), &profile);
+    let list: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id, "name": e.name, "reason": e.reason,
+                "failure_type": e.failure_type, "raw_error": e.raw_error,
+                "quarantined_at": e.quarantined_at, "file": e.file,
+                "repairable": crate::process::quarantine::repair::is_repairable(&e.reason, &e.name),
+            })
+        })
+        .collect();
+    serde_json::json!({ "profile": profile, "entries": list })
+}
+
+/// 恢复指定（或全部）被隔离插件：从托管区块/台账摘除，重启后生效。
+#[tauri::command]
+pub(crate) fn restore_quarantine(profile: Option<String>, ids: Option<Vec<String>>) -> serde_json::Value {
+    let profile = profile.unwrap_or_else(active_profile);
+    let n = match ids {
+        Some(ids) if !ids.is_empty() => quarantine::restore_ids(&dsh_home(), &profile, &ids),
+        _ => quarantine::restore_all_for_profile(&dsh_home(), &profile),
+    };
+    serde_json::json!({ "ok": n > 0, "restored": n })
+}
+
+/// 修复：重装包 + 收尾（台账摘除/托管区块重写）。阻塞操作放 spawn_blocking。
+#[tauri::command]
+pub(crate) async fn repair_plugin(profile: Option<String>, id: String) -> serde_json::Value {
+    let profile = profile.unwrap_or_else(active_profile);
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let entries = quarantine::ledger::list_entries(&dsh_home(), &profile);
+        let Some(e) = entries.iter().find(|e| e.id == id) else {
+            return Err(format!("台账中不存在 {}", id));
+        };
+        if !quarantine::repair::is_repairable(&e.reason, &e.name) {
+            return Err(format!("{} 不可修复（非包解析/导出不匹配类失败）", id));
+        }
+        quarantine::repair::repair(&profile, &e.name)
+            .map(|_| {
+                quarantine::repair::finish_repair(&dsh_home(), &profile, &id);
+            })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("修复任务异常：{e}")));
+    match res {
+        Ok(()) => serde_json::json!({ "ok": true, "message": "重装完成，重启 dsh 后生效" }),
+        Err(m) => serde_json::json!({ "ok": false, "error": m }),
+    }
+}
+
+/// 环境体检：dsh 版本 / DSH_HOME 可写 / profiles / 台账一致性 / 托管区块健康。
+#[tauri::command]
+pub(crate) fn run_doctor() -> serde_json::Value {
+    let profile = active_profile();
+    let home = dsh_home();
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    // ① dsh 版本
+    let ver = crate::profiles::dsh_version();
+    checks.push(serde_json::json!({
+        "id": "dsh-version", "label": "dsh 版本",
+        "ok": ver.is_some(),
+        "detail": ver.unwrap_or_else(|| "未找到 dsh 命令".into()),
+    }));
+    // ② DSH_HOME 可写
+    let probe = home.join(".fuse-probe");
+    let writable = std::fs::write(&probe, b"ok").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    checks.push(serde_json::json!({ "id": "home", "label": "DSH_HOME 可写", "ok": writable,
+        "detail": home.display().to_string() }));
+    // ③ profiles
+    let profiles = scan_profiles();
+    let names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+    checks.push(serde_json::json!({ "id": "profiles", "label": "profiles", "ok": !names.is_empty(),
+        "detail": if names.is_empty() { "未发现 profile".into() } else { names.join(" / ") } }));
+    // ④ 台账一致性：台账里的 id 是否仍在 patch 行内
+    let entries = quarantine::ledger::list_entries(&home, &profile);
+    let patch = quarantine::profile_patch_path(&home, &profile);
+    let patch_ids: Vec<String> = std::fs::read_to_string(&patch)
+        .map(|t| quarantine::patchfile::scan_patch_rows(&t).into_iter().map(|r| r.id).collect())
+        .unwrap_or_default();
+    let drift: Vec<&String> = entries.iter().map(|e| &e.id).filter(|id| !patch_ids.contains(id)).collect();
+    checks.push(serde_json::json!({ "id": "ledger", "label": "隔离台账一致性", "ok": drift.is_empty(),
+        "detail": if drift.is_empty() { format!("{} 条记录全部与 patch 对应", entries.len()) }
+            else { format!("{} 条已不在 patch 中（可能被手工移除）：{}", drift.len(),
+                drift.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("、")) } }));
+    // ⑤ 托管区块健康
+    let managed = std::fs::read_to_string(&patch)
+        .map(|t| quarantine::patchfile::managed_ids(&t).len())
+        .unwrap_or(0);
+    checks.push(serde_json::json!({ "id": "patch", "label": "托管区块健康", "ok": true,
+        "detail": format!("托管禁用 {managed} 项（含历史）") }));
+    serde_json::json!({ "checks": checks })
+}
+
+/// AI 解读（读 .credentials.yaml 密钥；任何失败静默返回，不阻塞隔离主流程）。
+#[tauri::command]
+pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>) -> serde_json::Value {
+    let _ = profile;
+    let Some(id) = id else {
+        return serde_json::json!({ "ok": false, "error": "缺少插件 id" });
+    };
+    let Some(e) = quarantine::ledger::list_entries(&dsh_home(), &active_profile())
+        .into_iter().find(|e| e.id == id)
+    else {
+        return serde_json::json!({ "ok": false, "error": format!("台账中不存在 {id}") });
+    };
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        crate::network::ai::explain_failure(&e.failure_type, &e.name, &e.raw_error)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("AI 任务异常：{e}")));
+    match res {
+        Ok(text) => serde_json::json!({ "ok": true, "suggestion": text, "model": crate::network::ai::DEFAULT_MODEL }),
+        Err(err) => serde_json::json!({ "ok": false, "error": err }),
+    }
+}
+
+/// 最近一次启动的隔离事件摘要（通知区）。
+#[tauri::command]
+pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {
+    app.state::<DshState>()
+        .fuse_summary
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or(serde_json::json!({ "disabled": [], "retried": 0 }))
+}
+
+/// 读保险丝设置。
+#[tauri::command]
+pub(crate) fn get_quarantine_settings() -> serde_json::Value {
+    let s = load_desktop_settings();
+    let (fp, exclude, retries) = quarantine::fuse_settings(&s);
+    serde_json::json!({ "first_party_protection": fp, "exclude": exclude, "max_retries": retries })
+}
+
+/// 存保险丝设置（写 settings.yaml 的 dsh-desktop-tauriapp: 键）。
+#[tauri::command]
+pub(crate) fn save_quarantine_settings(
+    first_party_protection: bool,
+    exclude: Vec<String>,
+    max_retries: u8,
+) -> serde_json::Value {
+    let mut s: DesktopSettings = load_desktop_settings();
+    s.quarantine_first_party_protection = Some(first_party_protection);
+    s.quarantine_exclude = Some(exclude);
+    s.quarantine_max_retries = Some(max_retries.clamp(0, 5));
+    crate::settings::save_desktop_settings(&s);
+    serde_json::json!({ "ok": true })
+}

@@ -95,6 +95,27 @@ pub(crate) fn run_profile_plugin_add(profile: &str, pkg: &str) -> bool {
     }
 }
 
+/// 取 dsh 版本串（doctor 体检用；找不到 dsh / 执行失败返回 None）。
+pub(crate) fn dsh_version() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let node = find_node()?;
+        let js = find_dsh_bin_js()?;
+        let out = std::process::Command::new(node)
+            .arg(js)
+            .arg("--version")
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let dsh = find_dsh_bin()?;
+        let out = std::process::Command::new(dsh).arg("--version").output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+}
+
 /// 新建 profile 流程：弹窗输入名称 → plugin add base + web-app。
 pub(crate) fn create_profile_flow(app: &AppHandle) {
     let handle = app.clone();

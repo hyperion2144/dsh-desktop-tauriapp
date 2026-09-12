@@ -13,7 +13,7 @@ use tauri::{
 
 use crate::runtime::state::{DshState, MODE_ADVANCED, MODE_COMPAT};
 use crate::runtime::error::SpawnError;
-use crate::settings::{load_desktop_settings, configured_port};
+use crate::settings::{load_desktop_settings, configured_port, configured_profile};
 use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::clear_web_token;
 use crate::ui::pet::toggle_pet;
@@ -254,6 +254,24 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
             handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
             return;
         }
+        // 保险丝（#58）：手动重启先恢复被隔离的插件（新 dsh 可能已修复兼容性；
+        // 恢复后若仍不兼容，fuse 会在启动失败时再次自动隔离）。失败不阻塞重启。
+        let restored = crate::process::quarantine::restore_all_for_profile(
+            &crate::settings::dsh_home(),
+            &configured_profile(),
+        );
+        if restored > 0 {
+            show_notification(
+                &handle,
+                "插件保险丝 · 已恢复被隔离插件",
+                &format!("{restored} 个插件随本次重启生效；若仍不兼容会再次被自动隔离"),
+            );
+        }
+        // 重试预算清零：手动重启代表新的启动周期
+        handle
+            .state::<DshState>()
+            .fuse_retries
+            .store(0, Ordering::SeqCst);
         // 2) 按目标模式拉起（高级=注入局部拖拽 chrome；兼容=标准布局 + 原生标题栏）
         // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
         clear_web_token(&handle);

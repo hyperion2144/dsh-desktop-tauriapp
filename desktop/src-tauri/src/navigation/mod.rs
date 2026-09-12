@@ -44,6 +44,21 @@ pub(crate) async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u1
         if state.spawn_failed.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
+        // 保险丝协作（#58）：spawn 场景下子进程若已退出，绝不把加载页导航到死实例；
+        // 隔离/重试由 fuse 监控任务负责（重试成功后这里会拿到新实例）
+        if expect_token
+            && state
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+                .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            continue;
+        }
         if state.quitting.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }

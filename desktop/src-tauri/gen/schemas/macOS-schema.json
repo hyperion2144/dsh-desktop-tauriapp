@@ -183,6 +183,12 @@
           "markdownDescription": "允许加载页切换兼容/高级接入模式"
         },
         {
+          "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
+          "type": "string",
+          "const": "allow-explain-failure",
+          "markdownDescription": "允许 AI 解读隔离记录（复用 dsh 凭据）"
+        },
+        {
           "description": "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）",
           "type": "string",
           "const": "allow-get-desktop-client-environment",
@@ -195,6 +201,12 @@
           "markdownDescription": "允许查询 dsh 服务状态（侧边栏状态标识）"
         },
         {
+          "description": "允许读取最近一次启动的隔离事件摘要",
+          "type": "string",
+          "const": "allow-get-fuse-summary",
+          "markdownDescription": "允许读取最近一次启动的隔离事件摘要"
+        },
+        {
           "description": "允许加载页轮询模式选择提示状态",
           "type": "string",
           "const": "allow-get-mode-prompt-needed",
@@ -205,6 +217,18 @@
           "type": "string",
           "const": "allow-get-proxy-settings",
           "markdownDescription": "允许查询代理设置与当前生效预览（设置表单回显）"
+        },
+        {
+          "description": "允许读取保险丝设置（第一方保护/排除名单/重试次数）",
+          "type": "string",
+          "const": "allow-get-quarantine-settings",
+          "markdownDescription": "允许读取保险丝设置（第一方保护/排除名单/重试次数）"
+        },
+        {
+          "description": "允许读取插件保险丝隔离名单",
+          "type": "string",
+          "const": "allow-list-quarantine",
+          "markdownDescription": "允许读取插件保险丝隔离名单"
         },
         {
           "description": "允许 WebView initialization_script 把 console.* 写入 ~/.dsh/dsh-desktop-webview.log",
@@ -249,16 +273,40 @@
           "markdownDescription": "允许桌宠切换鼠标穿透"
         },
         {
+          "description": "允许触发插件修复（dsh plugin add 重装）",
+          "type": "string",
+          "const": "allow-repair-plugin",
+          "markdownDescription": "允许触发插件修复（dsh plugin add 重装）"
+        },
+        {
           "description": "允许请求重启 dsh 服务（状态标识点击）",
           "type": "string",
           "const": "allow-restart-dsh-service",
           "markdownDescription": "允许请求重启 dsh 服务（状态标识点击）"
         },
         {
+          "description": "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）",
+          "type": "string",
+          "const": "allow-restore-quarantine",
+          "markdownDescription": "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）"
+        },
+        {
+          "description": "允许运行插件保险丝环境体检",
+          "type": "string",
+          "const": "allow-run-doctor",
+          "markdownDescription": "允许运行插件保险丝环境体检"
+        },
+        {
           "description": "允许保存代理设置（托盘代理设置表单提交）",
           "type": "string",
           "const": "allow-save-proxy-settings",
           "markdownDescription": "允许保存代理设置（托盘代理设置表单提交）"
+        },
+        {
+          "description": "允许保存保险丝设置",
+          "type": "string",
+          "const": "allow-save-quarantine-settings",
+          "markdownDescription": "允许保存保险丝设置"
         },
         {
           "description": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）",
