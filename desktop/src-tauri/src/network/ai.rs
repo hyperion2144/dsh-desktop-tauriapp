@@ -17,6 +17,8 @@ use std::path::PathBuf;
 pub const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 /// 默认模型（#56：产品层事实默认是 deepseek-v4-flash）。
 pub const DEFAULT_MODEL: &str = "deepseek-v4-flash";
+/// 默认密钥的 refs 键名 / 环境变量名。
+pub const DEFAULT_KEY_ENV: &str = "DEEPSEEK_API_KEY";
 /// 请求超时（秒）。
 const TIMEOUT_SECS: u64 = 30;
 
@@ -48,12 +50,12 @@ fn dsh_home() -> PathBuf {
     home_base().join(".dsh")
 }
 
-/// 解析 AI 密钥：`process.env` → `.credentials.yaml refs`。找不到返回 None。
+/// 解析 AI 密钥：`process.env[key_env]` → `.credentials.yaml refs[key_env]`。
 ///
 /// 宽松解析（#56 修正 2）：按 serde_yaml Value 导航，未知顶层键/字段一律忽略——
 /// 照抄 dsh 的严格校验会把它的格式演进变成桌面壳的故障。
-pub fn resolve_api_key() -> Option<String> {
-    if let Ok(k) = std::env::var("DEEPSEEK_API_KEY") {
+pub fn resolve_api_key_env(key_env: &str) -> Option<String> {
+    if let Ok(k) = std::env::var(key_env) {
         if !k.trim().is_empty() {
             return Some(k.trim().to_string());
         }
@@ -61,12 +63,13 @@ pub fn resolve_api_key() -> Option<String> {
     let text = std::fs::read_to_string(dsh_home().join(".credentials.yaml")).ok()?;
     let value: serde_yaml::Value = serde_yaml::from_str(&text).ok()?;
     let refs = value.get("refs")?;
-    let key = refs.get("DEEPSEEK_API_KEY")?.as_str()?.trim().to_string();
-    if key.is_empty() {
-        None
-    } else {
-        Some(key)
-    }
+    let key = refs.get(key_env)?.as_str()?.trim().to_string();
+    if key.is_empty() { None } else { Some(key) }
+}
+
+/// 默认路由（DeepSeek 官方）的密钥解析。
+pub fn resolve_api_key() -> Option<String> {
+    resolve_api_key_env(DEFAULT_KEY_ENV)
 }
 
 /// 解析端点：`DEEPSEEK_BASE_URL` → 默认官方。去尾部 `/`（拼接 /chat/completions）。
@@ -80,13 +83,25 @@ pub fn resolve_base_url() -> String {
 
 /// 单轮补全（阻塞；调用方放 spawn_blocking）。失败返回 Err（不含密钥）。
 pub fn chat(prompt: &str) -> Result<String, String> {
-    let key = resolve_api_key().ok_or("未找到 AI 密钥（DEEPSEEK_API_KEY 或 .credentials.yaml refs）")?;
     let base = resolve_base_url();
-    let url = format!("{base}/chat/completions");
     let model = std::env::var("DEEPSEEK_MODEL")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let key = resolve_api_key_env(DEFAULT_KEY_ENV)
+        .ok_or("未找到 AI 密钥（DEEPSEEK_API_KEY 或 .credentials.yaml refs）")?;
+    chat_with(&key, &base, &model, prompt)
+}
+
+/// 指定端点/密钥/模型的单轮补全（阻塞；调用方放 spawn_blocking）。
+/// provider 可选能力（#60 扩展）：设置里可选 provider/模型/自定义 OpenAI 兼容端点。
+pub fn chat_with(
+    key: &str,
+    base: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<String, String> {
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": prompt }],

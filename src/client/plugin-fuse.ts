@@ -51,6 +51,10 @@ interface FuseSettings {
   first_party_protection: boolean
   exclude: string[]
   max_retries: number
+  ai_provider: string
+  ai_model: string
+  ai_base_url: string
+  ai_key_env: string
 }
 
 const TYPE_LABEL: Record<string, string> = {
@@ -324,6 +328,48 @@ function buildPanel(): HTMLElement {
       chips.appendChild(addChip)
       exclWrap.appendChild(chips)
       body.appendChild(exclWrap)
+      // AI 解读路由区（provider/模型/端点/密钥 env）
+      const aiHd = el('div', 'AI 解读（explain）', 'font-weight:600;font-size:12px;')
+      body.appendChild(aiHd)
+      const provSel = document.createElement('select')
+      provSel.style.cssText = 'width:100%;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;'
+      provSel.innerHTML = '<option value="deepseek">DeepSeek 官方</option><option value="custom">自定义 OpenAI 兼容</option>'
+      provSel.value = state.settings!.ai_provider
+      provSel.addEventListener('change', () => {
+        state.settings!.ai_provider = provSel.value
+        render()
+      })
+      body.appendChild(provSel)
+      const modelInput = document.createElement('input')
+      modelInput.placeholder = '模型（默认 deepseek-v4-flash）'
+      modelInput.value = state.settings!.ai_model
+      modelInput.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;margin-top:6px;'
+      modelInput.addEventListener('change', () => {
+        state.settings!.ai_model = modelInput.value.trim()
+        void saveSettings()
+      })
+      body.appendChild(modelInput)
+      if (state.settings!.ai_provider === 'custom') {
+        const bu = document.createElement('input')
+        bu.placeholder = 'Base URL（如 https://api.openai.com）'
+        bu.value = state.settings!.ai_base_url
+        bu.style.cssText = modelInput.style.cssText + 'margin-top:6px;'
+        bu.addEventListener('change', () => {
+          state.settings!.ai_base_url = bu.value.trim()
+          void saveSettings()
+        })
+        const ke = document.createElement('input')
+        ke.placeholder = '密钥的 refs 键名 / 环境变量名（如 OPENAI_API_KEY）'
+        ke.value = state.settings!.ai_key_env
+        ke.style.cssText = modelInput.style.cssText + 'margin-top:6px;'
+        ke.addEventListener('change', () => {
+          state.settings!.ai_key_env = ke.value.trim()
+          void saveSettings()
+        })
+        body.appendChild(bu)
+        body.appendChild(ke)
+      }
+      body.appendChild(el('div', 'AI 解读默认走 DeepSeek 官方路由（密钥取 .credentials.yaml 的 DEEPSEEK_API_KEY）；选「自定义」可指向任意 OpenAI 兼容端点，密钥按 refs 键名读取。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
       setCard.appendChild(body)
     }
     left.appendChild(setCard)
@@ -456,6 +502,11 @@ function buildPanel(): HTMLElement {
         firstPartyProtection: state.settings.first_party_protection,
         exclude: state.settings.exclude,
         maxRetries: state.settings.max_retries,
+        aiProvider: state.settings.ai_provider || 'deepseek',
+        aiModel: state.settings.ai_model || '',
+        aiBaseUrl: state.settings.ai_base_url || '',
+        aiKeyEnv: state.settings.ai_key_env || '',
+        maxRetries: state.settings.max_retries,
       })
     } catch (err) {
       root.appendChild(el('div', `设置保存失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
@@ -468,7 +519,15 @@ function buildPanel(): HTMLElement {
     try {
       state.settings = await invoke<FuseSettings>('get_quarantine_settings')
     } catch {
-      state.settings = { first_party_protection: true, exclude: [], max_retries: 2 }
+      state.settings = {
+        first_party_protection: true,
+        exclude: [],
+        max_retries: 2,
+        ai_provider: 'deepseek',
+        ai_model: '',
+        ai_base_url: '',
+        ai_key_env: '',
+      }
     }
     render()
   })()

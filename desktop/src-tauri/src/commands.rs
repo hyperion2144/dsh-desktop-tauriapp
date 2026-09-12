@@ -559,13 +559,49 @@ pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>)
     else {
         return serde_json::json!({ "ok": false, "error": format!("台账中不存在 {id}") });
     };
+    // AI 路由按设置解析：provider（deepseek/custom）→ 密钥 env 名 + 端点 + 模型
+    let s = load_desktop_settings();
+    let provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
+    let model_label = s
+        .ai_model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| crate::network::ai::DEFAULT_MODEL.to_string());
+    let model = model_label.clone();
+    let custom = provider == "custom";
+    let key_env = if custom {
+        s.ai_key_env
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| crate::network::ai::DEFAULT_KEY_ENV.to_string())
+    } else {
+        crate::network::ai::DEFAULT_KEY_ENV.to_string()
+    };
+    let base_override = if custom {
+        Some(
+            s.ai_base_url
+                .clone()
+                .filter(|b| !b.trim().is_empty())
+                .unwrap_or_else(|| crate::network::ai::DEFAULT_BASE_URL.to_string()),
+        )
+    } else {
+        None
+    };
     let res = tauri::async_runtime::spawn_blocking(move || {
-        crate::network::ai::explain_failure(&e.failure_type, &e.name, &e.raw_error)
+        let key = crate::network::ai::resolve_api_key_env(&key_env)
+            .ok_or("未找到 AI 密钥（环境变量或 .credentials.yaml refs）")?;
+        let base = base_override.unwrap_or_else(crate::network::ai::resolve_base_url);
+        crate::network::ai::chat_with(
+            &key,
+            &base,
+            &model,
+            &crate::network::ai::explain_prompt(&e.failure_type, &e.name, &e.raw_error),
+        )
     })
     .await
     .unwrap_or_else(|e| Err(format!("AI 任务异常：{e}")));
     match res {
-        Ok(text) => serde_json::json!({ "ok": true, "suggestion": text, "model": crate::network::ai::DEFAULT_MODEL }),
+        Ok(text) => serde_json::json!({ "ok": true, "suggestion": text, "model": model_label }),
         Err(err) => serde_json::json!({ "ok": false, "error": err }),
     }
 }
@@ -586,7 +622,21 @@ pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {
 pub(crate) fn get_quarantine_settings() -> serde_json::Value {
     let s = load_desktop_settings();
     let (fp, exclude, retries) = quarantine::fuse_settings(&s);
-    serde_json::json!({ "first_party_protection": fp, "exclude": exclude, "max_retries": retries })
+    let ai_provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
+    let ai_model = s
+        .ai_model
+        .clone()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| crate::network::ai::DEFAULT_MODEL.to_string());
+    serde_json::json!({
+        "first_party_protection": fp,
+        "exclude": exclude,
+        "max_retries": retries,
+        "ai_provider": ai_provider,
+        "ai_model": ai_model,
+        "ai_base_url": s.ai_base_url.clone().unwrap_or_default(),
+        "ai_key_env": s.ai_key_env.clone().unwrap_or_default(),
+    })
 }
 
 /// 存保险丝设置（写 settings.yaml 的 dsh-desktop-tauriapp: 键）。
@@ -595,11 +645,23 @@ pub(crate) fn save_quarantine_settings(
     first_party_protection: bool,
     exclude: Vec<String>,
     max_retries: u8,
+    ai_provider: Option<String>,
+    ai_model: Option<String>,
+    ai_base_url: Option<String>,
+    ai_key_env: Option<String>,
 ) -> serde_json::Value {
     let mut s: DesktopSettings = load_desktop_settings();
     s.quarantine_first_party_protection = Some(first_party_protection);
     s.quarantine_exclude = Some(exclude);
     s.quarantine_max_retries = Some(max_retries.clamp(0, 5));
+    s.ai_provider = Some(
+        ai_provider
+            .filter(|p| p == "deepseek" || p == "custom")
+            .unwrap_or_else(|| "deepseek".into()),
+    );
+    s.ai_model = ai_model.filter(|m| !m.trim().is_empty());
+    s.ai_base_url = ai_base_url.filter(|b| !b.trim().is_empty());
+    s.ai_key_env = ai_key_env.filter(|k| !k.trim().is_empty());
     crate::settings::save_desktop_settings(&s);
     serde_json::json!({ "ok": true })
 }

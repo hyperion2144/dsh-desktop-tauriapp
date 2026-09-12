@@ -40,6 +40,14 @@ pub struct DesktopSettings {
     pub quarantine_exclude: Option<Vec<String>>,
     /// 保险丝：启动失败最大重试次数（默认 2，0-5）。
     pub quarantine_max_retries: Option<u8>,
+    /// 保险丝 AI 解读：provider（deepseek=官方 / custom=自定义 OpenAI 兼容）。
+    pub ai_provider: Option<String>,
+    /// 保险丝 AI 解读：模型（默认 deepseek-v4-flash）。
+    pub ai_model: Option<String>,
+    /// 保险丝 AI 解读：自定义端点（仅 custom 时生效；默认官方 api.deepseek.com）。
+    pub ai_base_url: Option<String>,
+    /// 保险丝 AI 解读：密钥的 refs 键名/环境变量名（custom 时必填；默认 DEEPSEEK_API_KEY）。
+    pub ai_key_env: Option<String>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -232,9 +240,15 @@ mod tests {
       quarantine_first_party_protection: Some(true),
       quarantine_exclude: Some(vec!["noisy".into()]),
       quarantine_max_retries: Some(3),
+      ai_provider: Some("deepseek".into()),
+      ai_model: Some("deepseek-v4-flash".into()),
+      ai_base_url: None,
+      ai_key_env: None,
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
+    assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
+    assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(back.port, Some(3081));
     assert_eq!(back.active_profile.as_deref(), Some("web"));
     assert_eq!(back.remote_list, vec!["x.cn:3091".to_string()]);
