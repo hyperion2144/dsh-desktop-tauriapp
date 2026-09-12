@@ -1,0 +1,340 @@
+<!doctype html><html lang=zh data-theme=dark><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>原型：设置 · 插件保险丝（三变体）— issue #55</title>
+<!--
+  PROTOTYPE — 抛弃式 UI 原型（wayfinder #53 / issue #55），回答一个问题：
+  「插件保险丝」设置 Tab 的信息架构该长什么样？
+  三个结构不同的变体，?variant=A|B|C 切换（悬浮条或 ←/→ 方向键）。
+  只读交互：所有动作走内存 mock，不调任何 IPC；数据取自 #54 实测抓取的真实失败报文。
+  双击即开；样式沿用 dsh web 主题 token（var(--dsw-alias-…, 回退值)，注入真实设置页时自动贴合）。
+-->
+<style>
+/* ── 主题 token：真实 dsh 变量名 + 独立打开时的回退值（取自 dsh-client-ui-theme 实测值/插值）── */
+:root{
+  --bg:var(--dsw-alias-bg-base,#151517);
+  --layer:var(--dsw-alias-bg-module-platform,#3a3d41);
+  --panel:var(--dsw-alias-bg-overlay,#61666b);
+  --line:var(--dsw-alias-border-l,#ffffff1f);
+  --tx:var(--dsw-alias-label-primary,#fbfbfc);
+  --tx2:var(--dsw-alias-label-secondary,#878d95);
+  --tx3:var(--dsw-alias-label-caption,#878d95);
+  --ac:var(--dsw-alias-brand-primary-new-color,#4176e6);
+  --ok:#2fbf71;--warn:#e8a33d;--danger:#e5534b;
+  --hover:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07));
+  --codebg:rgba(255,255,255,.055);
+  --r:12px;--rs:8px;
+}
+html[data-theme=light]{
+  --bg:#ffffff;--layer:#f9fafb;--panel:#f5f6f7;--line:rgba(0,0,0,.10);
+  --tx:#0d0d0f;--tx2:#61666b;--tx3:#878d95;
+  --hover:rgba(0,0,0,.05);--codebg:rgba(0,0,0,.05);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--tx);font:14px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px 16px 96px}
+code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+button{font:inherit;cursor:pointer;border:none;border-radius:var(--rs);padding:6px 13px;font-size:12.5px;background:var(--ac);color:#fff}
+button:hover{filter:brightness(1.1)}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--tx)}button.ghost:hover{background:var(--hover)}
+button.danger{background:transparent;border:1px solid var(--danger);color:var(--danger)}button.danger:hover{background:rgba(229,83,75,.12)}
+button:disabled{opacity:.45;cursor:default;filter:none}
+/* ── 设置弹窗外壳（示意，真实现由 dsh web 提供）── */
+.backdrop{position:fixed;inset:0;background:var(--dsw-alias-bg-mask-drop,#272730b3)}
+.dialog{position:relative;width:min(960px,96vw);height:min(660px,88vh);background:var(--layer);border:1px solid var(--line);border-radius:16px;display:flex;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,.4)}
+.tabcol{width:172px;border-right:1px solid var(--line);padding:14px 10px;display:flex;flex-direction:column;gap:2px;flex:none}
+.tabcol .hd{font-size:12px;color:var(--tx3);padding:4px 10px 10px}
+.tab{padding:8px 10px;border-radius:8px;font-size:13px;color:var(--tx2);display:flex;justify-content:space-between;align-items:center}
+.tab:hover{background:var(--hover)}
+.tab.on{background:var(--hover);color:var(--tx);font-weight:600}
+.tab .n{font-size:11px;background:var(--ac);color:#fff;border-radius:9px;padding:0 7px;line-height:17px}
+.panel{flex:1;overflow:auto;padding:22px 26px}
+/* ── 通用组件 ── */
+h2{font-size:15px;font-weight:600}
+.sub{color:var(--tx2);font-size:12.5px}
+.chip{display:inline-block;font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 7px;color:var(--tx2);white-space:nowrap}
+.chip.danger{color:var(--danger);border-color:var(--danger)}
+.chip.warn{color:var(--warn);border-color:var(--warn)}
+.chip.ok{color:var(--ok);border-color:var(--ok)}
+.chip.fp{color:var(--ac);border-color:var(--ac)}
+.banner{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-left:3px solid var(--warn);background:var(--hover);border-radius:var(--rs);padding:10px 12px;font-size:12.5px}
+.banner .grow{flex:1}
+.rawerr{background:var(--codebg);border:1px solid var(--line);border-radius:var(--rs);padding:10px 12px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-all;color:var(--tx2);max-height:120px;overflow:auto}
+.rawerr.open{max-height:none}
+.meta{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:12px}
+.meta dt{color:var(--tx3)}.meta dd{color:var(--tx2);word-break:break-all}
+.hint{font-size:12px;color:var(--tx3)}
+.check{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.check .dot{width:8px;height:8px;border-radius:50%;margin-top:6px;flex:none}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--danger)}.dot.run{background:var(--tx3);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.3}}
+/* ── 悬浮切换条（原型 chrome，非设计的一部分）── */
+.bar{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:flex;gap:8px;align-items:center;background:#0d0d0f;border:1px solid #ffffff2e;color:#eee;border-radius:999px;padding:7px 10px;box-shadow:0 10px 30px rgba(0,0,0,.45);z-index:50;font-size:12.5px}
+html[data-theme=light] .bar{background:#1c1e22}
+.bar b{min-width:150px;text-align:center;font-weight:600}
+.bar .pv{background:#ffffff14;border-radius:999px;padding:3px 8px;color:#fff}
+.bar .tag{font-size:10px;background:#e5534b;color:#fff;border-radius:5px;padding:1px 6px;letter-spacing:.5px}
+/* ── 抽屉：IPC 契约 ── */
+.drawer{position:fixed;top:0;right:-460px;width:440px;max-width:94vw;height:100vh;background:var(--layer);border-left:1px solid var(--line);z-index:60;transition:right .22s ease;display:flex;flex-direction:column}
+.drawer.open{right:0}
+.drawer .dh{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.drawer .db{overflow:auto;padding:14px 18px;flex:1}
+.cmd{border:1px solid var(--line);border-radius:var(--rs);padding:12px 14px;margin-bottom:12px;font-size:12px}
+.cmd h4{font-size:12.5px;margin-bottom:6px;color:var(--tx)}
+.cmd pre{background:var(--codebg);border-radius:6px;padding:8px 10px;margin:6px 0;white-space:pre-wrap;word-break:break-all;color:var(--tx2);font-size:11px}
+.cmd .use{color:var(--tx3)}
+/* ── 恢复确认弹窗 ── */
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:70}
+.modal.open{display:flex}
+.modal .box{width:380px;background:var(--layer);border:1px solid var(--line);border-radius:14px;padding:20px 22px}
+.modal .row{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+/* ── toast ── */
+#toasts{position:fixed;right:20px;bottom:76px;display:flex;flex-direction:column;gap:8px;z-index:80}
+.toast{background:var(--layer);border:1px solid var(--line);border-left:3px solid var(--ac);border-radius:var(--rs);padding:10px 14px;font-size:12.5px;box-shadow:0 8px 24px rgba(0,0,0,.3);max-width:340px}
+/* ── 变体 A：分栏主从 ── */
+.vA{display:grid;grid-template-columns:264px 1fr;gap:18px;min-height:100%}
+.vA .list{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.vA .lrow{padding:11px 13px;border-bottom:1px solid var(--line);cursor:pointer;display:block}
+.vA .lrow:hover{background:var(--hover)}
+.vA .lrow.on{background:var(--hover);box-shadow:inset 3px 0 0 var(--ac)}
+.vA .detail{border:1px solid var(--line);border-radius:var(--r);padding:18px 20px;display:flex;flex-direction:column;gap:12px;align-self:start}
+.vA .sec{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;padding-top:12px}
+/* ── 变体 B：卡片流 ── */
+.vB{max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.vB .card{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.vB .chead{padding:12px 16px;display:flex;gap:10px;align-items:center;cursor:pointer}
+.vB .chead:hover{background:var(--hover)}
+.vB .cbody{padding:0 16px 14px;display:none;flex-direction:column;gap:10px;border-top:1px solid var(--line);padding-top:12px}
+.vB .card.open .cbody{display:flex}
+.vB .acc{border:1px solid var(--line);border-radius:var(--r)}
+.vB .acc>.chead{font-weight:600}
+/* ── 变体 C：看板 + 表格 ── */
+.vC{display:grid;grid-template-columns:minmax(0,1fr) 232px;gap:16px;min-height:100%}.vC .main{min-width:0;display:flex;flex-direction:column;gap:12px}
+.vC .kpis{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.vC .kpi{border:1px solid var(--line);border-radius:var(--r);padding:10px 14px;cursor:pointer}
+.vC .kpi:hover{background:var(--hover)}
+.vC .kpi b{font-size:20px;display:block}
+.vC .kpi.bad b{color:var(--danger)}
+.vC table{width:100%;table-layout:fixed;border-collapse:collapse;font-size:12.5px}
+.vC th{color:var(--tx3);font-weight:500;text-align:left;font-size:11.5px;padding:7px 8px;border-bottom:1px solid var(--line)}
+.vC td{padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+.vC .btnrow button{padding:3px 8px;font-size:11px}
+.vC .xrow td{background:var(--codebg)}
+.vC tr:hover td{background:var(--hover)}
+.vC .rail{grid-column:2;min-width:0;border:1px solid var(--line);border-radius:var(--r);padding:14px;display:flex;flex-direction:column;gap:12px;align-self:start}
+.vC .alert{grid-column:1/-1;border:1px solid var(--warn);background:rgba(232,163,61,.08);border-radius:var(--rs);padding:10px 14px;font-size:12.5px}
+.switch{position:relative;width:34px;height:19px;border-radius:999px;background:var(--line);cursor:pointer;flex:none;transition:background .15s}
+.switch.on{background:var(--ok)}
+.switch::after{content:"";position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;background:#fff;transition:left .15s}
+.switch.on::after{left:17px}
+.setrow{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12.5px}
+.excl{display:flex;flex-wrap:wrap;gap:6px}
+.excl .chip{cursor:pointer}.excl .chip:hover{border-color:var(--danger);color:var(--danger)}
+</style></head><body>
+<div class=backdrop></div>
+<div class=dialog role=dialog aria-label="dsh 设置（原型示意）">
+  <nav class=tabcol aria-label="设置分区">
+    <div class=hd>设置</div>
+    <div class=tab>通用</div><div class=tab>模型</div><div class=tab>插件管理</div>
+    <div class=tab onclick="toast('原型只实现了「插件保险丝」这个 Tab')">远程访问</div>
+    <div class="tab on">插件保险丝 <span class="n" id=tabn>4</span></div>
+  </nav>
+  <div class=panel><div id=root></div></div>
+</div>
+
+<div class=bar>
+  <span class=tag>PROTOTYPE</span>
+  <button class="pv" onclick="cycle(-1)" title="←">←</button><b id=vlabel></b><button class="pv" onclick="cycle(1)" title="→">→</button>
+  <button class="pv" onclick="toggleTheme()">主题</button>
+  <button class="pv" onclick="toggleDrawer()">IPC 契约</button>
+  <button class="pv" onclick="resetDemo()">重置演示</button>
+</div>
+
+<aside class=drawer id=drawer><div class=dh><b>IPC 契约（Q4：对着 UI 核对）</b><button class="ghost" onclick=toggleDrawer()>✕</button></div><div class=db id=drawerBody></div></aside>
+<div class=modal id=modal><div class=box id=modalBox></div></div>
+<div id=toasts></div>
+
+<script>
+"use strict"
+/* ── mock 数据：错误报文取自 #54 实测（/tmp/wy-exp/*.err），非编造 ── */
+const DATA={
+ boot:{disabled:2,retried:1,ok:true,at:"2026-09-11 10:24:11"},
+ entries:[
+  {id:"wy-ghost-plugin2",pkg:"file:///tmp/wy-exp/definitely-not-here.js",type:"loader-entry",tname:"loader entry 处理失败",
+   reason:"Cannot find module '/tmp/wy-exp/definitely-not-here.js'",
+   raw:"Error: dsh: plugin tree failed to load: failed to apply loader entry include (cordis:include): failed to import loader entry wy-ghost-plugin2 (file:///tmp/wy-exp/definitely-not-here.js): Cannot find module '/tmp/wy-exp/definitely-not-here.js' imported from /Users/mutou/.dsh/profiles/wy-research/\nError [ERR_MODULE_NOT_FOUND]: Cannot find module '/tmp/wy-exp/definitely-not-here.js'\n    at finalizeResolution (node:internal/modules/esm/resolve:272:11)\n    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:766:56)\n    at boot (file:///…/dsh-app-boot/lib/index.js:1545:9)",
+   at:"2026-09-11 10:24:09",profile:"web",file:"~/.dsh/profiles/web/cordis.patch.yml",repairable:true,fp:false},
+  {id:"wy-pending",pkg:"file:///tmp/wy-exp/pending2.js",type:"activation",tname:"激活失败",
+   reason:"pending (waiting for service: required)",
+   raw:"Error: dsh: 1 entry did not activate\nfile:///tmp/wy-exp/pending2.js: pending (waiting for service: required)\n    at assertEntriesActivated (file:///…/dsh-app-boot/lib/index.js:1492:9)\n    at boot (file:///…/dsh-app-boot/lib/index.js:1537:9)",
+   at:"2026-09-11 09:58:31",profile:"web",file:"~/.dsh/profiles/web/cordis.patch.yml",repairable:false,fp:false},
+  {id:"dsh-llm",pkg:"@deepseek-ai/dsh-llm",type:"duplicate-id",tname:"重复挂载",
+   reason:"duplicate loader entry id: llm",
+   raw:"TypeError: duplicate loader entry id: llm\n  [cause]: Error: failed to apply loader entry include (cordis:include): duplicate loader entry id: llm",
+   at:"2026-09-10 22:41:02",profile:"web",file:"~/.dsh/profiles/web/cordis.patch.yml",repairable:false,fp:true,
+   fpNote:"第一方插件受保护：检测到冲突但未自动禁用，仅记录"},
+  {id:"wy-syntax",pkg:"file:///tmp/wy-exp/syntaxerr.js",type:"loader-entry",tname:"loader entry 处理失败",
+   reason:"Unexpected identifier 'is'",
+   raw:"[cause]: Error: failed to import loader entry wy-syntax (file:///tmp/wy-exp/syntaxerr.js): Unexpected identifier 'is'",
+   at:"2026-09-10 21:07:55",profile:"web",file:"~/.dsh/profiles/web/cordis.patch.yml",repairable:true,fp:false},
+ ],
+ patchParse:{type:"patch-parse",tname:"patch 文件解析失败",profile:"web",file:"~/.dsh/profiles/web/cordis.patch.yml",
+   reason:"failed to parse overlay cordis.patch.yml: YAMLException: bad indentation of a mapping entry (5:3)",
+   raw:"file:///…/dsh/lib/profile-boot-Dk-7KqJc.js:239\nthrow new Error(`dsh: ${stage}: ${detail}`)\nError: dsh: composeProfile: failed to parse overlay …/cordis.patch.yml: YAMLException: bad indentation of a mapping entry (5:3)\n→ 进程 exit 1，发生在 boot 之前，5 类插件失败正则均不匹配（#54 §6.4）"},
+ doctor:[{id:"ver",label:"dsh 版本",ok:true,detail:"0.1.5-rc.1（隔离正则基线：dsh-safe 0.16.0-rc.2）"},
+   {id:"home",label:"DSH_HOME 可写",ok:true,detail:"~/.dsh"},
+   {id:"prof",label:"profile 完整性",ok:true,detail:"web / smoke 两个 profile，bundles 顺序正常"},
+   {id:"ledger",label:"隔离台账一致性",ok:false,detail:"1 条记录的 patch 行已不在 cordis.patch.yml（可能被手工移除）→ 建议「清理失效记录」"},
+   {id:"patch",label:"托管区块健康",ok:true,detail:"托管区块 3 行，缩进合法，位于文件末尾"}],
+ ai:{model:"deepseek-v4-flash",elapsed:4.2,text:"【原因】wy-ghost-plugin2 以 file:// 路径注入，但目标文件不存在（已被移动或删除），Node ESM 解析阶段即失败，属于「包/模块解析失败」类。\n【建议】1) 若插件已改名：把 cordis.patch.yml 托管区块中的路径改为新位置；2) 若不再需要：保持禁用即可；3) 也可点击「修复」尝试重装解析来源。\n【置信】高——ERR_MODULE_NOT_FOUND 与缺失路径互相印证。"},
+ settings:{fp:true,exclude:["archify-skill-filesystem"],retries:2},
+ ipc:[
+  {cmd:"list_quarantine(profile?)",use:"Tab 打开时 / 任何变更后刷新名单",
+   ret:"{ version:1, profiles:{ web:[{ id, name, reason, failure_type, raw_error, quarantined_at, file, repairable, first_party }] } }"},
+  {cmd:"restore_quarantine(profile, ids?)",use:"「恢复」/「全部恢复」（确认弹窗后）",
+   ret:"{ restored:[id], failed:[{id,error}] } — 只改 patch 文件与台账，重启后生效"},
+  {cmd:"repair_plugin(profile, id, to_version?)",use:"「修复」按钮（仅 repairable=true 的记录）",
+   ret:"{ job_id } — 进度走事件 fuse://repair-progress；成功=从台账摘除并重写托管区块"},
+  {cmd:"run_doctor()",use:"「体检」按钮 / 变体 C 的体检 KPI 卡",
+   ret:"{ checks:[{ id, label, ok, detail }] } — dsh 版本/DSH_HOME/profiles/台账一致性/托管区块健康"},
+  {cmd:"explain_failure(profile?, id?)",use:"「AI 解读」按钮",
+   ret:"{ suggestion, model, elapsed_ms } — 密钥读 .credentials.yaml refs（DEEPSEEK_API_KEY），端点 DEEPSEEK_BASE_URL 可覆盖；任何失败静默降级，不阻塞隔离主流程"},
+  {cmd:"get_quarantine_settings()",use:"Tab 打开时读设置区",
+   ret:"{ first_party_protection:bool, exclude:[string], max_retries:1..5 }"},
+  {cmd:"save_quarantine_settings(settings)",use:"设置区任何变更（防抖后）",ret:"{ ok }"},
+  {cmd:"事件 fuse://boot-summary",use:"被动接收 → 顶部通知条",ret:"{ disabled, retried, ok, at }"},
+  {cmd:"事件 fuse://repair-progress",use:"被动接收 → 修复进度",ret:"{ job_id, stage:'resolving'|'installing'|'done'|'error', message }"},
+ ]
+}
+/* ── 演示状态（内存态，重置按钮还原）── */
+let S
+function freshState(){return{variant:"A",sel:0,open:new Set(),rowOpen:new Set(),restored:new Set(),repairing:new Set(),repaired:new Set(),
+ explain:{},doctor:"idle",removed:new Set(),excl:[...DATA.settings.exclude],fp:DATA.settings.fp,retries:DATA.settings.retries,showRaw:true}}
+S=freshState()
+const $=s=>document.querySelector(s)
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))
+const alive=()=>DATA.entries.filter(e=>!S.removed.has(e.id)&&!S.restored.has(e.id))
+const chipType=t=>({["loader-entry"]:"<span class=chip>loader-entry</span>",activation:"<span class='chip warn'>激活失败</span>",["duplicate-id"]:"<span class='chip'>重复挂载</span>",["patch-parse"]:"<span class='chip danger'>patch 解析失败</span>"}[t]||"<span class=chip>"+esc(t)+"</span>")
+function toast(msg){const t=document.createElement("div");t.className="toast";t.innerHTML=msg;$("#toasts").appendChild(t);setTimeout(()=>t.remove(),3200)}
+function modal(html){$("#modalBox").innerHTML=html;$("#modal").classList.add("open")}
+function closeModal(){$("#modal").classList.remove("open")}
+$("#modal").addEventListener("click",e=>{if(e.target.id==="modal")closeModal()})
+function actions(e,ctx){const b=[]
+ if(S.restored.has(e.id))b.push("<span class='chip ok'>待重启生效</span>")
+ if(e.repairable&&!S.repaired.has(e.id))b.push(`<button class=ghost onclick="doRepair('${e.id}','${ctx}')">修复</button>`)
+ if(S.repairing.has(e.id))b.push("<span class='chip warn'>修复中…</span>")
+ if(S.repaired.has(e.id))b.push("<span class='chip ok'>已重装，记录已摘除</span>")
+ b.push(`<button class=ghost onclick="doExplain('${e.id}')">${S.explain[e.id]?"再看 AI 解读":"AI 解读"}</button>`)
+ if(!S.restored.has(e.id))b.push(`<button class=danger onclick="askRestore('${e.id}','${ctx}')">恢复</button>`)
+ return b.join(" ")}
+function explainCard(e){const st=S.explain[e.id];if(!st)return""
+ if(st==="loading")return"<div class=hint>AI 解读中…（deepseek-v4-flash）</div>"
+ return `<div style="border:1px solid var(--ac);border-radius:var(--r);padding:12px 14px"><div class=sub style="margin-bottom:6px">AI 解读 · ${DATA.ai.model} · ${DATA.ai.elapsed}s · 仅供参考</div><div style="font-size:12.5px;white-space:pre-wrap">${esc(DATA.ai.text)}</div></div>`}
+function askRestore(id,ctx){const e=DATA.entries.find(x=>x.id===id)
+ modal(`<h2>恢复 ${esc(id)}？</h2><p class=sub style="margin-top:8px">将从 cordis.patch.yml 托管区块移除 <code>disabled: true</code> 行，<b>恢复后将在下次重启时生效</b>。若新版本 dsh 仍不兼容，下次启动会再次被自动隔离。</p><div class=row><button class=ghost onclick=closeModal()>取消</button><button onclick="doRestore('${id}','${ctx}')">确认恢复</button></div>`)}
+function doRestore(id,ctx){S.restored.add(id);closeModal();render();toast(`已恢复 <b>${esc(id)}</b> — 重启 dsh 后生效（IPC: restore_quarantine）`)}
+function doRepair(id,ctx){S.repairing.add(id);render();toast(`修复任务已派发 <b>${esc(id)}</b>（IPC: repair_plugin → job）`)
+ setTimeout(()=>{S.repairing.delete(id);S.removed.add(id);S.repaired.add(id);render();toast(`<b>${esc(id)}</b> 修复成功：dsh plugin add @latest 完成，台账已摘除`)},1400)}
+function doExplain(id){if(S.explain[id]==="loading")return;S.explain[id]="loading";render()
+ setTimeout(()=>{S.explain[id]="done";render();toast("AI 解读完成（IPC: explain_failure）")},1100)}
+function runDoctor(){if(S.doctor==="running")return;S.doctor="running";render()
+ setTimeout(()=>{S.doctor="done";render();toast("体检完成：4 项通过，1 项异常（IPC: run_doctor）")},1600)}
+function doctorList(){if(S.doctor==="idle")return"<div class=hint>尚未体检。体检检查 dsh 版本、DSH_HOME、profiles、台账一致性与托管区块健康。</div>"
+ return DATA.doctor.map((c,i)=>{const st=S.doctor==="running"?(i<2?"done":"run"):"done"
+  const dot=st==="run"?"<span class='dot run'></span>":(c.ok?"<span class='dot ok'></span>":"<span class='dot bad'></span>")
+  return `<div class=check>${dot}<div><b>${esc(c.label)}</b>${st==="run"?" <span class=chip>检查中</span>":""}<div class=hint>${esc(c.detail)}</div></div></div>`}).join("")}
+function settingsBlock(){return `<div style="display:flex;flex-direction:column;gap:12px">
+ <div class=setrow><span>第一方插件保护（@deepseek-ai/* 不自动禁用）</span><span class="switch ${S.fp?"on":""}" onclick="S.fp=!S.fp;render()"></span></div>
+ <div class=setrow><span>启动失败最大重试次数</span><span><button class="ghost" style="padding:2px 9px" onclick="S.retries=Math.max(1,S.retries-1);render()">−</button> <b>${S.retries}</b> <button class="ghost" style="padding:2px 9px" onclick="S.retries=Math.min(5,S.retries+1);render()">＋</button></span></div>
+ <div><div class=sub style="margin-bottom:6px">排除名单（永不自动禁用，点击移除）</div><div class=excl>${S.excl.map(x=>`<span class=chip onclick="delExcl('${esc(x)}')">${esc(x)} ✕</span>`).join("")||"<span class=hint>空</span>"} <span class=chip style="cursor:pointer;border-style:dashed" onclick="addExcl()">＋ 添加</span></div></div>
+ <div class=hint>设置写入 settings.yaml dsh-desktop-tauriapp: 键（IPC: get/save_quarantine_settings）</div></div>`}
+function addExcl(){const v=prompt("排除的插件 id 或包名：");if(v&&v.trim()){S.excl.push(v.trim());render()}}
+function delExcl(x){S.excl=S.excl.filter(y=>y!==x);render()}
+function bootBanner(){return `<div class=banner><span>⓵</span><span class=grow>本次启动自动禁用了 <b>${DATA.boot.disabled}</b> 个插件，重试 <b>${DATA.boot.retried}</b> 次后成功 <span class=hint>· ${DATA.boot.at}（事件 fuse://boot-summary）</span></span><button class="ghost" onclick="toast('滚动到隔离名单（原型示意）')">查看</button></div>`}
+function rawBlock(e,open){return `<div class="rawerr ${open?"open":""}" onclick="this.classList.toggle('open')" title="点击折叠/展开">${esc(e.raw)}</div>`}
+function metaBlock(e){return `<dl class=meta><dt>失败类型</dt><dd>${e.tname}（${e.type}）</dd><dt>禁用时间</dt><dd>${e.at}</dd><dt>profile</dt><dd>${e.profile}</dd><dt>patch 文件</dt><dd class=mono>${esc(e.file)}</dd><dt>包名/来源</dt><dd class=mono>${esc(e.pkg)}</dd></dl>`}
+/* ── 变体 A：分栏主从 ── */
+function renderA(){const list=alive();const e=list[Math.min(S.sel,list.length-1)]
+ return `<div class=vA>
+ <div style="display:flex;flex-direction:column;gap:12px;min-height:0">
+  <div class=list>${list.map((x,i)=>`<div class="lrow ${i===S.sel?"on":""}" onclick="S.sel=${i};render()">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><b style="font-size:12.5px">${esc(x.id)}</b>${chipType(x.type)}</div>
+    <div class=hint style="margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.reason)}</div></div>`).join("")}
+    ${S.restored.size?`<div class="lrow" style="cursor:default"><span class="chip ok">待重启生效 ${S.restored.size} 项</span></div>`:""}
+  </div>
+  <div class=card style="border:1px solid var(--line);border-radius:var(--r);padding:12px 14px"><b style="font-size:12.5px">体检</b><div style="margin-top:8px">${doctorList()}</div><div class=sec style="padding-top:10px"><button class="ghost" onclick=runDoctor()>运行体检</button></div></div>
+ </div>
+ <div class=detail>
+  <div style="display:flex;justify-content:space-between;align-items:center"><h2>${esc(e.id)} ${e.fp?'<span class="chip fp">第一方</span>':""}</h2>${chipType(e.type)}</div>
+  <div style="font-size:13px;color:var(--danger)">${esc(e.reason)}</div>
+  ${rawBlock(e,S.showRaw)}
+  ${metaBlock(e)}
+  ${e.fp?`<div class=banner style="border-left-color:var(--ac)"><span class=grow>${esc(e.fpNote)}</span></div>`:""}
+  <div class=sec style="margin-top:2px">${actions(e,"A")}</div>
+  ${explainCard(e)}
+  <div class=hint>恢复 / 修复只改 patch 文件与台账，重启后生效；被保护的第一方插件不会出现在此名单（另有冲突记录视图）。</div>
+ </div></div>`}
+/* ── 变体 B：卡片流 + 手风琴 ── */
+function renderB(){const list=alive()
+ const cards=list.map((e,i)=>{const open=S.open.has(e.id)
+  return `<div class="card ${open?"open":""}"><div class=chead onclick="togOpen('${e.id}')">
+   <span class=chip>${String(i+1).padStart(2,"0")}</span><b style="font-size:13px;flex:1">${esc(e.id)} ${e.fp?'<span class="chip fp">第一方</span>':""}</b>
+   ${chipType(e.type)}<span class=hint>${e.at}</span><span class=hint>${open?"▾":"▸"}</span></div>
+  <div class=cbody><div style="font-size:13px;color:var(--danger)">${esc(e.reason)}</div>${rawBlock(e,true)}${metaBlock(e)}
+   ${e.fp?`<div class=banner style="border-left-color:var(--ac)"><span class=grow>${esc(e.fpNote)}</span></div>`:""}
+   <div style="display:flex;gap:8px;flex-wrap:wrap">${actions(e,"B")}</div>${explainCard(e)}</div></div>`}).join("")
+ return `<div class=vB>${bootBanner()}
+ <div class="card open"><div class=chead onclick="toast('已全部展开（原型示意）')"><b style="flex:1">隔离名单（${list.length}）</b><button class="ghost" onclick="event.stopPropagation();askRestoreAll()">全部恢复</button></div></div>
+ ${cards}
+ <div class="card"><div class=chead onclick=runDoctor()><b style="flex:1">体检（doctor）</b><span class="chip ${S.doctor==="done"?"ok":""}">${S.doctor==="running"?"检查中…":S.doctor==="done"?"4 通过 · 1 异常":"未运行"}</span><span class=hint>▸</span></div>
+  <div class=cbody style="display:block">${doctorList()}<div style="margin-top:10px"><button class="ghost" onclick=runDoctor()>重新体检</button></div></div></div>
+ <div class="card"><div class=chead onclick="this.parentElement.classList.toggle('open')"><b style="flex:1">设置</b><span class=hint>▸</span></div><div class=cbody>${settingsBlock()}</div></div>
+ </div>`}
+function togOpen(id){S.open.has(id)?S.open.delete(id):S.open.add(id);render()}
+function togRow(id){S.rowOpen.has(id)?S.rowOpen.delete(id):S.rowOpen.add(id);render()}
+function askRestoreAll(){modal(`<h2>全部恢复？</h2><p class=sub style="margin-top:8px">将恢复 <b>${alive().length}</b> 条记录。<b>恢复后将在下次重启时生效</b>；若仍不兼容会再次被自动隔离。</p><div class=row><button class=ghost onclick=closeModal()>取消</button><button onclick="alive().forEach(e=>S.restored.add(e.id));closeModal();render();toast('已全部恢复 — 重启后生效')">全部恢复</button></div>`)}
+/* ── 变体 C：看板 + 表格 ── */
+function renderC(){const list=alive();const rep=list.filter(e=>e.repairable).length
+ const pp=`<div class=alert><b>⚠ patch 文件解析失败</b>（第 6 类，非插件问题）：<span class=mono>${esc(DATA.patchParse.reason)}</span> — <a href="#" onclick="toast('定位到文件（原型示意）');return false" style="color:var(--ac)">定位 cordis.patch.yml</a> · <span class=hint>YAML 语法错误无法自动修复，需人工处理</span></div>`
+ return `<div class=vC>
+ <div class=kpis>
+  <div class=kpi><b>${list.length}</b><span class=sub>已隔离</span></div>
+  <div class=kpi><b>${rep}</b><span class=sub>可修复</span></div>
+  <div class=kpi><b style="color:var(--ok);font-size:14px;padding-top:4px">重试 ${DATA.boot.retried} 次后成功</b><span class=sub>上次启动 · ${DATA.boot.at}</span></div>
+  <div class="kpi ${S.doctor==="done"?"bad":""}" onclick=runDoctor()><b style="font-size:14px;padding-top:4px">${S.doctor==="running"?"检查中…":S.doctor==="done"?"1 项异常":"点击体检"}</b><span class=sub>体检（doctor）</span></div>
+ </div>
+ ${pp}
+ <div class=main>
+ <div style="border:1px solid var(--line);border-radius:var(--r);overflow:hidden">
+ <table><thead><tr><th style=width:24px></th><th>插件 / 类型</th><th>禁用原因</th><th style=width:86px>时间</th><th style=width:148px>操作</th></tr></thead><tbody>
+ ${list.map(e=>{const open=S.rowOpen.has(e.id);return `<tr>
+   <td><input type=checkbox onclick="event.stopPropagation()"></td>
+   <td style="cursor:pointer" onclick="togRow('${e.id}')"><b>${esc(e.id)}</b> ${chipType(e.type)}${e.fp?' <span class="chip fp">第一方</span>':""}<div class="hint mono" style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.pkg)}</div></td>
+   <td style="cursor:pointer" onclick="togRow('${e.id}')"><span class=hint style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.reason)}</span></td>
+   <td class=hint style="white-space:nowrap">${e.at.slice(5,16)}</td>
+   <td><div class=btnrow style="display:flex;gap:5px;flex-wrap:wrap">${actions(e,"C")}</div></td></tr>
+   ${open?`<tr class=xrow><td></td><td colspan=4>${rawBlock(e,true)}<div style="margin-top:6px">${metaBlock(e)}</div></td></tr>`:""}`}).join("")}
+ ${S.restored.size?`<tr><td></td><td colspan=5><span class="chip ok">待重启生效 ${S.restored.size} 项</span> <span class=hint>（重启 dsh 后从名单消失）</span></td></tr>`:""}
+ </tbody></table></div>
+ <div style="display:flex;gap:8px"><button class=ghost onclick=askRestoreAll()>批量恢复（勾选项）</button><span class=hint style="align-self:center">表格行内动作 = 变体 A 详情页动作的等价入口</span></div>
+ </div>
+ <div class=rail><b style="font-size:12.5px">设置</b>${settingsBlock()}
+  <div><b style="font-size:12.5px">最近事件</b><div class=hint style="margin-top:6px">10:24 禁用 2 个插件，重试 1 次成功<br>09:58 禁用 wy-pending<br>昨 22:41 检测到 dsh-llm 重复挂载（第一方，跳过）</div></div>
+ </div></div>`}
+/* ── 装配：变体注册 + 悬浮切换条 ── */
+const VARIANTS={A:{name:"分栏主从",fn:renderA},B:{name:"卡片流+手风琴",fn:renderB},C:{name:"看板+表格",fn:renderC}}
+function render(){const v=VARIANTS[S.variant];$("#vlabel").textContent=`${S.variant}（${v.name}）`
+ $("#root").innerHTML=v.fn();$("#tabn").textContent=alive().length+S.restored.size
+ const p=new URL(location.href);p.searchParams.set("variant",S.variant)
+ try{history.replaceState(null,"",p)}catch{ /* file:// 下可能受限，忽略 */ }}
+function cycle(d){const ks=Object.keys(VARIANTS);S.variant=ks[(ks.indexOf(S.variant)+d+ks.length)%ks.length];render()}
+function toggleTheme(){const h=document.documentElement;h.dataset.theme=h.dataset.theme==="dark"?"light":"dark"}
+function toggleDrawer(){$("#drawer").classList.toggle("open");if($("#drawer").classList.contains("open"))renderDrawer()}
+function renderDrawer(){$("#drawerBody").innerHTML=DATA.ipc.map(c=>`<div class=cmd><h4 class=mono>${esc(c.cmd)}</h4><div class=use>触发：${esc(c.use)}</div><div class=sub style="margin:4px 0 0">返回：</div><pre>${esc(c.ret)}</pre></div>`).join("")
+ +`<div class=cmd><h4>当前演示内存状态（外显）</h4><pre>${esc(JSON.stringify({variant:S.variant,sel:S.sel,restored:[...S.restored],repaired:[...S.repaired],repairing:[...S.repairing],explain:Object.keys(S.explain),doctor:S.doctor,fp:S.fp,retries:S.retries,exclude:S.excl},null,1))}</pre></div>`}
+function resetDemo(){S=freshState();render();toast("演示状态已重置")}
+document.addEventListener("keydown",e=>{if(/INPUT|TEXTAREA/.test(e.target.tagName)||e.target.isContentEditable)return
+ if(e.key==="ArrowLeft")cycle(-1);if(e.key==="ArrowRight")cycle(1);if(e.key==="Escape")closeModal()})
+const q=new URLSearchParams(location.search).get("variant");if(q&&VARIANTS[q])S.variant=q
+render()
+</script>
+<div style="position:fixed;left:14px;bottom:14px;font-size:11px;color:var(--tx3);z-index:40">原型仅供评审 · issue #55 · 报文取自 #54 实测 · 双击打开，?variant=A|B|C 或 ←/→ 切换</div>
+</body></html>
