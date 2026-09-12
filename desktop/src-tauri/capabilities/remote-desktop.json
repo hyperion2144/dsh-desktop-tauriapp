@@ -30,6 +30,14 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "allow-list-quarantine",
+    "allow-restore-quarantine",
+    "allow-repair-plugin",
+    "allow-run-doctor",
+    "allow-explain-failure",
+    "allow-get-fuse-summary",
+    "allow-get-quarantine-settings",
+    "allow-save-quarantine-settings"
   ]
 }
