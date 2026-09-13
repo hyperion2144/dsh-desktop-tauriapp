@@ -105,7 +105,7 @@ export function apply(ctx) {
   // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）
   ctx.inject(['connection'], (webContext) => {
     if (webContext.connection === void 0) return
-    webContext.connection.rpc.handle('dsh-desktop-tauriapp:models', async () => {
+    webContext.connection.rpc.handle('dsh-desktop-tauriapp:models', async (_endpoint) => {
       const llm = ctx.get('llm')
       if (llm === void 0) throw new Error('llm service unavailable')
       const providers = llm.listProviders()
@@ -117,21 +117,21 @@ export function apply(ctx) {
       return { providers: result }
     }, { authority: 'trusted-host' })
     // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
-    webContext.connection.rpc.handle('dsh-desktop-tauriapp:fuse-settings', async (payload) => {
+    webContext.connection.rpc.handle('dsh-desktop-tauriapp:fuse-settings', async (endpoint, payload) => {
       const settings = ctx.get('settings')
       if (settings === void 0) throw new Error('settings service unavailable')
-      if (payload.action === 'get') {
+      if (endpoint === 'get') {
         const value = settings.get('dsh-desktop-tauriapp')
         return { ok: true, value: value ?? {} }
       }
-      if (payload.action === 'save') {
+      if (endpoint === 'save') {
         const ops = Object.entries(payload.patch).map(([path, value]) => ({
           op: 'set', path: path.split('.'), value,
         }))
         await settings.mutate('dsh-desktop-tauriapp', ops)
         return { ok: true }
       }
-      throw new Error(`unknown action: ${payload.action}`)
+      throw new Error(`unknown endpoint: ${endpoint}`)
     }, { authority: 'trusted-host' })
   })
 }

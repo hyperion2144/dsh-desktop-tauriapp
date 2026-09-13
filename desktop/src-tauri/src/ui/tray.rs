@@ -6,22 +6,19 @@
 use std::sync::atomic::Ordering;
 
 use tauri::{
-    menu::{Menu, MenuItem, SubmenuBuilder},
+    menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
 use crate::runtime::state::{DshState, MODE_ADVANCED, MODE_COMPAT};
 use crate::runtime::error::SpawnError;
-use crate::settings::{load_desktop_settings, configured_port, configured_profile};
 use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::clear_web_token;
 use crate::ui::pet::toggle_pet;
 use crate::{
     show_main, set_status, show_notification, app_port,
-    scan_profiles, switch_profile, create_profile_flow, remote_display,
-    select_remote, add_remote_flow, remove_remote_flow, set_port_flow,
-    open_proxy_settings, stop_port_owner, wait_ready_and_navigate,
+    stop_port_owner, wait_ready_and_navigate,
     STATUS_RESTARTING,
 };
 
@@ -35,67 +32,12 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)?;
-    let settings = load_desktop_settings();
-    let active_remote = settings.remote_addr.clone();
-    let port = configured_port();
-
-    // dsh 服务地址 ▸（标签用展示名 host[:port]，完整 URL 里的 token 不进菜单）
-    let local_label = if active_remote.is_none() { "✓ 本地".to_string() } else { "本地".to_string() };
-    let local_item = MenuItem::with_id(app, "remote:local", local_label, true, None::<&str>)?;
-    let mut remote_builder = SubmenuBuilder::new(app, "dsh 服务地址");
-    remote_builder = remote_builder.item(&local_item);
-    for addr in &settings.remote_list {
-        let display = remote_display(addr);
-        let label = if active_remote.as_deref() == Some(addr) {
-            format!("✓ {display}")
-        } else {
-            display
-        };
-        // 菜单 id 仍携带完整地址（URL 或旧格式），选中/删除按原值匹配
-        let item = MenuItem::with_id(app, format!("remote-set:{addr}"), label, true, None::<&str>)?;
-        remote_builder = remote_builder.item(&item);
-    }
-    remote_builder = remote_builder.separator();
-    let add_item = MenuItem::with_id(app, "remote-add", "新增地址…", true, None::<&str>)?;
-    remote_builder = remote_builder.item(&add_item);
-    if !settings.remote_list.is_empty() {
-        let mut del_builder = SubmenuBuilder::new(app, "删除地址");
-        for addr in &settings.remote_list {
-            let item = MenuItem::with_id(app, format!("remote-del:{addr}"), remote_display(addr), true, None::<&str>)?;
-            del_builder = del_builder.item(&item);
-        }
-        remote_builder = remote_builder.items(&[&del_builder.build()?]);
-    }
-    let remote_menu = remote_builder.build()?;
-
-    // Profile ▸
-    let mut profile_builder = SubmenuBuilder::new(app, "Profile");
-    for p in scan_profiles() {
-        let label = if p.active { format!("✓ {}", p.name) } else { p.name.clone() };
-        let item = MenuItem::with_id(app, format!("profile:{}", p.name), label, p.selectable, None::<&str>)?;
-        profile_builder = profile_builder.item(&item);
-    }
-    profile_builder = profile_builder.separator();
-    let new_profile = MenuItem::with_id(app, "new-profile", "新建 Profile…", true, None::<&str>)?;
-    profile_builder = profile_builder.item(&new_profile);
-    let profile_menu = profile_builder.build()?;
-
-    let port_item = MenuItem::with_id(app, "set-port", format!("本地端口… {port}"), true, None::<&str>)?;
-
-    // 代理设置菜单项：标签显示当前代理模式
-    let proxy_mode_label = match settings.proxy_mode.as_deref() {
-        Some("system") => "继承系统代理",
-        Some("manual") => "手动代理",
-        _ => "直连",
-    };
-    let proxy_item = MenuItem::with_id(app, "proxy-settings", format!("代理设置…（{proxy_mode_label}）"), true, None::<&str>)?;
+    // 设置能力（服务地址/Profile/端口/代理）已迁移至 dsh web 设置面板的「桌面设置」Tab，
+    // 托盘只保留操作类入口（#61 实测反馈）。
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(
-        app,
-        &[&show, &pet, &remote_menu, &profile_menu, &port_item, &proxy_item, &restart, &toggle, &quit],
-    )?)
+    Ok(Menu::with_items(app, &[&show, &pet, &restart, &toggle, &quit])?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -134,20 +76,6 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "pet" => toggle_pet(app),
             "restart" => restart_dsh(app),
             "toggle-mode" => toggle_desktop_mode(app),
-            "remote:local" => select_remote(app, None),
-            "remote-add" => add_remote_flow(app),
-            "new-profile" => create_profile_flow(app),
-            "set-port" => set_port_flow(app),
-            "proxy-settings" => open_proxy_settings(app),
-            id if id.starts_with("profile:") => {
-                switch_profile(app, &id["profile:".len()..]);
-            }
-            id if id.starts_with("remote-set:") => {
-                select_remote(app, Some(id["remote-set:".len()..].to_string()));
-            }
-            id if id.starts_with("remote-del:") => {
-                remove_remote_flow(app, &id["remote-del:".len()..]);
-            }
             "quit" => {
                 app.state::<DshState>().quitting.store(true, Ordering::SeqCst);
                 app.exit(0);
@@ -288,7 +216,13 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         handle.state::<DshState>().spawn_failed.store(false, Ordering::SeqCst);
         let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
         let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
-        wait_ready_and_navigate(handle.clone(), port, nport, ntoken).await;
+        // 不能 .await：dsh 起不来时 wait_ready_and_navigate 内部循环不返回，
+        // restarting 永远 true → 监控任务永远跳过 + 托盘再点重启被 swap 拦截（死锁）。
+        // spawn 让 restarting 立即复位，子进程失败由监控任务检测→隔离→重试。
+        let nav_handle = handle.clone();
+        tauri::async_runtime::spawn(async move {
+            wait_ready_and_navigate(nav_handle, port, nport, ntoken).await;
+        });
         handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
         // 4) 刷新托盘「切换模式」标签
         refresh_tray_mode(&handle);

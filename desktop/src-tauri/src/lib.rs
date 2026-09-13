@@ -71,6 +71,8 @@ use commands::{
     list_quarantine, restore_quarantine, repair_plugin,
     run_doctor, explain_failure, get_fuse_summary,
     get_quarantine_settings, save_quarantine_settings, list_ai_providers,
+    get_desktop_settings_data, add_remote_address, remove_remote_address,
+    select_remote_address, set_local_port, switch_profile_command,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -161,6 +163,12 @@ pub fn run() {
             save_proxy_settings,
             test_proxy_connectivity,
             list_ai_providers,
+            get_desktop_settings_data,
+            add_remote_address,
+            remove_remote_address,
+            select_remote_address,
+            set_local_port,
+            switch_profile_command,
             list_quarantine,
             restore_quarantine,
             repair_plugin,

@@ -126,3 +126,33 @@ commands = { allow = ["save_quarantine_settings"] }
 identifier = "allow-list-ai-providers"
 description = "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）"
 commands = { allow = ["list_ai_providers"] }
+
+[[permission]]
+identifier = "allow-get-desktop-settings-data"
+description = "桌面设置面板：get_desktop_settings_data"
+commands = { allow = ["get_desktop_settings_data"] }
+
+[[permission]]
+identifier = "allow-add-remote-address"
+description = "桌面设置面板：add_remote_address"
+commands = { allow = ["add_remote_address"] }
+
+[[permission]]
+identifier = "allow-remove-remote-address"
+description = "桌面设置面板：remove_remote_address"
+commands = { allow = ["remove_remote_address"] }
+
+[[permission]]
+identifier = "allow-select-remote-address"
+description = "桌面设置面板：select_remote_address"
+commands = { allow = ["select_remote_address"] }
+
+[[permission]]
+identifier = "allow-set-local-port"
+description = "桌面设置面板：set_local_port"
+commands = { allow = ["set_local_port"] }
+
+[[permission]]
+identifier = "allow-switch-profile-command"
+description = "桌面设置面板：switch_profile_command"
+commands = { allow = ["switch_profile_command"] }

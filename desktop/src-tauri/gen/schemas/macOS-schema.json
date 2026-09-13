@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "桌面设置面板：add_remote_address",
+          "type": "string",
+          "const": "allow-add-remote-address",
+          "markdownDescription": "桌面设置面板：add_remote_address"
+        },
+        {
           "description": "允许加载页切换兼容/高级接入模式",
           "type": "string",
           "const": "allow-choose-desktop-mode",
@@ -193,6 +199,12 @@
           "type": "string",
           "const": "allow-get-desktop-client-environment",
           "markdownDescription": "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）"
+        },
+        {
+          "description": "桌面设置面板：get_desktop_settings_data",
+          "type": "string",
+          "const": "allow-get-desktop-settings-data",
+          "markdownDescription": "桌面设置面板：get_desktop_settings_data"
         },
         {
           "description": "允许查询 dsh 服务状态（侧边栏状态标识）",
@@ -279,6 +291,12 @@
           "markdownDescription": "允许桌宠切换鼠标穿透"
         },
         {
+          "description": "桌面设置面板：remove_remote_address",
+          "type": "string",
+          "const": "allow-remove-remote-address",
+          "markdownDescription": "桌面设置面板：remove_remote_address"
+        },
+        {
           "description": "允许触发插件修复（dsh plugin add 重装）",
           "type": "string",
           "const": "allow-repair-plugin",
@@ -313,6 +331,24 @@
           "type": "string",
           "const": "allow-save-quarantine-settings",
           "markdownDescription": "允许保存保险丝设置"
+        },
+        {
+          "description": "桌面设置面板：select_remote_address",
+          "type": "string",
+          "const": "allow-select-remote-address",
+          "markdownDescription": "桌面设置面板：select_remote_address"
+        },
+        {
+          "description": "桌面设置面板：set_local_port",
+          "type": "string",
+          "const": "allow-set-local-port",
+          "markdownDescription": "桌面设置面板：set_local_port"
+        },
+        {
+          "description": "桌面设置面板：switch_profile_command",
+          "type": "string",
+          "const": "allow-switch-profile-command",
+          "markdownDescription": "桌面设置面板：switch_profile_command"
         },
         {
           "description": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）",

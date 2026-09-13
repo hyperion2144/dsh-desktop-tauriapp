@@ -349,35 +349,49 @@ function buildPanel(): HTMLElement {
         provSel.appendChild(el('option', `加载失败：${state.providerDir.error}`))
         provSel.disabled = true
       } else if (!state.providerDir.length) {
-        provSel.appendChild(el('option', '无可用 provider（.credentials.yaml refs 为空）'))
+        provSel.appendChild(el('option', 'dsh 未注册任何 provider'))
         provSel.disabled = true
       } else {
         for (const p of state.providerDir) {
           const opt = document.createElement('option')
           opt.value = p.id
-          opt.textContent = p.name
-          if (p.id === state.settings!.ai_key_env) opt.selected = true
+          opt.textContent = `${p.name}（${p.models.length} 个模型）`
+          if (p.id === state.settings!.ai_provider) opt.selected = true
           provSel.appendChild(opt)
         }
       }
       provSel.addEventListener('change', () => {
         state.settings!.ai_provider = provSel.value
-        state.settings!.ai_key_env = provSel.value
+        const p = Array.isArray(state.providerDir) ? state.providerDir.find(x => x.id === provSel.value) : undefined
+        if (p?.models.length) state.settings!.ai_model = p.models[0].id
         void saveSettings()
         render()
       })
       body.appendChild(provSel)
-      body.appendChild(el('div', '模型名', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-top:6px;'))
-      const modelInput = document.createElement('input')
-      modelInput.placeholder = '模型名（默认 deepseek-v4-flash）'
-      modelInput.value = state.settings!.ai_model
-      modelInput.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;margin-top:6px;'
-      modelInput.addEventListener('change', () => {
-        state.settings!.ai_model = modelInput.value.trim()
+      // 模型下拉：从选中 provider 的已安装目录动态填充
+      body.appendChild(el('div', '模型', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-top:6px;'))
+      const modelSel = document.createElement('select')
+      modelSel.style.cssText = 'width:100%;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;margin-top:6px;'
+      const selProvider = Array.isArray(state.providerDir) ? state.providerDir.find(p => p.id === state.settings!.ai_provider) : undefined
+      const models = selProvider?.models ?? []
+      if (!models.length) {
+        modelSel.appendChild(el('option', selProvider ? '该 provider 无已安装模型' : '未选中 provider'))
+        modelSel.disabled = true
+      } else {
+        for (const m of models) {
+          const opt = document.createElement('option')
+          opt.value = m.id
+          opt.textContent = m.name || m.id
+          if (m.id === state.settings!.ai_model) opt.selected = true
+          modelSel.appendChild(opt)
+        }
+      }
+      modelSel.addEventListener('change', () => {
+        state.settings!.ai_model = modelSel.value
         void saveSettings()
       })
-      body.appendChild(modelInput)
-      body.appendChild(el('div', 'Provider 列表从 .credentials.yaml refs 动态获取；密钥按对应键名读取，模型名默认 deepseek-v4-flash。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
+      body.appendChild(modelSel)
+      body.appendChild(el('div', 'Provider 与模型列表从 dsh llm 目录服务动态获取（与 dsh-mnemon 同一数据源）。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
       setCard.appendChild(body)
     }
     left.appendChild(setCard)
@@ -451,7 +465,7 @@ function buildPanel(): HTMLElement {
     }
     state.providerDir = 'loading'
     try {
-      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:models', {})
+      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:models', 'list', {})
       state.providerDir = r.providers.map(p => ({
         id: p.id,
         name: p.name,
@@ -525,8 +539,7 @@ function buildPanel(): HTMLElement {
   async function saveSettings(): Promise<void> {
     if (!state.settings) return
     try {
-      await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', {
-        action: 'save',
+      await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', 'save', {
         patch: {
           quarantine_first_party_protection: state.settings.first_party_protection,
           quarantine_exclude: state.settings.exclude,
@@ -545,7 +558,7 @@ function buildPanel(): HTMLElement {
     await Promise.all([reload(), loadSummary()])
     void loadProviderDir().then(() => render())
     try {
-      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', { action: 'get' })
+      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', 'get', {})
       if (r.ok && r.value && typeof r.value === 'object') {
         const v = r.value as Record<string, unknown>
         state.settings = {

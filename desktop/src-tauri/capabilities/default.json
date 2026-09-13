@@ -34,6 +34,12 @@
     "allow-get-fuse-summary",
     "allow-get-quarantine-settings",
     "allow-save-quarantine-settings",
-    "allow-list-ai-providers"
+    "allow-list-ai-providers",
+    "allow-get-desktop-settings-data",
+    "allow-add-remote-address",
+    "allow-remove-remote-address",
+    "allow-select-remote-address",
+    "allow-set-local-port",
+    "allow-switch-profile-command"
   ]
 }

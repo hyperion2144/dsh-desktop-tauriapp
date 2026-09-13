@@ -635,6 +635,74 @@ pub(crate) fn list_ai_providers() -> serde_json::Value {
     }
     serde_json::json!({ "providers": providers })
 }
+
+/// 桌面设置面板：一次性读取服务地址/端口/Profile 数据。
+#[tauri::command]
+pub(crate) fn get_desktop_settings_data() -> serde_json::Value {
+    let settings = load_desktop_settings();
+    let profiles: Vec<serde_json::Value> = crate::profiles::scan_profiles()
+        .iter()
+        .map(|p| serde_json::json!({ "name": p.name, "active": p.active, "selectable": p.selectable }))
+        .collect();
+    serde_json::json!({
+        "remote_addr": settings.remote_addr,
+        "remote_list": settings.remote_list,
+        "port": configured_port(),
+        "profiles": profiles,
+    })
+}
+
+/// 新增 dsh 服务地址（设置面板表单提交，无弹窗）。返回归一化后的地址；重启后生效。
+#[tauri::command]
+pub(crate) fn add_remote_address(url: String) -> Result<String, String> {
+    let Some(addr) = normalize_remote_url(&url) else {
+        return Err(format!("格式应为 dsh web 打印的完整 URL 或 host[:port]：{url}"));
+    };
+    let mut settings = load_desktop_settings();
+    if !settings.remote_list.contains(&addr) {
+        settings.remote_list.push(addr.clone());
+    }
+    save_desktop_settings(&settings);
+    Ok(addr)
+}
+
+/// 删除 dsh 服务地址（若删除的是当前选中项，自动回本地；重启后生效）。
+#[tauri::command]
+pub(crate) fn remove_remote_address(addr: String) -> Result<(), String> {
+    let mut settings = load_desktop_settings();
+    settings.remote_list.retain(|a| a != &addr);
+    if settings.remote_addr.as_deref() == Some(addr.as_str()) {
+        settings.remote_addr = None;
+    }
+    save_desktop_settings(&settings);
+    Ok(())
+}
+
+/// 选择 dsh 服务来源：null=本地，Some(url)=远程。写设置后按当前模式立即重启。
+#[tauri::command]
+pub(crate) fn select_remote_address(app: tauri::AppHandle, addr: Option<String>) -> Result<(), String> {
+    crate::network::remote::select_remote(&app, addr);
+    Ok(())
+}
+
+/// 设置本地端口（设置面板表单提交，无弹窗）。重启后生效。
+#[tauri::command]
+pub(crate) fn set_local_port(port: u16) -> Result<(), String> {
+    if port == 0 {
+        return Err("端口不能为 0".into());
+    }
+    let mut settings = load_desktop_settings();
+    settings.port = Some(port);
+    save_desktop_settings(&settings);
+    Ok(())
+}
+
+/// 切换 Profile（设置面板下拉选择）。写设置后按当前模式重启。
+#[tauri::command]
+pub(crate) fn switch_profile_command(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    crate::profiles::switch_profile(&app, &name);
+    Ok(())
+}
 /// 最近一次启动的隔离事件摘要（通知区）。
 #[tauri::command]
 pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {
