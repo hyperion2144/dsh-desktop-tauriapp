@@ -237,7 +237,7 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
 /// spawn `dsh web --host 127.0.0.1 --port <port>`（unix）；stdout/stderr 转发到日志，
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     let bin = find_dsh_bin().ok_or_else(|| {
         SpawnError::NotFound(
             "未找到 dsh 命令。请执行 `npm i -g @deepseek-ai/dsh` 或设置 DSH_BIN 环境变量。"
@@ -255,8 +255,12 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
     // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
     // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    launcher_args.push("--patch".into());
-    launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+    // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
+    // 兼容模式不注入，行为等同纯 dsh web（用户实测需求）
+    if advanced {
+        launcher_args.push("--patch".into());
+        launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+    }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
             launcher_args.push("--patch".into());
@@ -513,7 +517,7 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 /// npm 全局安装的 dsh 在 Windows 是 dsh.cmd shim，直接 CreateProcess 有引号
 /// 转义坑，所以直接用 node.exe 执行 bin.js；CREATE_NO_WINDOW 防止闪黑窗。
 #[cfg(windows)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     use std::os::windows::process::CommandExt;
     let node = find_node().ok_or_else(|| {
         SpawnError::NotFound(
