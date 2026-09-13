@@ -525,15 +525,15 @@ function buildPanel(): HTMLElement {
   async function saveSettings(): Promise<void> {
     if (!state.settings) return
     try {
-      await invoke('save_quarantine_settings', {
-        firstPartyProtection: state.settings.first_party_protection,
-        exclude: state.settings.exclude,
-        maxRetries: state.settings.max_retries,
-        aiProvider: state.settings.ai_provider || 'deepseek',
-        aiModel: state.settings.ai_model || '',
-        aiBaseUrl: state.settings.ai_base_url || '',
-        aiKeyEnv: state.settings.ai_key_env || '',
-        maxRetries: state.settings.max_retries,
+      await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', {
+        action: 'save',
+        patch: {
+          quarantine_first_party_protection: state.settings.first_party_protection,
+          quarantine_exclude: state.settings.exclude,
+          quarantine_max_retries: state.settings.max_retries,
+          ai_provider: state.settings.ai_provider || 'deepseek',
+          ai_model: state.settings.ai_model || '',
+        },
       })
     } catch (err) {
       root.appendChild(el('div', `设置保存失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
@@ -543,10 +543,21 @@ function buildPanel(): HTMLElement {
 
   void (async () => {
     await Promise.all([reload(), loadSummary()])
-    await Promise.all([reload(), loadSummary()])
     void loadProviderDir().then(() => render())
     try {
-      state.settings = await invoke<FuseSettings>('get_quarantine_settings')
+      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', { action: 'get' })
+      if (r.ok && r.value && typeof r.value === 'object') {
+        const v = r.value as Record<string, unknown>
+        state.settings = {
+          first_party_protection: (v.quarantine_first_party_protection as boolean) ?? true,
+          exclude: (v.quarantine_exclude as string[]) ?? [],
+          max_retries: (v.quarantine_max_retries as number) ?? 2,
+          ai_provider: (v.ai_provider as string) ?? 'deepseek',
+          ai_model: (v.ai_model as string) ?? '',
+          ai_base_url: (v.ai_base_url as string) ?? '',
+          ai_key_env: (v.ai_key_env as string) ?? '',
+        }
+      }
     } catch {
       state.settings = {
         first_party_protection: true,

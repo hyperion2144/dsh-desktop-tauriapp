@@ -116,5 +116,22 @@ export function apply(ctx) {
       }
       return { providers: result }
     }, { authority: 'trusted-host' })
+    // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
+    webContext.connection.rpc.handle('dsh-desktop-tauriapp:fuse-settings', async (payload) => {
+      const settings = ctx.get('settings')
+      if (settings === void 0) throw new Error('settings service unavailable')
+      if (payload.action === 'get') {
+        const value = settings.get('dsh-desktop-tauriapp')
+        return { ok: true, value: value ?? {} }
+      }
+      if (payload.action === 'save') {
+        const ops = Object.entries(payload.patch).map(([path, value]) => ({
+          op: 'set', path: path.split('.'), value,
+        }))
+        await settings.mutate('dsh-desktop-tauriapp', ops)
+        return { ok: true }
+      }
+      throw new Error(`unknown action: ${payload.action}`)
+    }, { authority: 'trusted-host' })
   })
 }
