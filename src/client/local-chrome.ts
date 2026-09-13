@@ -56,13 +56,13 @@ function buildWindowControls(): HTMLElement {
   return box
 }
 
-/** 定位标准布局的 AppFrame（overlay 层的父节点）与三列。children 顺序：sidebar / center / details / overlay … */
-function locateLayout(): { frame: HTMLElement; sidebar: HTMLElement; center: HTMLElement | null } | null {
+/** 定位标准布局的 AppFrame（overlay 层的父节点）与三列。children 顺序：sidebar / center / rightbar / overlay … */
+function locateLayout(): { frame: HTMLElement; sidebar: HTMLElement; center: HTMLElement | null; rightColumn: HTMLElement | null } | null {
   const layer = document.querySelector(FRAME_LAYER_SELECTOR)
   const frame = layer?.parentElement
   if (frame === null || frame === undefined) return null
   const children = Array.from(frame.children).filter((el): el is HTMLElement => el instanceof HTMLElement)
-  return { frame, sidebar: children[0] ?? frame, center: children[1] ?? null }
+  return { frame, sidebar: children[0] ?? frame, center: children[1] ?? null, rightColumn: children[2] ?? null }
 }
 
 /**
@@ -242,7 +242,7 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       return
     }
     attempts = 0
-    const { frame, sidebar, center } = layout
+    const { frame, sidebar, center, rightColumn } = layout
     ensureSidebarScroll(sidebar)
     const sidebarWidth = sidebar.offsetWidth
     // 底部状态条：内容行让出一整行（所有平台），状态条覆盖其上
@@ -287,6 +287,11 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`
       drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`
       if (center !== null) center.style.paddingTop = `${height}px`
+      // 右侧 Sidebar panel（dsh >= 0.15.0-rc.1 多 tab 结构）同样顶下，
+      // 让出 chrome 条覆盖区（#62）。panel 是 position:absolute; top:0，
+      // paddingTop 对绝对定位子元素无效，须直接覆写 panel.style.top。
+      const rightPanel = rightColumn?.querySelector('[data-sidebar-right-panel]')
+      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = `${height}px`
     }
   }
 
@@ -326,12 +331,18 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       resizeObserver.observe(layout.frame)
       resizeObserver.observe(layout.sidebar)
       if (layout.center !== null) resizeObserver.observe(layout.center)
+      if (layout.rightColumn !== null) resizeObserver.observe(layout.rightColumn)
     }
     if (mutationObserver !== null) {
       mutationObserver.observe(layout.frame, {
         attributes: true,
         attributeFilter: ['data-sidebar-collapsed', 'data-details-collapsed', 'style'],
       })
+      // 右侧 Sidebar 切换会话时 React 销毁重建 panel DOM，新节点丢失 inline top。
+      // 监听 rightColumn 子树 childList 变化，panel 被替换后重跑 sync 补回 top（#62）。
+      if (layout.rightColumn !== null) {
+        mutationObserver.observe(layout.rightColumn, { childList: true, subtree: true })
+      }
     }
     return true
   }
@@ -366,6 +377,8 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       found.frame.style.removeProperty('transition')
       found.frame.style.removeProperty('grid-template-columns')
       if (found.center !== null) found.center.style.paddingTop = ''
+      const rightPanel = found.rightColumn?.querySelector('[data-sidebar-right-panel]')
+      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = ''
     }
     // 还原侧边栏宽度修复（HMR/停用后不留内联样式与标记）
     for (const el of minWidthPatched) el.style.minWidth = ''
