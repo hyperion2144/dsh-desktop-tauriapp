@@ -254,19 +254,9 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
             handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
             return;
         }
-        // 保险丝（#58）：手动重启先恢复被隔离的插件（新 dsh 可能已修复兼容性；
-        // 恢复后若仍不兼容，fuse 会在启动失败时再次自动隔离）。失败不阻塞重启。
-        let restored = crate::process::quarantine::restore_all_for_profile(
-            &crate::settings::dsh_home(),
-            &configured_profile(),
-        );
-        if restored > 0 {
-            show_notification(
-                &handle,
-                "插件保险丝 · 已恢复被隔离插件",
-                &format!("{restored} 个插件随本次重启生效；若仍不兼容会再次被自动隔离"),
-            );
-        }
+        // 保险丝（#58）：隔离是持久化变更（写 patch 文件），切模式/手动重启
+        // **不**自动恢复——恢复只能从插件保险丝面板手动触发（#61 实测反馈：
+        // 切兼容模式后已隔离的插件被恢复导致再次报错）。
         // 重试预算清零：手动重启代表新的启动周期
         handle
             .state::<DshState>()

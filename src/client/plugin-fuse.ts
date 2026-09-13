@@ -94,8 +94,14 @@ export function registerFusePanel(ctx: ClientContext): void {
     ctx?.logger?.warn?.('plugin-fuse: 无 Tauri IPC（纯浏览器），跳过设置入口')
     return
   }
-  // 捕获 dsh llm 目录服务（浏览器 Remote 面），供面板动态拉 provider/model
-  llmRemote = (ctx as unknown as { remote?: { llm?: LlmRemote } }).remote?.llm ?? null
+  // Cordis inject 守卫：访问未声明的 ctx.remote 会 throw——必须 try/catch，
+  // 否则整个 dsh-desktop-tauriapp 插件加载失败导致 dsh 起不来（用户实测）。
+  try {
+    llmRemote = (ctx as unknown as { remote?: { llm?: LlmRemote } }).remote?.llm ?? null
+  } catch {
+    // ctx.remote 未注入 → llm 目录不可用，面板下拉显示提示而非崩溃
+    llmRemote = null
+  }
   const slots = (ctx as unknown as {
     slots?: {
       inject: (name: string, fn: () => void) => void
