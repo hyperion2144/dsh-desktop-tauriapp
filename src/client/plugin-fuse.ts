@@ -79,12 +79,23 @@ function frag(html: string): DocumentFragment {
   return t.content
 }
 
+/** dsh llm 目录服务的浏览器侧 Remote 面（从 ClientContext 捕获，供面板拉 provider/model）。 */
+interface LlmRemote {
+  listProviders(): Promise<{ ok: boolean; value?: Array<{ id: string; name: string }>; error?: { message: string } }>
+  listConfigurableProviders(): Promise<{ ok: boolean; value?: Array<{ provider: string; displayName: string; settingsNs: string }>; error?: { message: string } }>
+  discoverModels(ns: string, req: Record<string, unknown>): Promise<{ ok: boolean; value?: Array<{ id: string; name?: string }>; error?: { message: string } }>
+}
+
+let llmRemote: LlmRemote | null = null
+
 /** 注册 settings.section「插件保险丝」。 */
 export function registerFusePanel(ctx: ClientContext): void {
   if (!hasIpc()) {
     ctx?.logger?.warn?.('plugin-fuse: 无 Tauri IPC（纯浏览器），跳过设置入口')
     return
   }
+  // 捕获 dsh llm 目录服务（浏览器 Remote 面），供面板动态拉 provider/model
+  llmRemote = (ctx as unknown as { remote?: { llm?: LlmRemote } }).remote?.llm ?? null
   const slots = (ctx as unknown as {
     slots?: {
       inject: (name: string, fn: () => void) => void
@@ -171,6 +182,12 @@ function buildPanel(): HTMLElement {
     showRaw: true,
     doctorError: null as string | null,
     repairBusy: null as string | null,
+    providerDir: null as null | 'loading' | { error: string } | Array<{
+      id: string
+      name: string
+      settingsNs: string
+      models: Array<{ id: string; name?: string }>
+    }>,
     repairMsg: null as { ok: boolean; text: string } | null,
   }
 
@@ -328,48 +345,59 @@ function buildPanel(): HTMLElement {
       chips.appendChild(addChip)
       exclWrap.appendChild(chips)
       body.appendChild(exclWrap)
-      // AI 解读路由区（provider/模型/端点/密钥 env）
+      // AI 解读路由：从 dsh llm 目录服务动态拉取已注册的 provider + 模型
       const aiHd = el('div', 'AI 解读（explain）', 'font-weight:600;font-size:12px;')
       body.appendChild(aiHd)
       const provSel = document.createElement('select')
       provSel.style.cssText = 'width:100%;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;'
-      provSel.innerHTML = '<option value="deepseek">DeepSeek 官方</option><option value="custom">自定义 OpenAI 兼容</option>'
-      provSel.value = state.settings!.ai_provider
+      const modelSel = document.createElement('select')
+      modelSel.style.cssText = provSel.style.cssText + 'margin-top:6px;'
+      if (state.providerDir === null) {
+        provSel.appendChild(el('option', '加载中…'))
+        provSel.disabled = true
+      } else if (typeof state.providerDir === 'string') {
+        provSel.appendChild(el('option', `加载失败：${state.providerDir}`))
+        provSel.disabled = true
+      } else if (!state.providerDir.length) {
+        provSel.appendChild(el('option', 'dsh 未注册任何 provider'))
+        provSel.disabled = true
+      } else {
+        for (const p of state.providerDir) {
+          const opt = document.createElement('option')
+          opt.value = p.id
+          opt.textContent = `${p.name}（${p.models.length} 个模型）`
+          if (p.id === state.settings!.ai_provider) opt.selected = true
+          provSel.appendChild(opt)
+        }
+        const sel = state.providerDir.find(p => p.id === state.settings!.ai_provider)
+        const models = sel ? sel.models : []
+        if (!models.length) {
+          modelSel.appendChild(el('option', '无可用模型'))
+          modelSel.disabled = true
+        } else {
+          for (const m of models) {
+            const opt = document.createElement('option')
+            opt.value = m.id
+            opt.textContent = m.name || m.id
+            if (m.id === state.settings!.ai_model) opt.selected = true
+            modelSel.appendChild(opt)
+          }
+        }
+      }
       provSel.addEventListener('change', () => {
         state.settings!.ai_provider = provSel.value
+        // 切 provider 后自动重选模型（取该 provider 首个模型）
+        const p = state.providerDir?.find(x => !Array.isArray(x) && 'id' in x && x.id === provSel.value)
+        if (p && 'models' in p && p.models.length) state.settings!.ai_model = p.models[0].id
+        void saveSettings()
         render()
       })
-      body.appendChild(provSel)
-      const modelInput = document.createElement('input')
-      modelInput.placeholder = '模型（默认 deepseek-v4-flash）'
-      modelInput.value = state.settings!.ai_model
-      modelInput.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;margin-top:6px;'
-      modelInput.addEventListener('change', () => {
-        state.settings!.ai_model = modelInput.value.trim()
+      modelSel.addEventListener('change', () => {
+        state.settings!.ai_model = modelSel.value
         void saveSettings()
       })
-      body.appendChild(modelInput)
-      if (state.settings!.ai_provider === 'custom') {
-        const bu = document.createElement('input')
-        bu.placeholder = 'Base URL（如 https://api.openai.com）'
-        bu.value = state.settings!.ai_base_url
-        bu.style.cssText = modelInput.style.cssText + 'margin-top:6px;'
-        bu.addEventListener('change', () => {
-          state.settings!.ai_base_url = bu.value.trim()
-          void saveSettings()
-        })
-        const ke = document.createElement('input')
-        ke.placeholder = '密钥的 refs 键名 / 环境变量名（如 OPENAI_API_KEY）'
-        ke.value = state.settings!.ai_key_env
-        ke.style.cssText = modelInput.style.cssText + 'margin-top:6px;'
-        ke.addEventListener('change', () => {
-          state.settings!.ai_key_env = ke.value.trim()
-          void saveSettings()
-        })
-        body.appendChild(bu)
-        body.appendChild(ke)
-      }
-      body.appendChild(el('div', 'AI 解读默认走 DeepSeek 官方路由（密钥取 .credentials.yaml 的 DEEPSEEK_API_KEY）；选「自定义」可指向任意 OpenAI 兼容端点，密钥按 refs 键名读取。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
+      body.appendChild(modelSel)
+      body.appendChild(el('div', 'Provider 与模型列表从 dsh llm 目录服务动态获取；密钥按 .credentials.yaml refs 对应键名读取。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
       setCard.appendChild(body)
     }
     left.appendChild(setCard)
@@ -434,6 +462,46 @@ function buildPanel(): HTMLElement {
     }
     wrap.appendChild(right)
     root.appendChild(wrap)
+  }
+
+  async function loadProviderDir(): Promise<void> {
+    if (!llmRemote) {
+      state.providerDir = { error: 'dsh llm 目录服务不可用（非桌面壳环境）' }
+      return
+    }
+    state.providerDir = 'loading'
+    try {
+      const [reg, cfg] = await Promise.all([
+        llmRemote.listProviders(),
+        llmRemote.listConfigurableProviders(),
+      ])
+      if (!reg.ok || !cfg.ok) {
+        state.providerDir = { error: 'llm 目录查询失败' }
+        return
+      }
+      const cfgMap = new Map(cfg.value!.map(c => [c.provider, c.settingsNs]))
+      const entries = await Promise.all(reg.value!.map(async p => ({
+        id: p.id,
+        name: p.name,
+        settingsNs: cfgMap.get(p.id) ?? '',
+        models: [] as Array<{ id: string; name?: string }>,
+      })))
+      // 逐 provider 拉 installed catalog 模型列表（3s 超时，同 dsh-mnemon）
+      await Promise.allSettled(entries.map(async e => {
+        try {
+          const models = await Promise.race([
+            llmRemote!.discoverModels(e.settingsNs, {}),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
+          ])
+          if (models.ok && Array.isArray(models.value)) {
+            e.models = models.value.map((m: { id: string; name?: string }) => ({ id: m.id, name: m.name }))
+          }
+        } catch { /* 超时/失败的 provider 不影响其余 */ }
+      }))
+      state.providerDir = entries
+    } catch (err) {
+      state.providerDir = { error: String(err) }
+    }
   }
 
   async function runDoctor(): Promise<void> {
@@ -516,6 +584,8 @@ function buildPanel(): HTMLElement {
 
   void (async () => {
     await Promise.all([reload(), loadSummary()])
+    await Promise.all([reload(), loadSummary()])
+    void loadProviderDir().then(() => render())
     try {
       state.settings = await invoke<FuseSettings>('get_quarantine_settings')
     } catch {
