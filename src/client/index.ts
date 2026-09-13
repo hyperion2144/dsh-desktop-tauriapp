@@ -15,6 +15,7 @@ export const inject = [
   'sessions',
   'theme',
   'workspaces',
+  'connection',
 ]
 
 /**

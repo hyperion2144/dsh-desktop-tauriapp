@@ -79,12 +79,15 @@ function frag(html: string): DocumentFragment {
   return t.content
 }
 
+let fuseConnection: { rpc: { call: (channel: string, payload?: unknown) => Promise<any> } } | null = null
+
 /** 注册 settings.section「插件保险丝」。 */
 export function registerFusePanel(ctx: ClientContext): void {
   if (!hasIpc()) {
     ctx?.logger?.warn?.('plugin-fuse: 无 Tauri IPC（纯浏览器），跳过设置入口')
     return
   }
+  fuseConnection = (ctx as unknown as { connection?: { rpc: { call: (channel: string, payload?: unknown) => Promise<any> } } }).connection ?? null
   const slots = (ctx as unknown as {
     slots?: {
       inject: (name: string, fn: () => void) => void
@@ -442,13 +445,18 @@ function buildPanel(): HTMLElement {
   }
 
   async function loadProviderDir(): Promise<void> {
+    if (!fuseConnection) {
+      state.providerDir = { error: 'connection 不可用（非桌面壳环境）' }
+      return
+    }
+    state.providerDir = 'loading'
     try {
-      const r = await invoke<{ providers: Array<{ id: string; name: string; key_env: string }> }>('list_ai_providers')
+      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:models', {})
       state.providerDir = r.providers.map(p => ({
-        id: p.key_env,
+        id: p.id,
         name: p.name,
         settingsNs: '',
-        models: [],
+        models: p.models || [],
       }))
     } catch (err) {
       state.providerDir = { error: String(err) }

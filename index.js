@@ -101,4 +101,20 @@ export function apply(ctx) {
     }),
     'dsh-desktop-tauriapp: skill',
   )
+
+  // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）
+  ctx.inject(['connection'], (webContext) => {
+    if (webContext.connection === void 0) return
+    webContext.connection.rpc.handle('dsh-desktop-tauriapp:models', async () => {
+      const llm = ctx.get('llm')
+      if (llm === void 0) throw new Error('llm service unavailable')
+      const providers = llm.listProviders()
+      const result = []
+      for (const p of providers) {
+        const models = await llm.listModels(p.id)
+        result.push({ id: p.id, name: p.name, models })
+      }
+      return { providers: result }
+    }, { authority: 'trusted-host' })
+  })
 }
