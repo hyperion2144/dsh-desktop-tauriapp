@@ -112,9 +112,9 @@ function buildPanel(): HTMLElement {
     proxySection.appendChild(modeSel)
 
     // manual fields (shown when mode=manual)
+    // URL 仅 manual 模式显示；认证字段 system + manual 都显示
     if (proxy.proxy_mode === 'manual') {
-      const urlLabel = el('div', '代理 URL', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:4px;')
-      proxySection.appendChild(urlLabel)
+      proxySection.appendChild(el('div', '代理 URL', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:4px;'))
       const urlInput = document.createElement('input')
       urlInput.placeholder = 'http/https/socks5://host:port'
       urlInput.value = proxy.proxy_url
@@ -122,26 +122,7 @@ function buildPanel(): HTMLElement {
       urlInput.dataset.desktopSettings = '1'
       urlInput.addEventListener('change', () => { proxy.proxy_url = urlInput.value.trim() })
       proxySection.appendChild(urlInput)
-
-      const npLabel = el('div', 'NO_PROXY（不走代理的地址，逗号分隔）', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin:8px 0 4px;')
-      proxySection.appendChild(npLabel)
-      const npInput = document.createElement('input')
-      npInput.placeholder = 'localhost,127.0.0.1,*.internal'
-      npInput.value = proxy.no_proxy
-      npInput.className = 'pf-input'
-      npInput.dataset.desktopSettings = '1'
-      npInput.addEventListener('change', () => { proxy.no_proxy = npInput.value.trim() })
-      proxySection.appendChild(npInput)
-
-      const authRow = el('div', undefined, 'display:flex;gap:8px;')
-      const userWrap = el('div', undefined, 'flex:1;')
-      userWrap.appendChild(el('div', '用户名（可选）', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:4px;'))
-      const userInput = document.createElement('input')
-      userInput.value = proxy.proxy_user
-      userInput.className = 'pf-input'
-      userInput.dataset.desktopSettings = '1'
-      userInput.addEventListener('change', () => { proxy.proxy_user = userInput.value })
-      userWrap.appendChild(userInput)
+    }
       const passWrap = el('div', undefined, 'flex:1;')
       passWrap.appendChild(el('div', '密码（可选）', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:4px;'))
       const passInput = document.createElement('input')
