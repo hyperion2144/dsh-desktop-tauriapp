@@ -47,6 +47,9 @@
     "allow-remove-remote-address",
     "allow-select-remote-address",
     "allow-set-local-port",
-    "allow-switch-profile-command"
+    "allow-switch-profile-command",
+    "allow-get-proxy-settings",
+    "allow-save-proxy-settings",
+    "allow-test-proxy-connectivity"
   ]
 }

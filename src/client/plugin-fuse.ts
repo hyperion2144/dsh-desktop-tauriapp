@@ -466,7 +466,10 @@ function buildPanel(): HTMLElement {
     state.providerDir = 'loading'
     try {
       const r = await fuseConnection.rpc.call('/dsh-desktop-models', 'list', {})
-      state.providerDir = r.providers.map(p => ({
+      // connection.rpc.call 恒返回信封 {ok, value}（dsh-client-connection 解包规则）
+      if (!r?.ok) throw new Error(r?.error?.message ?? 'models 查询失败')
+      const providers = r.value?.providers ?? []
+      state.providerDir = providers.map((p: { id: string; name: string; models?: Array<{ id: string; name?: string }> }) => ({
         id: p.id,
         name: p.name,
         settingsNs: '',
@@ -539,7 +542,7 @@ function buildPanel(): HTMLElement {
   async function saveSettings(): Promise<void> {
     if (!state.settings) return
     try {
-      await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'save', {
+      const r = await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'save', {
         patch: {
           quarantine_first_party_protection: state.settings.first_party_protection,
           quarantine_exclude: state.settings.exclude,
@@ -548,6 +551,7 @@ function buildPanel(): HTMLElement {
           ai_model: state.settings.ai_model || '',
         },
       })
+      if (!r?.ok) throw new Error(r?.error?.message ?? '保存被拒绝')
     } catch (err) {
       root.appendChild(el('div', `设置保存失败：${String(err)}`, 'color:#e5534b;font-size:12px;'))
     }

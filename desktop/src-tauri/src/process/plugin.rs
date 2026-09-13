@@ -63,7 +63,10 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     // name 与上游 cordis.patch.yml 一致：上游 v2.3.0 起包改名 dsh-web-mobile（弃用
     // @dsh-external scope），patch 行 id/name 随之对齐；
     // materialize 时 link_name 也用同名（见 materialize_desktop_plugin）。
-    let content = "- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-web-mobile\n      name: dsh-web-mobile\n";
+    // 首行 connection scope 补丁：DSH 0.1.5 Web profile 的 connection 条目缺少
+    // webRuntime/webServer 注入，导致 rpc.handle 注册的 channel 不会挂 HTTP 路由
+    // （浏览器侧报 transport failure）。与 dsh-mnemon 的 cordis.patch.yml 同一手法。
+    let content = "- id: connection\n  inject: [webRuntime, webServer]\n\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-web-mobile\n      name: dsh-web-mobile\n";
     let stale = std::fs::read_to_string(&path).map(|t| t != content).unwrap_or(true);
     if stale {
         let _ = std::fs::write(&path, content);
