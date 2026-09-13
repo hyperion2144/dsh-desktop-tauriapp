@@ -18,7 +18,7 @@ function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promi
     __TAURI_INTERNALS__?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> }
     __TAURI__?: { core?: { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<T> } }
   }
-  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNAL__.invoke(cmd, args)
+  if (w.__TAURI_INTERNALS__?.invoke) return w.__TAURI_INTERNALS__.invoke(cmd, args)
   if (w.__TAURI__?.core?.invoke) return w.__TAURI__?.core.invoke(cmd, args)
   return Promise.reject(new Error('no tauri ipc'))
 }

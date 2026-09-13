@@ -465,7 +465,7 @@ function buildPanel(): HTMLElement {
     }
     state.providerDir = 'loading'
     try {
-      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:models', 'list', {})
+      const r = await fuseConnection.rpc.call('/dsh-desktop-models', 'list', {})
       state.providerDir = r.providers.map(p => ({
         id: p.id,
         name: p.name,
@@ -539,7 +539,7 @@ function buildPanel(): HTMLElement {
   async function saveSettings(): Promise<void> {
     if (!state.settings) return
     try {
-      await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', 'save', {
+      await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'save', {
         patch: {
           quarantine_first_party_protection: state.settings.first_party_protection,
           quarantine_exclude: state.settings.exclude,
@@ -558,7 +558,7 @@ function buildPanel(): HTMLElement {
     await Promise.all([reload(), loadSummary()])
     void loadProviderDir().then(() => render())
     try {
-      const r = await fuseConnection.rpc.call('dsh-desktop-tauriapp:fuse-settings', 'get', {})
+      const r = await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'get', {})
       if (r.ok && r.value && typeof r.value === 'object') {
         const v = r.value as Record<string, unknown>
         state.settings = {

@@ -105,7 +105,7 @@ export function apply(ctx) {
   // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）
   ctx.inject(['connection'], (webContext) => {
     if (webContext.connection === void 0) return
-    webContext.connection.rpc.handle('dsh-desktop-tauriapp:models', async (_endpoint) => {
+    webContext.connection.rpc.handle('/dsh-desktop-models', async (_endpoint) => {
       const llm = ctx.get('llm')
       if (llm === void 0) throw new Error('llm service unavailable')
       const providers = llm.listProviders()
@@ -117,7 +117,7 @@ export function apply(ctx) {
       return { providers: result }
     }, { authority: 'trusted-host' })
     // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
-    webContext.connection.rpc.handle('dsh-desktop-tauriapp:fuse-settings', async (endpoint, payload) => {
+    webContext.connection.rpc.handle('/dsh-desktop-fuse-settings', async (endpoint, payload) => {
       const settings = ctx.get('settings')
       if (settings === void 0) throw new Error('settings service unavailable')
       if (endpoint === 'get') {
