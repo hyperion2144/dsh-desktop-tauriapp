@@ -13,6 +13,7 @@ pub(crate) fn show_error(app: &AppHandle, reason: &str) {
     let body = match reason {
         "not-found" => "未找到 dsh 命令，请按错误页提示安装。",
         "spawn-failed" => "dsh 进程启动失败，详见日志。",
+        "boot-failed" => "dsh 启动反复失败（插件不兼容或环境异常），已按保险丝策略处理，详见日志。",
         "timeout" => "等待本地服务就绪超时，详见日志。",
         _ => "未知错误，详见日志。",
     };

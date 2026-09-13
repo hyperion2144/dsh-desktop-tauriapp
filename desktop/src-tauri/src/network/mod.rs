@@ -3,3 +3,4 @@ pub mod proxy;
 pub mod web_token;
 pub mod notify;
 pub mod remote;
+pub mod ai;

@@ -70,6 +70,13 @@ pub(crate) struct DshState {
     /// 双击拖拽区"缩放"前的主窗口几何（None = 当前处于标准尺寸，可触发放大；
     /// Some = 当前已放大，再双击恢复到此几何）。Mutex 防并发双击。
     pub(crate) pre_zoom_geom: Mutex<Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>>,
+    /// 启动保险丝：当前 dsh 子进程的 stderr 累积缓冲（spawn 时创建，转发线程写、
+    /// 保险丝监控任务读；子进程退出且非 0 时取快照做失败检测）。
+    pub(crate) stderr_buf: Mutex<Option<crate::process::quarantine::SharedStderr>>,
+    /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
+    pub(crate) fuse_retries: AtomicU8,
+    /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
+    pub(crate) fuse_summary: Mutex<Option<serde_json::Value>>,
 }
 
 /// 运行时放行的远程 dsh 主机清单（导航守卫读，托盘远程选择写）。
@@ -113,6 +120,9 @@ mod tests {
             notify_token: Mutex::new(String::new()),
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
+            stderr_buf: Mutex::new(None),
+            fuse_retries: AtomicU8::new(0),
+            fuse_summary: Mutex::new(None),
         };
         assert!(!state.restarting.load(Ordering::SeqCst));
         assert_eq!(state.notify_port.load(Ordering::SeqCst), 0);

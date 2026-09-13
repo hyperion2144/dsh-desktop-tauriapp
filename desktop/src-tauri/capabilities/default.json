@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "allow-get-desktop-client-environment",
     "core:default",
@@ -23,6 +25,21 @@
     "allow-toggle-zoom",
     "allow-get-proxy-settings",
     "allow-save-proxy-settings",
-    "allow-test-proxy-connectivity"
+    "allow-test-proxy-connectivity",
+    "allow-list-quarantine",
+    "allow-restore-quarantine",
+    "allow-repair-plugin",
+    "allow-run-doctor",
+    "allow-explain-failure",
+    "allow-get-fuse-summary",
+    "allow-get-quarantine-settings",
+    "allow-save-quarantine-settings",
+    "allow-list-ai-providers",
+    "allow-get-desktop-settings-data",
+    "allow-add-remote-address",
+    "allow-remove-remote-address",
+    "allow-select-remote-address",
+    "allow-set-local-port",
+    "allow-switch-profile-command"
   ]
 }

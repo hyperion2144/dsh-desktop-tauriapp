@@ -12,7 +12,9 @@
       "http://localhost:3080"
     ]
   },
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "notification:default",
     "allow-open-external",
@@ -30,6 +32,24 @@
     "core:window:allow-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
-    "core:window:allow-set-focus"
+    "core:window:allow-set-focus",
+    "allow-list-quarantine",
+    "allow-restore-quarantine",
+    "allow-repair-plugin",
+    "allow-run-doctor",
+    "allow-explain-failure",
+    "allow-get-fuse-summary",
+    "allow-get-quarantine-settings",
+    "allow-save-quarantine-settings",
+    "allow-list-ai-providers",
+    "allow-get-desktop-settings-data",
+    "allow-add-remote-address",
+    "allow-remove-remote-address",
+    "allow-select-remote-address",
+    "allow-set-local-port",
+    "allow-switch-profile-command",
+    "allow-get-proxy-settings",
+    "allow-save-proxy-settings",
+    "allow-test-proxy-connectivity"
   ]
 }

@@ -237,7 +237,7 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
 /// spawn `dsh web --host 127.0.0.1 --port <port>`（unix）；stdout/stderr 转发到日志，
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     let bin = find_dsh_bin().ok_or_else(|| {
         SpawnError::NotFound(
             "未找到 dsh 命令。请执行 `npm i -g @deepseek-ai/dsh` 或设置 DSH_BIN 环境变量。"
@@ -255,8 +255,12 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
     // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
     // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    launcher_args.push("--patch".into());
-    launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+    // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
+    // 兼容模式不注入，行为等同纯 dsh web（用户实测需求）
+    if advanced {
+        launcher_args.push("--patch".into());
+        launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+    }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
             launcher_args.push("--patch".into());
@@ -287,6 +291,16 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     // 无此问题，因为终端 cwd 是可写目录）。显式把子进程 cwd 设为 dsh home：
     // .mnemon 等工作区相对产物统一落进 $DSH_HOME/.mnemon，归属 harness 单一根。
     cmd.current_dir(crate::dsh_home());
+    // 启动保险丝（#58）：为本实例建 stderr 累积缓冲——转发线程逐行写入，
+    // 保险丝监控任务在子进程退出后取快照做失败检测。
+    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    );
+    *app
+        .state::<crate::runtime::state::DshState>()
+        .stderr_buf
+        .lock()
+        .unwrap() = Some(stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
     {
@@ -343,6 +357,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     }
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
+        let stderr_buf = stderr_buf.clone();
         thread::spawn(move || {
             // 同 stdout：lossy 解码，非法字节不断流
             for raw in BufReader::new(err).split(b'\n') {
@@ -352,6 +367,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
                     line.pop();
                 }
                 log::warn!("[dsh] {line}");
+                stderr_buf.lock().unwrap().push(&line);
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
             }
@@ -501,7 +517,7 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 /// npm 全局安装的 dsh 在 Windows 是 dsh.cmd shim，直接 CreateProcess 有引号
 /// 转义坑，所以直接用 node.exe 执行 bin.js；CREATE_NO_WINDOW 防止闪黑窗。
 #[cfg(windows)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     use std::os::windows::process::CommandExt;
     let node = find_node().ok_or_else(|| {
         SpawnError::NotFound(
@@ -555,6 +571,15 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     cmd.env("NODE_OPTIONS", "--use-env-proxy");
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(crate::dsh_home());
+    // 启动保险丝（#58）：同 unix 分支，建 stderr 累积缓冲。
+    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    );
+    *app
+        .state::<crate::runtime::state::DshState>()
+        .stderr_buf
+        .lock()
+        .unwrap() = Some(stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -590,6 +615,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
     }
     if let Some(err) = child.stderr.take() {
         let app = app.clone();
+        let stderr_buf = stderr_buf.clone();
         thread::spawn(move || {
             // 同 stdout：lossy 解码，非法字节不断流
             for raw in BufReader::new(err).split(b'\n') {
@@ -599,6 +625,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, _advanced: bool) -> R
                     line.pop();
                 }
                 log::warn!("[dsh] {line}");
+                stderr_buf.lock().unwrap().push(&line);
                 let _ = app
                     .emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
             }

@@ -13,7 +13,7 @@ use crate::dsh_home;
 #[cfg(target_os = "windows")]
 use crate::process::lifecycle::{find_node, find_dsh_bin_js};
 #[cfg(not(target_os = "windows"))]
-use crate::process::lifecycle::find_dsh_bin;
+use crate::process::lifecycle::{find_dsh_bin, dsh_runtime_path};
 /// 扫描 $DSH_HOME/profiles 下的可 boot-profile（bundles 顺序先 base 后 web-app 才可选）。
 #[derive(serde::Serialize)]
 pub(crate) struct ProfileInfo {
@@ -87,11 +87,34 @@ pub(crate) fn run_profile_plugin_add(profile: &str, pkg: &str) -> bool {
     {
         let Some(dsh) = find_dsh_bin() else { return false };
         std::process::Command::new(&dsh)
+            // GUI 启动的 app PATH 缺 nvm/homebrew node：dsh 内部转发 pnpm 需要可用 node
+            .env("PATH", dsh_runtime_path(&dsh))
             .args(["plugin", "--profile", profile, "add", "--config.minimumReleaseAge=0"])
             .arg(pkg)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+}
+
+/// 取 dsh 版本串（doctor 体检用；找不到 dsh / 执行失败返回 None）。
+pub(crate) fn dsh_version() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let node = find_node()?;
+        let js = find_dsh_bin_js()?;
+        let out = std::process::Command::new(node)
+            .arg(js)
+            .arg("--version")
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let dsh = find_dsh_bin()?;
+        let out = std::process::Command::new(dsh).arg("--version").output().ok()?;
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 }
 

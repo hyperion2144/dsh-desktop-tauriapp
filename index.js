@@ -4,6 +4,10 @@
 
 export const name = 'dsh-desktop-tauriapp'
 
+// Cordis 服务作用域隔离：不声明 inject 则 ctx.get('skills') 返回 undefined，
+// apply 会提前 return，技能与 RPC 桥接全部不注册（实测根因，见 #61）。
+export const inject = ['skills']
+
 const CONTENT = [
   '# DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
   '',
@@ -83,22 +87,58 @@ const CONTENT = [
 
 export function apply(ctx) {
   const skills = ctx.get('skills')
-  if (skills === undefined || typeof skills.register !== 'function') {
-    ctx.logger?.warn('dsh-desktop-tauriapp: skills 服务不可用，跳过注册')
-    return
+  // 技能注册与 RPC 桥接解耦：技能服务不可用不能阻断桥接（否则设置面板拿不到
+  // provider/model——实测根因，见 #61）。
+  if (skills !== undefined && typeof skills.register === 'function') {
+    ctx.effect(() =>
+      skills.register({
+        name: 'dsh-desktop-tauriapp',
+        title: 'DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
+        description:
+          '把 DeepSeek Harness Web GUI 封装成 Tauri 2 桌面应用（macOS + Windows 双平台），含托盘常驻、单实例、子进程生命周期、任务完成通知、鲸鱼娘透明置顶桌宠；内置 DSH 安装分平台、国内镜像加速（rustup/cargo/npm/GitHub/NSIS）、subagent 哨兵下载判定、Windows 无管理员工具链方案。当用户想把 DSH 做成桌面应用、搭 Tauri 项目、或在 Windows 新环境配置 Rust/Node 工具链时使用。',
+        whenToUse:
+          '用户想把 DeepSeek Harness 或任意本地 Web 应用封装成桌面应用；需要给桌面应用加托盘常驻、任务完成系统通知、透明置顶桌宠；需要在 Windows 新环境配置 Rust/Node 工具链（含国内镜像加速）；需要无管理员权限构建 Tauri 项目；遇到 dmg/MSI 打包、SmartScreen、单实例锁等桌面壳坑时。',
+        source: 'dsh-desktop-tauriapp',
+        content: CONTENT,
+        invocation: { modelInvocable: true, userInvocable: true },
+      }),
+      'dsh-desktop-tauriapp: skill',
+    )
+  } else {
+    ctx.logger?.warn('dsh-desktop-tauriapp: skills 服务不可用，跳过技能注册（RPC 桥接不受影响）')
   }
-  ctx.effect(() =>
-    skills.register({
-      name: 'dsh-desktop-tauriapp',
-      title: 'DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
-      description:
-        '把 DeepSeek Harness Web GUI 封装成 Tauri 2 桌面应用（macOS + Windows 双平台），含托盘常驻、单实例、子进程生命周期、任务完成通知、鲸鱼娘透明置顶桌宠；内置 DSH 安装分平台、国内镜像加速（rustup/cargo/npm/GitHub/NSIS）、subagent 哨兵下载判定、Windows 无管理员工具链方案。当用户想把 DSH 做成桌面应用、搭 Tauri 项目、或在 Windows 新环境配置 Rust/Node 工具链时使用。',
-      whenToUse:
-        '用户想把 DeepSeek Harness 或任意本地 Web 应用封装成桌面应用；需要给桌面应用加托盘常驻、任务完成系统通知、透明置顶桌宠；需要在 Windows 新环境配置 Rust/Node 工具链（含国内镜像加速）；需要无管理员权限构建 Tauri 项目；遇到 dmg/MSI 打包、SmartScreen、单实例锁等桌面壳坑时。',
-      source: 'dsh-desktop-tauriapp',
-      content: CONTENT,
-      invocation: { modelInvocable: true, userInvocable: true },
-    }),
-    'dsh-desktop-tauriapp: skill',
-  )
+
+  // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）。
+  // 必须在技能守卫之外：两者无依赖关系。
+  ctx.inject(['connection'], (webContext) => {
+    if (webContext.connection === void 0) return
+    webContext.connection.rpc.handle('/dsh-desktop-models', async (_endpoint) => {
+      const llm = ctx.get('llm')
+      if (llm === void 0) throw new Error('llm service unavailable')
+      const providers = llm.listProviders()
+      const result = []
+      for (const p of providers) {
+        const models = await llm.listModels(p.id)
+        result.push({ id: p.id, name: p.name, models })
+      }
+      return { providers: result }
+    }, { authority: 'trusted-host' })
+    // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
+    webContext.connection.rpc.handle('/dsh-desktop-fuse-settings', async (endpoint, payload) => {
+      const settings = ctx.get('settings')
+      if (settings === void 0) throw new Error('settings service unavailable')
+      if (endpoint === 'get') {
+        const value = settings.get('dsh-desktop-tauriapp')
+        return { ok: true, value: value ?? {} }
+      }
+      if (endpoint === 'save') {
+        const ops = Object.entries(payload.patch).map(([path, value]) => ({
+          op: 'set', path: path.split('.'), value,
+        }))
+        await settings.mutate('dsh-desktop-tauriapp', ops)
+        return { ok: true }
+      }
+      throw new Error(`unknown endpoint: ${endpoint}`)
+    }, { authority: 'trusted-host' })
+  })
 }
