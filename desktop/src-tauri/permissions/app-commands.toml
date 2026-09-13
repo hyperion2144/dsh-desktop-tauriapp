@@ -121,3 +121,8 @@ commands = { allow = ["get_quarantine_settings"] }
 identifier = "allow-save-quarantine-settings"
 description = "允许保存保险丝设置"
 commands = { allow = ["save_quarantine_settings"] }
+
+[[permission]]
+identifier = "allow-list-ai-providers"
+description = "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）"
+commands = { allow = ["list_ai_providers"] }

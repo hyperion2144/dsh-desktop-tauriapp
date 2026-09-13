@@ -79,28 +79,11 @@ function frag(html: string): DocumentFragment {
   return t.content
 }
 
-/** dsh llm 目录服务的浏览器侧 Remote 面（从 ClientContext 捕获，供面板拉 provider/model）。 */
-interface LlmRemote {
-  listProviders(): Promise<{ ok: boolean; value?: Array<{ id: string; name: string }>; error?: { message: string } }>
-  listConfigurableProviders(): Promise<{ ok: boolean; value?: Array<{ provider: string; displayName: string; settingsNs: string }>; error?: { message: string } }>
-  discoverModels(ns: string, req: Record<string, unknown>): Promise<{ ok: boolean; value?: Array<{ id: string; name?: string }>; error?: { message: string } }>
-}
-
-let llmRemote: LlmRemote | null = null
-
 /** 注册 settings.section「插件保险丝」。 */
 export function registerFusePanel(ctx: ClientContext): void {
   if (!hasIpc()) {
     ctx?.logger?.warn?.('plugin-fuse: 无 Tauri IPC（纯浏览器），跳过设置入口')
     return
-  }
-  // Cordis inject 守卫：访问未声明的 ctx.remote 会 throw——必须 try/catch，
-  // 否则整个 dsh-desktop-tauriapp 插件加载失败导致 dsh 起不来（用户实测）。
-  try {
-    llmRemote = (ctx as unknown as { remote?: { llm?: LlmRemote } }).remote?.llm ?? null
-  } catch {
-    // ctx.remote 未注入 → llm 目录不可用，面板下拉显示提示而非崩溃
-    llmRemote = null
   }
   const slots = (ctx as unknown as {
     slots?: {
@@ -356,54 +339,42 @@ function buildPanel(): HTMLElement {
       body.appendChild(aiHd)
       const provSel = document.createElement('select')
       provSel.style.cssText = 'width:100%;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;'
-      const modelSel = document.createElement('select')
-      modelSel.style.cssText = provSel.style.cssText + 'margin-top:6px;'
-      if (state.providerDir === null) {
+      if (typeof state.providerDir === 'string') {
         provSel.appendChild(el('option', '加载中…'))
         provSel.disabled = true
-      } else if (typeof state.providerDir === 'string') {
-        provSel.appendChild(el('option', `加载失败：${state.providerDir}`))
+      } else if (!Array.isArray(state.providerDir)) {
+        provSel.appendChild(el('option', `加载失败：${state.providerDir.error}`))
         provSel.disabled = true
       } else if (!state.providerDir.length) {
-        provSel.appendChild(el('option', 'dsh 未注册任何 provider'))
+        provSel.appendChild(el('option', '无可用 provider（.credentials.yaml refs 为空）'))
         provSel.disabled = true
       } else {
         for (const p of state.providerDir) {
           const opt = document.createElement('option')
           opt.value = p.id
-          opt.textContent = `${p.name}（${p.models.length} 个模型）`
-          if (p.id === state.settings!.ai_provider) opt.selected = true
+          opt.textContent = p.name
+          if (p.id === state.settings!.ai_key_env) opt.selected = true
           provSel.appendChild(opt)
-        }
-        const sel = state.providerDir.find(p => p.id === state.settings!.ai_provider)
-        const models = sel ? sel.models : []
-        if (!models.length) {
-          modelSel.appendChild(el('option', '无可用模型'))
-          modelSel.disabled = true
-        } else {
-          for (const m of models) {
-            const opt = document.createElement('option')
-            opt.value = m.id
-            opt.textContent = m.name || m.id
-            if (m.id === state.settings!.ai_model) opt.selected = true
-            modelSel.appendChild(opt)
-          }
         }
       }
       provSel.addEventListener('change', () => {
         state.settings!.ai_provider = provSel.value
-        // 切 provider 后自动重选模型（取该 provider 首个模型）
-        const p = state.providerDir?.find(x => !Array.isArray(x) && 'id' in x && x.id === provSel.value)
-        if (p && 'models' in p && p.models.length) state.settings!.ai_model = p.models[0].id
+        state.settings!.ai_key_env = provSel.value
         void saveSettings()
         render()
       })
-      modelSel.addEventListener('change', () => {
-        state.settings!.ai_model = modelSel.value
+      body.appendChild(provSel)
+      body.appendChild(el('div', '模型名', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-top:6px;'))
+      const modelInput = document.createElement('input')
+      modelInput.placeholder = '模型名（默认 deepseek-v4-flash）'
+      modelInput.value = state.settings!.ai_model
+      modelInput.style.cssText = 'width:100%;box-sizing:border-box;padding:6px 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:inherit;font-size:12px;margin-top:6px;'
+      modelInput.addEventListener('change', () => {
+        state.settings!.ai_model = modelInput.value.trim()
         void saveSettings()
       })
-      body.appendChild(modelSel)
-      body.appendChild(el('div', 'Provider 与模型列表从 dsh llm 目录服务动态获取；密钥按 .credentials.yaml refs 对应键名读取。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
+      body.appendChild(modelInput)
+      body.appendChild(el('div', 'Provider 列表从 .credentials.yaml refs 动态获取；密钥按对应键名读取，模型名默认 deepseek-v4-flash。', 'font-size:11px;color:var(--dsw-alias-label-secondary,#9aa4b2);'))
       setCard.appendChild(body)
     }
     left.appendChild(setCard)
@@ -471,40 +442,14 @@ function buildPanel(): HTMLElement {
   }
 
   async function loadProviderDir(): Promise<void> {
-    if (!llmRemote) {
-      state.providerDir = { error: 'dsh llm 目录服务不可用（非桌面壳环境）' }
-      return
-    }
-    state.providerDir = 'loading'
     try {
-      const [reg, cfg] = await Promise.all([
-        llmRemote.listProviders(),
-        llmRemote.listConfigurableProviders(),
-      ])
-      if (!reg.ok || !cfg.ok) {
-        state.providerDir = { error: 'llm 目录查询失败' }
-        return
-      }
-      const cfgMap = new Map(cfg.value!.map(c => [c.provider, c.settingsNs]))
-      const entries = await Promise.all(reg.value!.map(async p => ({
-        id: p.id,
+      const r = await invoke<{ providers: Array<{ id: string; name: string; key_env: string }> }>('list_ai_providers')
+      state.providerDir = r.providers.map(p => ({
+        id: p.key_env,
         name: p.name,
-        settingsNs: cfgMap.get(p.id) ?? '',
-        models: [] as Array<{ id: string; name?: string }>,
-      })))
-      // 逐 provider 拉 installed catalog 模型列表（3s 超时，同 dsh-mnemon）
-      await Promise.allSettled(entries.map(async e => {
-        try {
-          const models = await Promise.race([
-            llmRemote!.discoverModels(e.settingsNs, {}),
-            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000)),
-          ])
-          if (models.ok && Array.isArray(models.value)) {
-            e.models = models.value.map((m: { id: string; name?: string }) => ({ id: m.id, name: m.name }))
-          }
-        } catch { /* 超时/失败的 provider 不影响其余 */ }
+        settingsNs: '',
+        models: [],
       }))
-      state.providerDir = entries
     } catch (err) {
       state.providerDir = { error: String(err) }
     }

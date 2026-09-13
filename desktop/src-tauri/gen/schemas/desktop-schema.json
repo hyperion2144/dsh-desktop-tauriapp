@@ -225,6 +225,12 @@
           "markdownDescription": "允许读取保险丝设置（第一方保护/排除名单/重试次数）"
         },
         {
+          "description": "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）",
+          "type": "string",
+          "const": "allow-list-ai-providers",
+          "markdownDescription": "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）"
+        },
+        {
           "description": "允许读取插件保险丝隔离名单",
           "type": "string",
           "const": "allow-list-quarantine",

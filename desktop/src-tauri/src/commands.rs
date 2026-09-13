@@ -606,6 +606,35 @@ pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>)
     }
 }
 
+/// 列出 .credentials.yaml refs 中可用的 AI provider（密钥键名）。
+#[tauri::command]
+pub(crate) fn list_ai_providers() -> serde_json::Value {
+    let creds = dsh_home().join(".credentials.yaml");
+    let mut providers = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(&creds) {
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+            if let Some(refs) = value.get("refs").and_then(|r| r.as_mapping()) {
+                for (k, _) in refs {
+                    if let Some(key) = k.as_str() {
+                        if key.ends_with("_API_KEY") {
+                            providers.push(serde_json::json!({
+                                "id": key,
+                                "name": key.trim_end_matches("_API_KEY"),
+                                "key_env": key,
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if providers.is_empty() {
+        providers.push(serde_json::json!({
+            "id": "DEEPSEEK_API_KEY", "name": "DeepSeek", "key_env": "DEEPSEEK_API_KEY"
+        }));
+    }
+    serde_json::json!({ "providers": providers })
+}
 /// 最近一次启动的隔离事件摘要（通知区）。
 #[tauri::command]
 pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {

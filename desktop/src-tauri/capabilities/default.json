@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "allow-get-desktop-client-environment",
     "core:default",
@@ -31,6 +33,7 @@
     "allow-explain-failure",
     "allow-get-fuse-summary",
     "allow-get-quarantine-settings",
-    "allow-save-quarantine-settings"
+    "allow-save-quarantine-settings",
+    "allow-list-ai-providers"
   ]
 }

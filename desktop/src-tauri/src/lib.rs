@@ -70,7 +70,7 @@ use commands::{
     ui_input_confirm, choose_desktop_mode,
     list_quarantine, restore_quarantine, repair_plugin,
     run_doctor, explain_failure, get_fuse_summary,
-    get_quarantine_settings, save_quarantine_settings,
+    get_quarantine_settings, save_quarantine_settings, list_ai_providers,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -160,6 +160,7 @@ pub fn run() {
             get_proxy_settings,
             save_proxy_settings,
             test_proxy_connectivity,
+            list_ai_providers,
             list_quarantine,
             restore_quarantine,
             repair_plugin,
