@@ -4,9 +4,9 @@
 
 export const name = 'dsh-desktop-tauriapp'
 
-// Cordis 服务作用域隔离：不声明 inject 则 ctx.get('skills') 返回 undefined，
-// apply 会提前 return，技能与 RPC 桥接全部不注册（实测根因，见 #61）。
-export const inject = ['skills']
+// 注意：不可为 skills 声明 export const inject——skills 在本插件作用域不可见，
+// 声明后 Cordis 会无限期挂起 apply（实测），技能与 RPC 桥接全部失效。
+// 改为 apply 内探测降级：skills 不可用只跳过技能注册，RPC 桥接不受影响。
 
 const CONTENT = [
   '# DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
