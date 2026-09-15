@@ -112,6 +112,9 @@ export function apply(ctx) {
   // 必须在技能守卫之外：两者无依赖关系。
   ctx.inject(['connection'], (webContext) => {
     if (webContext.connection === void 0) return
+    // connection RPC 的 handler 必须自带 {ok, value} 信封——fullResponse 不包裹
+    // （mnemon 的 success$1 同理），返回裸对象会导致客户端报
+    // TypeError: connection: invalid server-response result。
     webContext.connection.rpc.handle('/dsh-desktop-models', async (_endpoint) => {
       const llm = ctx.get('llm')
       if (llm === void 0) throw new Error('llm service unavailable')
@@ -121,7 +124,7 @@ export function apply(ctx) {
         const models = await llm.listModels(p.id)
         result.push({ id: p.id, name: p.name, models })
       }
-      return { providers: result }
+      return { ok: true, value: { providers: result } }
     }, { authority: 'trusted-host' })
     // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
     webContext.connection.rpc.handle('/dsh-desktop-fuse-settings', async (endpoint, payload) => {
