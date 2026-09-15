@@ -611,7 +611,17 @@ function apply(ctx) {
   const upstreamPort = Number(process.env.DSH_DESKTOP_PORT || 3080);
   // 设置访问器：优先 dsh settings 服务（不直接读写 settings.yaml），服务不可用时回退 legacy 行级读写。
   const settingsSvc = ctx.settings ?? null;
-  try { settingsSvc?.register(NS, (raw) => ({ ...(raw && typeof raw === 'object' ? raw : {}) })) } catch { /* 已注册 */ }
+  // 兜底注册（桌面壳插件缺失时）：与 dsh-settings 契约对齐的最小 schema——
+  // 可调用归一 + toJSON 序列化（缺 toJSON 会让 describe() 报错，连带其它命名空间读链路）。
+  if (settingsSvc) {
+    try {
+      const passthrough = (raw) => (raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? { ...raw } : {})
+      passthrough.type = 'object'
+      passthrough.dict = {}
+      passthrough.toJSON = () => ({ type: 'object', dict: {} })
+      settingsSvc.register(NS, passthrough)
+    } catch { /* 已注册（桌面壳插件先注册） */ }
+  }
   const readSetting = (key) => {
     if (settingsSvc) {
       const v = settingsSvc.get(NS)?.[key];

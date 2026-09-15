@@ -8,6 +8,63 @@ export const name = 'dsh-desktop-tauriapp'
 // 声明后 Cordis 会无限期挂起 apply（实测），技能与 RPC 桥接全部失效。
 // 改为 apply 内探测降级：skills 不可用只跳过技能注册，RPC 桥接不受影响。
 
+// 桌面壳设置命名空间的 schema。
+// 约束：--patch 插件的宿主文件禁止裸包导入（实测 Cannot find package），
+// 因此不引 schemastery，而按 dsh-settings 的实际契约手写最小实现：
+//   1) schema(value) 可调用 —— resolve() 用它归一合并值；
+//   2) schema.toJSON() —— describe() 序列化用（缺方法会报 registration.schema.toJSON is not a function）；
+//   3) type/dict/inner 结构 —— redactSecrets 的 walk() 遍历用。
+const str = (def = '') => ({ type: 'string', default: def, toJSON: () => ({ type: 'string' }) })
+const num = (def = 0) => ({ type: 'number', default: def, toJSON: () => ({ type: 'number' }) })
+const bool = (def = false) => ({ type: 'boolean', default: def, toJSON: () => ({ type: 'boolean' }) })
+const list = (def = []) => ({
+  type: 'array',
+  inner: { type: 'string' },
+  default: def,
+  toJSON: () => ({ type: 'array', inner: { type: 'string' } }),
+})
+
+/** 由字段表构造可调用的对象 schema（缺失键填默认值，未声明键丢弃）。 */
+function objectSchema(dict) {
+  const schema = (raw) => {
+    const src = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+    const out = {}
+    for (const [key, node] of Object.entries(dict)) out[key] = src[key] === undefined ? node.default : src[key]
+    return out
+  }
+  schema.type = 'object'
+  schema.dict = dict
+  schema.toJSON = () => ({
+    type: 'object',
+    dict: Object.fromEntries(Object.entries(dict).map(([key, node]) => [key, node.toJSON()])),
+  })
+  return schema
+}
+
+const DesktopSettingsSchema = objectSchema({
+  port: num(3080),
+  active_profile: str('web'),
+  remote_addr: str(''),
+  remote_list: list([]),
+  lane_port: num(3091),
+  cloudflared_bin: str(''),
+  proxy_mode: str('off'),
+  proxy_url: str(''),
+  no_proxy: str(''),
+  proxy_user: str(''),
+  proxy_pass: str(''),
+  quarantine_first_party_protection: bool(true),
+  quarantine_exclude: list([]),
+  quarantine_max_retries: num(2),
+  ai_provider: str('deepseek'),
+  ai_model: str(''),
+  ai_base_url: str(''),
+  ai_key_env: str(''),
+  tunnel_url: str(''),
+  ws_keepalive_ms: num(15000),
+  ws_pong_timeout_ms: num(10000),
+})
+
 const CONTENT = [
   '# DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
   '',
@@ -114,11 +171,7 @@ export function apply(ctx) {
     settingsSvc = c.get('settings')
     if (settingsSvc === void 0) return
     try {
-      // 透传型 schema：保留全部既有键（port/proxy/remote 等），不丢 Rust 侧字段
-      settingsSvc.register('dsh-desktop-tauriapp', (raw) => {
-        const v = raw !== null && typeof raw === 'object' ? raw : {}
-        return { ...v }
-      })
+      settingsSvc.register('dsh-desktop-tauriapp', DesktopSettingsSchema)
     } catch (e) {
       ctx.logger?.warn?.(`dsh-desktop-tauriapp: settings 命名空间注册失败：${e?.message ?? e}`)
     }
