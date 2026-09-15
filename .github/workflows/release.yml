@@ -161,6 +161,10 @@ jobs:
       - name: Setup Android SDK (Android)
         if: matrix.target == 'android'
         uses: android-actions/setup-android@v3
+        with:
+          # 默认包含已从 Google SDK 仓库下架的 legacy 'tools' 包（sdkmanager 报
+          # Failed to find package 'tools'，2026-09 起必失败）；显式只装 platform-tools。
+          packages: 'platform-tools'
 
       - name: Install expo dependencies
         working-directory: mobile/expo-app
