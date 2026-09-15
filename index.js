@@ -108,6 +108,22 @@ export function apply(ctx) {
     ctx.logger?.warn('dsh-desktop-tauriapp: skills 服务不可用，跳过技能注册（RPC 桥接不受影响）')
   }
 
+  // ── dsh settings 服务：注册桌面壳命名空间 + 供 RPC 读写（不直接读写 settings.yaml）──
+  let settingsSvc
+  ctx.inject(['settings'], (c) => {
+    settingsSvc = c.get('settings')
+    if (settingsSvc === void 0) return
+    try {
+      // 透传型 schema：保留全部既有键（port/proxy/remote 等），不丢 Rust 侧字段
+      settingsSvc.register('dsh-desktop-tauriapp', (raw) => {
+        const v = raw !== null && typeof raw === 'object' ? raw : {}
+        return { ...v }
+      })
+    } catch (e) {
+      ctx.logger?.warn?.(`dsh-desktop-tauriapp: settings 命名空间注册失败：${e?.message ?? e}`)
+    }
+  })
+
   // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）。
   // 必须在技能守卫之外：两者无依赖关系。
   ctx.inject(['connection'], (webContext) => {
@@ -126,9 +142,9 @@ export function apply(ctx) {
       }
       return { ok: true, value: { providers: result } }
     }, { authority: 'trusted-host' })
-    // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
+    // 桌面壳设置读写：经 dsh settings API（namespace 已在上方注册）。
     webContext.connection.rpc.handle('/dsh-desktop-fuse-settings', async (endpoint, payload) => {
-      const settings = ctx.get('settings')
+      const settings = settingsSvc
       if (settings === void 0) throw new Error('settings service unavailable')
       if (endpoint === 'get') {
         const value = settings.get('dsh-desktop-tauriapp')
