@@ -4,9 +4,66 @@
 
 export const name = 'dsh-desktop-tauriapp'
 
-// Cordis 服务作用域隔离：不声明 inject 则 ctx.get('skills') 返回 undefined，
-// apply 会提前 return，技能与 RPC 桥接全部不注册（实测根因，见 #61）。
-export const inject = ['skills']
+// 注意：不可为 skills 声明 export const inject——skills 在本插件作用域不可见，
+// 声明后 Cordis 会无限期挂起 apply（实测），技能与 RPC 桥接全部失效。
+// 改为 apply 内探测降级：skills 不可用只跳过技能注册，RPC 桥接不受影响。
+
+// 桌面壳设置命名空间的 schema。
+// 约束：--patch 插件的宿主文件禁止裸包导入（实测 Cannot find package），
+// 因此不引 schemastery，而按 dsh-settings 的实际契约手写最小实现：
+//   1) schema(value) 可调用 —— resolve() 用它归一合并值；
+//   2) schema.toJSON() —— describe() 序列化用（缺方法会报 registration.schema.toJSON is not a function）；
+//   3) type/dict/inner 结构 —— redactSecrets 的 walk() 遍历用。
+const str = (def = '') => ({ type: 'string', default: def, toJSON: () => ({ type: 'string' }) })
+const num = (def = 0) => ({ type: 'number', default: def, toJSON: () => ({ type: 'number' }) })
+const bool = (def = false) => ({ type: 'boolean', default: def, toJSON: () => ({ type: 'boolean' }) })
+const list = (def = []) => ({
+  type: 'array',
+  inner: { type: 'string' },
+  default: def,
+  toJSON: () => ({ type: 'array', inner: { type: 'string' } }),
+})
+
+/** 由字段表构造可调用的对象 schema（缺失键填默认值，未声明键丢弃）。 */
+function objectSchema(dict) {
+  const schema = (raw) => {
+    const src = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+    const out = {}
+    for (const [key, node] of Object.entries(dict)) out[key] = src[key] === undefined ? node.default : src[key]
+    return out
+  }
+  schema.type = 'object'
+  schema.dict = dict
+  schema.toJSON = () => ({
+    type: 'object',
+    dict: Object.fromEntries(Object.entries(dict).map(([key, node]) => [key, node.toJSON()])),
+  })
+  return schema
+}
+
+const DesktopSettingsSchema = objectSchema({
+  port: num(3080),
+  active_profile: str('web'),
+  remote_addr: str(''),
+  remote_list: list([]),
+  lane_port: num(3091),
+  cloudflared_bin: str(''),
+  proxy_mode: str('off'),
+  proxy_url: str(''),
+  no_proxy: str(''),
+  proxy_user: str(''),
+  proxy_pass: str(''),
+  quarantine_first_party_protection: bool(true),
+  quarantine_exclude: list([]),
+  quarantine_max_retries: num(2),
+  ai_provider: str('deepseek'),
+  ai_model: str(''),
+  ai_base_url: str(''),
+  ai_key_env: str(''),
+  tunnel_url: str(''),
+  ws_keepalive_ms: num(15000),
+  ws_pong_timeout_ms: num(10000),
+})
 
 const CONTENT = [
   '# DSH 桌面壳「DeepSeek Harness Desktop Desktop」',
@@ -108,10 +165,25 @@ export function apply(ctx) {
     ctx.logger?.warn('dsh-desktop-tauriapp: skills 服务不可用，跳过技能注册（RPC 桥接不受影响）')
   }
 
+  // ── dsh settings 服务：注册桌面壳命名空间 + 供 RPC 读写（不直接读写 settings.yaml）──
+  let settingsSvc
+  ctx.inject(['settings'], (c) => {
+    settingsSvc = c.get('settings')
+    if (settingsSvc === void 0) return
+    try {
+      settingsSvc.register('dsh-desktop-tauriapp', DesktopSettingsSchema)
+    } catch (e) {
+      ctx.logger?.warn?.(`dsh-desktop-tauriapp: settings 命名空间注册失败：${e?.message ?? e}`)
+    }
+  })
+
   // 保险丝面板：桥接 dsh llm 目录到浏览器（同 dsh-mnemon 的 connection RPC 模式）。
   // 必须在技能守卫之外：两者无依赖关系。
   ctx.inject(['connection'], (webContext) => {
     if (webContext.connection === void 0) return
+    // connection RPC 的 handler 必须自带 {ok, value} 信封——fullResponse 不包裹
+    // （mnemon 的 success$1 同理），返回裸对象会导致客户端报
+    // TypeError: connection: invalid server-response result。
     webContext.connection.rpc.handle('/dsh-desktop-models', async (_endpoint) => {
       const llm = ctx.get('llm')
       if (llm === void 0) throw new Error('llm service unavailable')
@@ -121,11 +193,11 @@ export function apply(ctx) {
         const models = await llm.listModels(p.id)
         result.push({ id: p.id, name: p.name, models })
       }
-      return { providers: result }
+      return { ok: true, value: { providers: result } }
     }, { authority: 'trusted-host' })
-    // 保险丝设置读写：通过 dsh settings API（不直接读写 settings.yaml）
+    // 桌面壳设置读写：经 dsh settings API（namespace 已在上方注册）。
     webContext.connection.rpc.handle('/dsh-desktop-fuse-settings', async (endpoint, payload) => {
-      const settings = ctx.get('settings')
+      const settings = settingsSvc
       if (settings === void 0) throw new Error('settings service unavailable')
       if (endpoint === 'get') {
         const value = settings.get('dsh-desktop-tauriapp')

@@ -1,9 +1,16 @@
 // 桌面设置 Tab：托盘设置能力全部迁移至此。
 // 区块：dsh 服务地址 / Profile / 本地端口 / 代理设置（数据走 Tauri IPC，无弹窗）。
 import React from 'react'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext } from './ctx-types.ts'
 
 export const inject = ['slots']
+
+// dsh settings 服务的桌面壳命名空间 RPC 通道（宿主 index.js 注册）。
+// 所有设置项持久化走此通道（宿主侧 ctx.settings.get/mutate），不直接读写 settings.yaml；
+// Tauri IPC 仅保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试）。
+const NS_CHANNEL = '/dsh-desktop-fuse-settings'
+
+let nsRpc: { rpc: { call: (channel: string, endpoint: string, payload?: unknown) => Promise<any> } } | null = null
 
 function hasIpc(): boolean {
   const w = window as unknown as {
@@ -297,21 +304,40 @@ function buildPanel(): HTMLElement {
     msg = { ok, text }
   }
 
+  async function nsSave(patch: Record<string, unknown>): Promise<void> {
+    if (!nsRpc) throw new Error('dsh settings 通道不可用（需桌面壳环境）')
+    const r = await nsRpc.rpc.call(NS_CHANNEL, 'save', { patch })
+    if (!r?.ok) throw new Error(r?.error?.message ?? '保存被拒绝')
+  }
+
+  async function nsGet(): Promise<Record<string, unknown>> {
+    if (!nsRpc) throw new Error('dsh settings 通道不可用（需桌面壳环境）')
+    const r = await nsRpc.rpc.call(NS_CHANNEL, 'get', {})
+    if (!r?.ok) throw new Error(r?.error?.message ?? '读取被拒绝')
+    return (r.value && typeof r.value === 'object' ? r.value : {}) as Record<string, unknown>
+  }
+
   async function doLoad(): Promise<void> {
     try {
-      const [p, d] = await Promise.all([
+      const [ns, p, d] = await Promise.all([
+        nsGet(),
         invoke<ProxySettings>('get_proxy_settings'),
         invoke<DesktopData>('get_desktop_settings_data'),
       ])
       proxy = {
-        proxy_mode: p.proxy_mode || 'off',
-        proxy_url: p.proxy_url || '',
-        no_proxy: p.no_proxy || '',
-        proxy_user: p.proxy_user || '',
-        proxy_pass: p.proxy_pass || '',
+        proxy_mode: (ns.proxy_mode as string) || p.proxy_mode || 'off',
+        proxy_url: (ns.proxy_url as string) || p.proxy_url || '',
+        no_proxy: (ns.no_proxy as string) || p.no_proxy || '',
+        proxy_user: (ns.proxy_user as string) || p.proxy_user || '',
+        proxy_pass: (ns.proxy_pass as string) || p.proxy_pass || '',
       }
       effective = p.effective
-      desktop = d
+      desktop = {
+        remote_addr: (ns.remote_addr as string | null) ?? null,
+        remote_list: (ns.remote_list as string[]) ?? d.remote_list ?? [],
+        port: (ns.port as number) || d.port || 3080,
+        profiles: d.profiles,
+      }
       portDraft = ''
     } catch (err) {
       setMsg(false, `读取设置失败：${String(err)}`)
@@ -323,12 +349,12 @@ function buildPanel(): HTMLElement {
     if (busy) return
     busy = true; render()
     try {
-      await invoke('save_proxy_settings', {
-        proxyMode: proxy.proxy_mode,
-        proxyUrl: proxy.proxy_url,
-        noProxy: proxy.no_proxy,
-        proxyUser: proxy.proxy_user,
-        proxyPass: proxy.proxy_pass,
+      await nsSave({
+        proxy_mode: proxy.proxy_mode,
+        proxy_url: proxy.proxy_url,
+        no_proxy: proxy.no_proxy,
+        proxy_user: proxy.proxy_user,
+        proxy_pass: proxy.proxy_pass,
       })
       setMsg(true, '代理设置已保存；下次 dsh 重启后生效。')
     } catch (err) {
@@ -353,7 +379,8 @@ function buildPanel(): HTMLElement {
 
   async function doSelectRemote(addr: string | null): Promise<void> {
     try {
-      await invoke('select_remote_address', { addr })
+      await nsSave({ remote_addr: addr })
+      await invoke('restart_dsh_service')
       setMsg(true, '已切换 dsh 服务来源，正在重启…')
     } catch (err) {
       setMsg(false, `切换失败：${String(err)}`)
@@ -361,10 +388,23 @@ function buildPanel(): HTMLElement {
     render()
   }
 
+  // 地址归一化（对齐 Rust normalize_remote_url 核心规则）：完整 URL 或 host[:port]
+  function normalizeRemote(input: string): string | null {
+    const t = input.trim()
+    if (!t) return null
+    if (/^https?:\/\//.test(t)) return t
+    if (/^socks5:\/\//.test(t)) return t
+    if (/^[A-Za-z0-9.-]+(:\d+)?$/.test(t)) return `https://${t}`
+    return null
+  }
+
   async function doAddRemote(): Promise<void> {
-    if (!newRemoteUrl) { setMsg(false, '请先输入地址'); render(); return }
+    const addr = normalizeRemote(newRemoteUrl)
+    if (!addr) { setMsg(false, '地址非法：需 dsh web 完整 URL（含 token）或 host[:port]'); render(); return }
     try {
-      const addr = await invoke<string>('add_remote_address', { url: newRemoteUrl })
+      const list = Array.isArray(desktop.remote_list) ? [...desktop.remote_list] : []
+      if (!list.includes(addr)) list.push(addr)
+      await nsSave({ remote_list: list })
       newRemoteUrl = ''
       setMsg(true, `已新增地址：${addr}（未切换，请在下拉框选择）`)
     } catch (err) {
@@ -375,7 +415,10 @@ function buildPanel(): HTMLElement {
 
   async function doRemoveRemote(addr: string): Promise<void> {
     try {
-      await invoke('remove_remote_address', { addr })
+      const list = (desktop.remote_list ?? []).filter((a) => a !== addr)
+      const patch: Record<string, unknown> = { remote_list: list }
+      if (desktop.remote_addr === addr) patch.remote_addr = null
+      await nsSave(patch)
       setMsg(true, `已删除：${addr}`)
     } catch (err) {
       setMsg(false, `删除失败：${String(err)}`)
@@ -384,8 +427,10 @@ function buildPanel(): HTMLElement {
   }
 
   async function doSwitchProfile(name: string): Promise<void> {
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) { setMsg(false, 'Profile 名不合法'); render(); return }
     try {
-      await invoke('switch_profile_command', { name })
+      await nsSave({ active_profile: name })
+      await invoke('restart_dsh_service')
       setMsg(true, `已切换到 Profile「${name}」，正在重启…`)
     } catch (err) {
       setMsg(false, `切换 Profile 失败：${String(err)}`)
@@ -395,9 +440,9 @@ function buildPanel(): HTMLElement {
 
   async function doSavePort(): Promise<void> {
     const port = Number(portDraft)
-    if (!portDraft || Number.isNaN(port)) { setMsg(false, '请输入有效端口'); render(); return }
+    if (!portDraft || Number.isNaN(port) || port < 1 || port > 65535) { setMsg(false, '请输入 1-65535 的有效端口'); render(); return }
     try {
-      await invoke('set_local_port', { port })
+      await nsSave({ port })
       portDraft = ''
       setMsg(true, `端口已改为 ${port}；重启 dsh 后生效。`)
     } catch (err) {
@@ -420,6 +465,10 @@ function buildPanel(): HTMLElement {
 
 export function registerDesktopSettings(ctx: ClientContext): void {
   if (!hasIpc()) return
+  // 捕获 connection RPC（dsh settings 服务的桌面壳命名空间读写通道）
+  try {
+    nsRpc = (ctx as unknown as { connection?: { rpc: { call: (c: string, e: string, p?: unknown) => Promise<any> } } }).connection ?? null
+  } catch { nsRpc = null }
   const slots = (ctx as unknown as {
     slots?: {
       inject: (name: string, fn: () => void) => void

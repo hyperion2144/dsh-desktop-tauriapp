@@ -417,6 +417,23 @@ pub fn run() {
                             }
                             continue;
                         }
+                        // 自家子进程还活着 = 正在启动（端口未就绪属正常启动窗口），
+                        // 不自愈——否则托盘/切模式重启后会在启动窗口内触发第二次重启。
+                        // 进程已死的场景由 fuse 监控（exit≠0）与下方自愈分支分别接管。
+                        {
+                            let mut child = state.child.lock().unwrap();
+                            let alive = child
+                                .as_mut()
+                                .and_then(|c| c.try_wait().ok())
+                                .map(|s| s.is_none())
+                                .unwrap_or(false);
+                            if alive {
+                                if cur != STATUS_RESTARTING {
+                                    set_status(&handle, STATUS_STALE, "启动中（等待端口就绪）");
+                                }
+                                continue;
+                            }
+                        }
                         epoch_failures += 1;
                         if epoch_failures >= 3 {
                             log::error!("[watchdog] 连续自动恢复失败 3 次，停止自愈");

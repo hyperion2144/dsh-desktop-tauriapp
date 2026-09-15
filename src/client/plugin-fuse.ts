@@ -2,7 +2,7 @@
 // 通过 settings.section 槽位注册（与 dsh-mobile-access 同一契约）；
 // 数据经 Tauri IPC 与 Rust 后端通信；纯浏览器（无 IPC）不注册。
 // 主题只用 --dsw-alias-* 变量（带回退值），禁止 hash 类名（仓库血泪坑 #8）。
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { ClientContext } from './ctx-types.ts'
 import React from 'react'
 
 export const inject = ['slots']
