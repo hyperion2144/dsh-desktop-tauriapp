@@ -55,11 +55,18 @@ export function createMobileAccessService(opts = {}) {
   // ws_keepalive_ms 0 = 关闭保活。有意不提供 env 通道（调优参数，非部署参数，区别于 lane_port）。
   // 改动需重启 lane（随 dsh 进程）生效。
   let wsPingIntervalMs = opts.wsPingIntervalMs;
+  // 设置读写器：生产由 apply 注入 dsh settings 服务访问器（不直接读写 settings.yaml）；
+  // 未注入（测试/独立运行）时回退 legacy 行级读写。服务读返回原生类型（number/string），
+  // legacy 返回 JSON 标量字符串——两边的 null/undefined 语义已对齐（缺失 = null）。
+  const readSetting = opts.readSetting ?? readSettingsString;
+  const writeSettings = opts.writeSettings ?? (async (patch) => {
+    for (const [key, value] of Object.entries(patch)) writeSettingsKey(key, JSON.stringify(value));
+  });
   if (wsPingIntervalMs === undefined) {
     try {
-      // 键不存在时 readSettingsString 返 null：必须保持 undefined（用 proxy 缺省 15000），
+      // 键不存在时返 null：必须保持 undefined（用 proxy 缺省 15000），
       // 不能把 null 当空串 Number 成 0——否则保活泵被默认关闭（曾致产线零 ping）。
-      const raw = readSettingsString('ws_keepalive_ms');
+      const raw = readSetting('ws_keepalive_ms');
       if (raw != null) {
         const v = Number(raw);
         if (Number.isFinite(v) && v >= 0) wsPingIntervalMs = v;
@@ -69,7 +76,7 @@ export function createMobileAccessService(opts = {}) {
   let wsPongTimeoutMs = opts.wsPongTimeoutMs;
   if (wsPongTimeoutMs === undefined) {
     try {
-      const rawPong = readSettingsString('ws_pong_timeout_ms');
+      const rawPong = readSetting('ws_pong_timeout_ms');
       if (rawPong != null) {
         const v = Number(rawPong);
         if (Number.isFinite(v) && v > 0) wsPongTimeoutMs = v;
@@ -158,7 +165,7 @@ export function createMobileAccessService(opts = {}) {
           tunnel.bin = actualBin
           tunnel.detail = `${result.source === 'PATH' ? 'PATH 已有' : result.source === 'cache' ? '使用缓存' : '已下载'}：${actualBin}`
           // 自动解析成功后持久化解析结果：dsh 重启后 boot() 据此自动拉起隧道（常驻）
-          try { writeSettingsKey('cloudflared_bin', JSON.stringify(actualBin)); } catch { /* noop */ }
+          void writeSettings({ cloudflared_bin: actualBin }).catch(() => { /* noop */ })
         } else {
           tunnel.bin = actualBin
         }
@@ -323,7 +330,7 @@ export function createMobileAccessService(opts = {}) {
       const lanIp = selectLanIPv4(os.networkInterfaces?.() ?? {});
       let customTunnelUrl = customTunnel;
       if (!customTunnelUrl) {
-        try { customTunnelUrl = readSettingsString('tunnel_url') ?? ''; } catch { /* noop */ }
+        try { customTunnelUrl = readSetting('tunnel_url') ?? ''; } catch { /* noop */ }
       }
       json(200, {
         lanePort: tunnel.port,
@@ -347,11 +354,9 @@ export function createMobileAccessService(opts = {}) {
           const trimmed = url.trim();
           if (trimmed && !/^https?:\/\//.test(trimmed)) { json(400, { error: 'bad-request' }); return; }
           customTunnel = trimmed; // 内存态立即生效（重启后从 settings.yaml 恢复）
-          try {
-            writeSettingsKey('tunnel_url', JSON.stringify(trimmed));
-          } catch (e) {
+          void writeSettings({ tunnel_url: trimmed }).catch((e) => {
             try { warn?.('[dsh-mobile-access] 隧道地址持久化失败: ' + e); } catch { /* noop */ }
-          }
+          })
           json(200, { ok: true, url: trimmed });
         } catch (e) {
           json(400, { error: 'bad-request' });
@@ -453,7 +458,7 @@ export function createMobileAccessService(opts = {}) {
       if (!owner) { unpaired401(); return true; }
       let body = '';
       req.on('data', (c) => { body += c; });
-      req.on('end', () => {
+      req.on('end', async () => {
         try {
           const { bin, action } = JSON.parse(body || '{}');
           if (action === 'stop') {
@@ -470,19 +475,19 @@ export function createMobileAccessService(opts = {}) {
             json(400, { error: 'bad-request' });
             return;
           }
-          // 持久化到 settings.yaml（行级 merge，保留注释）；空串 = 进入 auto 模式（不固化路径）。
+          // 持久化经 dsh settings 服务；空串 = 进入 auto 模式（不固化路径）。
           let saved = true;
           if (trimmed) {
             try {
-              writeSettingsKey('cloudflared_bin', JSON.stringify(trimmed));
-              const persisted = readSettingsString('cloudflared_bin');
+              await writeSettings({ cloudflared_bin: trimmed });
+              const persisted = readSetting('cloudflared_bin');
               if (persisted !== trimmed) saved = false;
             } catch (e) {
               saved = false;
               try { warn?.('[dsh-mobile-access] cloudflared 配置持久化失败: ' + e); } catch { /* noop */ }
             }
           } else {
-            try { writeSettingsKey('cloudflared_bin', JSON.stringify('')); } catch { /* 忽略 */ }
+            try { await writeSettings({ cloudflared_bin: '' }); } catch { /* 忽略 */ }
           }
           startTunnel(trimmed || null, tunnel.port);
           json(200, { ok: true, running: !!tunnel.child, bin: trimmed || null, phase: tunnel.phase, persisted: saved });
@@ -585,11 +590,18 @@ export function allowCorsOrigin(origin, hostHeader) {
  * 注：桌面壳插件的 host 半区若无需启动服务（如 dsh-desktop-tauriapp 仅技能）可留空 apply。
  *
  * 硬依赖：connection（ctx.connection.rpc.handle）—— 同源 RPC 通道是 client/host 通讯的
- * 唯一途径，无 connection 即无法响应桌面壳 WebView 的 9 个端点请求，必须声明 inject。
+ * 唯一途径，无 connection 即无法响应桌面壳 WebView 的端点请求，必须声明 inject。
+ * settings（ctx.settings）—— 手机访问设置项（cloudflared_bin/tunnel_url/ws_*）经
+ * dsh settings 服务持久化（namespace: dsh-desktop-tauriapp，与桌面壳共用，透传型 schema
+ * 由桌面壳插件或本插件兜底注册），不再直接读写 settings.yaml。
  * Cordis 的 Guard 会拒绝任何未声明的 ctx.<service> 访问并让整个 plugin tree 装载失败
  * （下游所有插件如 dsh-session-log-export 也会被级联报 "failed to load"）。
  */
-export const inject = ['connection'];
+export const inject = ['connection', 'settings'];
+
+// 设置访问器：优先 dsh settings 服务（namespace 注册由桌面壳插件或本插件兜底），
+// 服务不可用时回退 legacy 行级读写（独立运行/老版 dsh）。
+const NS = 'dsh-desktop-tauriapp';
 
 function apply(ctx) {
   const platform = typeof process !== 'undefined' ? process.platform : '';
@@ -597,10 +609,30 @@ function apply(ctx) {
   if (process.env.DSH_MOBILE_ENABLED === '0') return;
   const lanePort = Number(process.env.DSH_MOBILE_LANE_PORT || 3091);
   const upstreamPort = Number(process.env.DSH_DESKTOP_PORT || 3080);
+  // 设置访问器：优先 dsh settings 服务（不直接读写 settings.yaml），服务不可用时回退 legacy 行级读写。
+  const settingsSvc = ctx.settings ?? null;
+  try { settingsSvc?.register(NS, (raw) => ({ ...(raw && typeof raw === 'object' ? raw : {}) })) } catch { /* 已注册 */ }
+  const readSetting = (key) => {
+    if (settingsSvc) {
+      const v = settingsSvc.get(NS)?.[key];
+      return v === undefined ? null : v;
+    }
+    return readSettingsString(key);
+  };
+  const writeSettings = async (patch) => {
+    if (settingsSvc) {
+      const ops = Object.entries(patch).map(([key, value]) => ({ op: 'set', path: [key], value }));
+      await settingsSvc.mutate(NS, ops);
+      return;
+    }
+    for (const [key, value] of Object.entries(patch)) writeSettingsKey(key, JSON.stringify(value));
+  };
   const svc = createMobileAccessService({
     upstreamHost: '127.0.0.1',
     upstreamPort,
     platform,
+    readSetting,
+    writeSettings,
     warn: (m) => { try { ctx?.logger?.warn?.(m); } catch { /* noop */ } },
     // dsh 进程内自取 process token 的通道（connection 服务公开方法；缺失则 lane 无凭证运行）
     authenticatedUrl: (origin) => {
@@ -635,7 +667,7 @@ function apply(ctx) {
             const lanIp = selectLanIPv4(os.networkInterfaces?.() ?? {});
             let customTunnelUrl = svc.tunnel && svc.tunnel._customUrl ? svc.tunnel._customUrl : '';
             if (!customTunnelUrl) {
-              try { customTunnelUrl = readSettingsString('tunnel_url') ?? ''; } catch {}
+              try { customTunnelUrl = readSetting('tunnel_url') ?? ''; } catch {}
             }
             return ok({
               lanePort: svc.tunnel?.port ?? 3091,
@@ -658,7 +690,7 @@ function apply(ctx) {
           case 'tunnel.save': {
             const url = String(payload?.url ?? '').trim();
             if (url && !/^https?:\/\//.test(url)) return errRpc('bad-url');
-            try { writeSettingsKey('tunnel_url', JSON.stringify(url)); } catch {}
+            try { await writeSettings({ tunnel_url: url }); } catch {}
             if (svc.tunnel) svc.tunnel._customUrl = url;
             return ok({ url });
           }
@@ -678,12 +710,12 @@ function apply(ctx) {
             const bin = String(payload?.bin ?? '').trim();
             const t = svc.startTunnel(bin || null, svc.tunnel?.port ?? 3091);
             // 仅在用户显式给了 bin 时持久化（auto 模式每次启动自动解析，不要把缓存路径写死）。
-            if (bin) { try { writeSettingsKey('cloudflared_bin', JSON.stringify(bin)); } catch {} }
+            if (bin) { try { await writeSettings({ cloudflared_bin: bin }); } catch {} }
             return ok({ bin: t.bin || null, running: !!t.child, phase: t.phase ?? 'resolving' });
           }
           case 'cloudflared.stop':
             // 显式停止 = 同时清掉持久化 bin：重启后不再自动拉起（保留「停止」的语义）
-            try { writeSettingsKey('cloudflared_bin', JSON.stringify('')); } catch { /* noop */ }
+            try { await writeSettings({ cloudflared_bin: '' }); } catch { /* noop */ }
             svc.stopTunnel();
           default:
             return errRpc('unknown-endpoint');
@@ -710,7 +742,7 @@ function apply(ctx) {
     // 运行期变更走 POST /api/pair/cloudflared（立即生效 + 持久化）。
     let bin = process.env.DSH_CLOUDFLARED_BIN || '';
     if (!bin) {
-      try { bin = readSettingsString('cloudflared_bin') ?? ''; } catch { bin = ''; }
+      try { bin = readSetting('cloudflared_bin') ?? ''; } catch { bin = ''; }
     }
     if (bin) {
       svc.startTunnel(bin, lanePort);
