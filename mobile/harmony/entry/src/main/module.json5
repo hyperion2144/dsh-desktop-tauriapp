@@ -24,11 +24,25 @@
             "actions": ["action.system.home"]
           }
         ]
+,
+        // #67 任务 1：退后台不被挂起，页面 WebSocket 才能继续回 dsh mux 的 2s ping。
+        // 注意：长时任务会在通知栏挂一条常驻通知，且系统按业务场景白名单校验模式；
+        // WebSocket 长连接最接近 dataTransfer，能否通过校验需真机确认（被拒时
+        // BackgroundKeeper 记 9800005 并回落到回前台自愈，不影响其它修复手段）。
+        "backgroundModes": ["dataTransfer"]
       }
     ],
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
+      },
+      {
+        // #67 任务 1：长时任务（backgroundModes）必需；system_grant，无需弹窗。
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
+        // #67 任务 2：监听默认网络需要（createNetConnection 不传 netSpecifier）。
+        "name": "ohos.permission.GET_NETWORK_INFO"
       },
       {
         "name": "ohos.permission.CAMERA",
