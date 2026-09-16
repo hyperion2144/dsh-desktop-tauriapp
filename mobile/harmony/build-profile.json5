@@ -1,10 +1,15 @@
 {
   "app": {
+    // 签名配置留空（可移植状态）。DevEco 的「自动签名」会把本机证书路径与口令写进这里，
+    // 本文件被 git 跟踪，所以**切勿提交签名段**；本机配置另存于 .local/（已被 gitignore）
+    // 并在 mobile/harmony/README.md「签名」节有说明。防误提交兜底见 scripts/pre-commit-guard.sh。
     "signingConfigs": [],
     "products": [
       {
         "name": "default",
-        "targetSdkVersion": "5.0.0(12)",
+        // #67 收尾：target 升到本机已装 SDK（HarmonyOS 26.0.0 / API 26），
+        // compatible 保持 12——不让新能力把 API 12 设备挡在门外（#67 验收机就是 API 12）。
+        "targetSdkVersion": "26.0.0",
         "compatibleSdkVersion": "5.0.0(12)",
         "runtimeOS": "HarmonyOS",
         "buildOption": {

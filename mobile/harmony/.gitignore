@@ -8,3 +8,8 @@ entry/.preview/
 *.hap
 *.app
 local.properties
+
+# 本机私有配置（签名材料与口令）：build-profile.json5 被 git 跟踪，
+# DevEco 自动签名会把 certpath/keyPassword/storePassword 写进去，本机副本放这里。
+# 入口：scripts/local-signing.sh；防误提交：scripts/pre-commit-guard.sh
+.local/

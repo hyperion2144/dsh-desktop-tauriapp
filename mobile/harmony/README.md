@@ -36,23 +36,45 @@ entry/src/main/resources/             media 图标（桌面鲸鱼同款）、str
 2. File → Project Structure → Signing Configs → 登录华为账号自动签名
 3. 运行 `entry` module 到真机/模拟器
 
-### 方式二：命令行 hvigorw（构建 HAP）
+### 方式二：命令行脚本（构建 HAP）
 
 ```sh
 cd mobile/harmony
+./scripts/build.sh    # 自动探测 DevEco + 注入 DEVECO_SDK_HOME/JAVA_HOME/PATH
+# 产物：entry/build/default/outputs/default/entry-default-signed.hap（配了签名时）
+#     未配签名时：entry-default-unsigned.hap（模拟器可用）
+```
+
+脚本只是把下面三件套固化，并对缺失路径报中文错（而不是让人对着 hvigor 报错猜）：
+
+```sh
 export DEVECO_SDK_HOME=/Applications/DevEco-Studio.app/Contents/sdk
 export JAVA_HOME=/Applications/DevEco-Studio.app/Contents/jbr/Contents/Home
 export PATH="$JAVA_HOME/bin:/Applications/DevEco-Studio.app/Contents/tools/ohpm/bin:/Applications/DevEco-Studio.app/Contents/tools/hvigor/bin:$PATH"
 ohpm install
 # 项目内没有 hvigorw 包装脚本，用的是 DevEco 自带的（已在上面 PATH 里）
 hvigorw --mode module -p module=entry@default assembleHap
-# 产物：entry/build/default/outputs/default/entry-default-signed.hap（配了签名时）
 ```
 
-> 无签名配置时产出 `-unsigned.hap`（模拟器可用）；真机安装需先在
-> `build-profile.json5` 配置自己的签名（DevEco 自动签名会写入，仓库内**不提交**签名
-> 材料与密码）。命令行构建需 `hvigor/hvigor-config.json5` 保持 `daemon: false`（否则
-> 后台 daemon 缓存旧 PATH 导致 java 找不到）。
+> 命令行构建需 `hvigor/hvigor-config.json5` 保持 `daemon: false`（否则后台 daemon 缓存旧 PATH
+> 导致 java 找不到）。
+
+## 签名（别把口令提交上去）
+
+`build-profile.json5` 是**被 git 跟踪**的普通配置文件，而 DevEco 的「自动签名」会直接把本机
+证书路径与 `keyPassword`/`storePassword` 写进它——一次 `git add` 就可能把口令带上远端。
+约定：**跟踪文件里 `signingConfigs` 留空**，本机签名段放 `.local/`（已 gitignore）。
+
+```sh
+./scripts/local-signing.sh --status   # 看跟踪文件是否干净 + 本机副本是否存在
+./scripts/local-signing.sh --save     # DevEco 自动签名后，把签名段另存到 .local/
+./scripts/local-signing.sh --apply    # 反过来：把 .local/ 写回跟踪文件（真机安装用）
+./scripts/install-hooks.sh            # 装提交守卫（拦含口令的 build-profile.json5）
+```
+
+守卫装在 `.git/hooks/pre-commit`：本仓库此前无 hook 体系，因此是**显式安装**、不自动注入；
+单次绕过用 `git commit --no-verify`。
+
 
 ## 连接自愈（#67）
 
@@ -86,4 +108,6 @@ dsh 页面的 `/api/remote.mux` WebSocket 由页面 JS 在 ArkWeb 内部创建�
 - 明文 HTTP 访问策略（module.json5 网络安全配置）待 DevEco 真机联调按当前 SDK 补全；
 - ArkWeb 对 WS 长连接与大 DOM 性能需真机验证（design §5 开放问题）。
 - `setSocketIdleTimeout` 需 API ≥ 21（工程 compatibleSdkVersion 为 12），低版本走 try/catch 降级。
-- 工程 `targetSdkVersion`/`compatibleSdkVersion` 仍为 `5.0.0(12)`，本机 SDK 已是 API 26，待定是否升级。
+- 工程 `targetSdkVersion` 已升到 `26.0.0`（本机 SDK / HarmonyOS 26.0.0），`compatibleSdkVersion` 保持
+  `5.0.0(12)` 以保住 API 12 设备。注意 hvigor 格式规则：API ≤25 用 `'5.0.0(12)'`、API ≥26 用
+  `'26.0.0'`，不能混用（混用报 00306042）。
