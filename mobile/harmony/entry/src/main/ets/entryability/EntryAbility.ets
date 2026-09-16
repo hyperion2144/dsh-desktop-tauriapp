@@ -1,16 +1,53 @@
 import { AbilityConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BackgroundKeeper } from '../common/BackgroundKeeper';
+import { NetworkWatcher } from '../common/NetworkWatcher';
+import { SessionGuard } from '../common/SessionGuard';
 import { window } from '@kit.ArkUI';
 
 const DOMAIN = 0x0001;
 const TAG = 'EntryAbility';
 
 export default class EntryAbility extends UIAbility {
+  private backgroundKeeper: BackgroundKeeper = new BackgroundKeeper();
+  private networkWatcher: NetworkWatcher = new NetworkWatcher();
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, TAG, 'onCreate');
     const uri = (want?.uri ?? '')
       || (typeof want?.parameters?.uri === 'string' ? want.parameters.uri : '');
     AppStorage.setOrCreate<string>('pairDeepLink', uri);
+    // 网络换代监听是进程级事实，不随页面启停：Wi-Fi ↔ 蜂窝 / 断网恢复时，
+    // ArkWeb 不会自己把旧链路上的 WebSocket 迁走（#67 任务 2）。
+    this.networkWatcher.start();
+  }
+
+  /** 退后台：立刻申请长时任务，尽量不让进程被挂起（#67 任务 1）。 */
+  onBackground(): void {
+    hilog.info(DOMAIN, TAG, 'onBackground');
+    SessionGuard.get().markBackground();
+    // 申请可能被系统拒（模式白名单 / 权限）：拒绝后自动回落到回前台自愈路径。
+    this.backgroundKeeper.request(this.context).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, 'background task request failed: %{public}s',
+        e?.message ?? String(e));
+    });
+  }
+
+  /** 回前台：释放长时任务，并做一次会话自愈（#67 任务 4）。 */
+  onForeground(): void {
+    hilog.info(DOMAIN, TAG, 'onForeground');
+    this.backgroundKeeper.release(this.context).catch((e: Error) => {
+      hilog.warn(DOMAIN, TAG, 'background task release failed: %{public}s',
+        e?.message ?? String(e));
+    });
+    SessionGuard.get().onForeground().catch((e: Error) => {
+      hilog.error(DOMAIN, TAG, 'session self-heal failed: %{public}s', e?.message ?? String(e));
+    });
+  }
+
+  /** 进程退出：停网络监听（NetConnection 无注销接口，置空引用即可）。 */
+  onDestroy(): void {
+    this.networkWatcher.stop();
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
