@@ -328,8 +328,15 @@ export function registerDownloadsTab(ctx: ClientContext): void {
           sidebarRight.openTab(TAB_KIND)
         }
       }
+      // list 席位的注册 meta 是 { name, id, order, registrant }（对照
+      // better-sidebar bottom-toggle 的活例；sidebar-right 的 key 型 meta 在此无效）
       const dispose = slots.inject('conversation.session.header.utilities', () =>
-        slots.register({ name: 'conversation.session.header.utilities', key: 'dsh-desktop-tauriapp-downloads' }, DownloadsHeaderButton),
+        slots.register({
+          name: 'conversation.session.header.utilities',
+          id: 'dsh-desktop-tauriapp:downloads-button',
+          order: 20, // better-sidebar 开合钮 order=10，排其后
+          registrant: 'dsh-desktop-tauriapp',
+        }, DownloadsHeaderButton),
       )
       if (typeof dispose === 'function') return dispose
     } catch {
