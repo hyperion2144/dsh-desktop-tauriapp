@@ -241,6 +241,19 @@ function DownloadsHeaderButton(): React.ReactElement {
   return <HeaderButtonInner />
 }
 
+/** hover/active 样式（dsh 交互变量 + 回退；命名空间类名，一次性 <style> 注入）。 */
+function ensureHeaderButtonStyle(): void {
+  if (document.querySelector('style[data-dsh-desktop-downloads-btn]') !== null) return
+  const style = document.createElement('style')
+  style.dataset.dshDesktopDownloadsBtn = '1'
+  style.textContent = [
+    '.dshDesktopDownloadsBtn{background:transparent;border:none;color:inherit;cursor:pointer;border-radius:6px;transition:background .12s;}',
+    '.dshDesktopDownloadsBtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07));}',
+    '.dshDesktopDownloadsBtn:active{background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12));}',
+  ].join('')
+  ;(document.head || document.documentElement).appendChild(style)
+}
+
 function HeaderButtonInner(): React.ReactElement {
   const open = (): void => {
     // 打开动作由注册层闭包注入（header 按钮组件本身不持有 ctx）
@@ -251,7 +264,9 @@ function HeaderButtonInner(): React.ReactElement {
       type="button"
       onClick={open}
       title="下载管理器"
-      style={{ display: 'inline-flex', alignItems: 'center', padding: 4, border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', borderRadius: 6 }}
+      aria-label="下载管理器"
+      className="dshDesktopDownloadsBtn"
+      style={{ display: 'inline-flex', alignItems: 'center', padding: 4 }}
     >
       <DownloadsIcon size={16} />
     </button>
