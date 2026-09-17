@@ -7,6 +7,7 @@
 // IPC 通道，event.listen 不可用；tab 打开时 600ms 轮询，空闲降频）。
 // 主题只用 --dsw-alias-* 变量（带回退），禁 hash 类名（仓库血泪坑 #8）。
 import type { ClientContext } from './ctx-types.ts'
+import { Button, IconDownloadOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
 import React, { useEffect, useRef, useState } from 'react'
 
 /** 与 Rust download::model::DownloadTask 对齐（serde camelCase）。 */
@@ -216,60 +217,31 @@ function TextButton({ children, onClick }: { children: React.ReactNode; onClick:
   )
 }
 
-/** 下载图标（16px 内联 SVG，下载箭头进托盘形态）。 */
-function DownloadsIcon({ size = 16, className }: { size?: number; className?: string }): React.ReactElement {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" className={className} aria-hidden>
-      <path d="M8 2v7m0 0l-3-3m3 3l3-3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M3 11.5v1A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </svg>
-  )
-}
-
-/** tab chip 标题（icon + 文字，照抄 dsh-context 的 title seat 模式）。 */
+/** tab chip 标题（官方图标 + 文字，照抄 dsh-context 的 title seat 模式）。 */
 function DownloadsTabTitle(): React.ReactElement {
   return (
     <>
-      <DownloadsIcon size={16} />
+      <IconDownloadOutline16 />
       <span style={{ marginLeft: 4 }}>下载</span>
     </>
   )
 }
 
-/** 会话 header 右上角「下载管理器」按钮：点击打开右列与本 tab。 */
+/** 会话 header 右上角「下载管理器」按钮：dsh 官方 Button（toolbar 变体，
+ * hover/active 由官方 --dsw-alias-button-* token 家族接管，与宿主工具按钮
+ * 行为完全同源——不自绘样式，杜绝常态高亮这类自造轮子问题）。 */
 function DownloadsHeaderButton(): React.ReactElement {
-  return <HeaderButtonInner />
-}
-
-/** hover/active 样式（dsh 交互变量 + 回退；命名空间类名，一次性 <style> 注入）。 */
-function ensureHeaderButtonStyle(): void {
-  if (document.querySelector('style[data-dsh-desktop-downloads-btn]') !== null) return
-  const style = document.createElement('style')
-  style.dataset.dshDesktopDownloadsBtn = '1'
-  style.textContent = [
-    '.dshDesktopDownloadsBtn{background:transparent;border:none;color:inherit;cursor:pointer;border-radius:6px;transition:background .12s;}',
-    '.dshDesktopDownloadsBtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07));}',
-    '.dshDesktopDownloadsBtn:active{background:var(--dsw-alias-interactive-bg-active,rgba(255,255,255,.12));}',
-  ].join('')
-  ;(document.head || document.documentElement).appendChild(style)
-}
-
-function HeaderButtonInner(): React.ReactElement {
-  const open = (): void => {
-    // 打开动作由注册层闭包注入（header 按钮组件本身不持有 ctx）
-    if (headerOpenAction) headerOpenAction()
-  }
   return (
-    <button
-      type="button"
-      onClick={open}
+    <Button
+      variant="toolbar"
+      size="sm"
+      icon={<IconDownloadOutline16 />}
       title="下载管理器"
       aria-label="下载管理器"
-      className="dshDesktopDownloadsBtn"
-      style={{ display: 'inline-flex', alignItems: 'center', padding: 4 }}
-    >
-      <DownloadsIcon size={16} />
-    </button>
+      onClick={() => {
+        if (headerOpenAction) headerOpenAction()
+      }}
+    />
   )
 }
 
@@ -313,7 +285,7 @@ export function registerDownloadsTab(ctx: ClientContext): void {
             order: 30,
             title: () => '下载',
             description: () => '桌面壳下载管理器：进度、暂停/恢复、并行与历史',
-            icon: DownloadsIcon,
+            icon: IconDownloadOutline16,
           },
         ],
       }))
