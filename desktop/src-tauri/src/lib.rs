@@ -484,6 +484,7 @@ pub fn run() {
                             continue;
                         }
                         log::warn!("[watchdog] 检测到 dsh 异常（{verbose}），自动重启（第 {epoch_failures} 次）");
+                        show_notification(&handle, "dsh 服务异常", &format!("检测到服务异常，正在自动重启（第 {epoch_failures} 次）"));
                         restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst));
                         // 新实例获得全新启动窗口（#71）：不可达计时清零，
                         // 否则慢启动会被旧计时立即再判卡死，3 次封顶被空烧。
