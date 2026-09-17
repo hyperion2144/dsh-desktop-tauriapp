@@ -233,7 +233,7 @@ function DownloadsTabTitle(): React.ReactElement {
 function DownloadsHeaderButton(): React.ReactElement {
   return (
     <Button
-      variant="toolbar"
+      variant="ghost" /* 常态透明、hover 才亮；toolbar 变体常态自带 tool-bar-fill 底色（实测即『一进来就是按下效果』的来源） */
       size="sm"
       icon={<IconDownloadOutline16 />}
       title="下载管理器"
