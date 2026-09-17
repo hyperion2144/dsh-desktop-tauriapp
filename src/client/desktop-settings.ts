@@ -112,6 +112,7 @@ function buildPanel(): HTMLElement {
   let desktop: DesktopData = { remote_addr: null, remote_list: [], port: 3080, profiles: [] }
   let newRemoteUrl = ''
   let portDraft = ''
+  let downloadConcurrency = 3
   let testResult: string | null = null
   let testBusy = false
   let msg: { ok: boolean; text: string } | null = null
@@ -217,6 +218,35 @@ function buildPanel(): HTMLElement {
       root.appendChild(box)
     }
 
+    // ── 下载（#72）──
+    {
+      const { box } = section('下载')
+      const row = el('div', undefined, 'display:flex;gap:8px;align-items:center;')
+      const concInput = document.createElement('input')
+      concInput.placeholder = '1-32'
+      invoke<{ concurrency: number }>('get_download_settings')
+        .then((s) => {
+          downloadConcurrency = s.concurrency
+          if (concInput.dataset.userTouched !== '1') concInput.value = String(s.concurrency)
+        })
+        .catch(() => {})
+      concInput.dataset.desktopSettings = 'load-concurrency'
+      concInput.value = String(downloadConcurrency)
+      concInput.style.width = '80px'
+      concInput.dataset.desktopSettings = 'download-concurrency'
+      const concBtn = el('button', '保存')
+      concBtn.className = 'pf-btn ghost'
+      concBtn.addEventListener('click', () => {
+        const v = Math.max(1, Math.min(32, parseInt(concInput.value, 10) || 3))
+        invoke('set_download_concurrency', { value: v })
+          .then(() => { downloadConcurrency = v; note(box, `已保存：并发上限 ${v}`) })
+          .catch(() => note(box, '保存失败（无 Tauri IPC？）'))
+      })
+      row.append(concInput, concBtn)
+      box.appendChild(row)
+      note(box, '同时进行的下载数上限，超出排队；改动立即生效。')
+      root.appendChild(box)
+    }
     // ── 代理设置 ──
     {
       const { box } = section('代理设置')

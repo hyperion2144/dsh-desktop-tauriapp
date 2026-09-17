@@ -50,6 +50,18 @@
     "allow-switch-profile-command",
     "allow-get-proxy-settings",
     "allow-save-proxy-settings",
-    "allow-test-proxy-connectivity"
+    "allow-test-proxy-connectivity",
+    "core:event:default",
+    "allow-list-downloads",
+    "allow-pause-download",
+    "allow-resume-download",
+    "allow-cancel-download",
+    "allow-clear-finished-downloads",
+    "allow-get-download-settings",
+    "allow-set-download-concurrency",
+    "allow-reveal-download",
+    "allow-start-blob-download",
+    "allow-save-blob-chunk",
+    "allow-finish-blob-download"
   ]
 }

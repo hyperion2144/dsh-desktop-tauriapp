@@ -35,13 +35,16 @@
     "windows"
   ],
   "scripts": {
-    "build:client": "node scripts/build-client.mjs"
+    "build:client": "node scripts/build-client.mjs",
+    "test:client": "node scripts/test-client.mjs"
   },
   "dsh": {
     "client": {
       "inject": [
         "@deepseek-ai/dsh-client-ui-theme",
-        "@deepseek-ai/dsh-client-connection"
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ],
       "platform": "web"
     },

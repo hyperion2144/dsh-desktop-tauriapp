@@ -183,16 +183,34 @@
           "markdownDescription": "桌面设置面板：add_remote_address"
         },
         {
+          "description": "下载管理器：取消任务并清理临时文件",
+          "type": "string",
+          "const": "allow-cancel-download",
+          "markdownDescription": "下载管理器：取消任务并清理临时文件"
+        },
+        {
           "description": "允许加载页切换兼容/高级接入模式",
           "type": "string",
           "const": "allow-choose-desktop-mode",
           "markdownDescription": "允许加载页切换兼容/高级接入模式"
         },
         {
+          "description": "下载管理器：清空已完成任务记录",
+          "type": "string",
+          "const": "allow-clear-finished-downloads",
+          "markdownDescription": "下载管理器：清空已完成任务记录"
+        },
+        {
           "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
           "type": "string",
           "const": "allow-explain-failure",
           "markdownDescription": "允许 AI 解读隔离记录（复用 dsh 凭据）"
+        },
+        {
+          "description": "下载管理器：blob 分块结束（落盘+通知）",
+          "type": "string",
+          "const": "allow-finish-blob-download",
+          "markdownDescription": "下载管理器：blob 分块结束（落盘+通知）"
         },
         {
           "description": "允许桌面 client 经 IPC 查询壳的渲染环境（模式/平台，替代 URL 标记）",
@@ -205,6 +223,12 @@
           "type": "string",
           "const": "allow-get-desktop-settings-data",
           "markdownDescription": "桌面设置面板：get_desktop_settings_data"
+        },
+        {
+          "description": "下载管理器：读取并发上限设置",
+          "type": "string",
+          "const": "allow-get-download-settings",
+          "markdownDescription": "下载管理器：读取并发上限设置"
         },
         {
           "description": "允许查询 dsh 服务状态（侧边栏状态标识）",
@@ -243,6 +267,12 @@
           "markdownDescription": "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）"
         },
         {
+          "description": "下载管理器：读取任务列表快照",
+          "type": "string",
+          "const": "allow-list-downloads",
+          "markdownDescription": "下载管理器：读取任务列表快照"
+        },
+        {
           "description": "允许读取插件保险丝隔离名单",
           "type": "string",
           "const": "allow-list-quarantine",
@@ -265,6 +295,12 @@
           "type": "string",
           "const": "allow-open-external",
           "markdownDescription": "允许在外链点击/导航守卫中通过系统默认浏览器/应用打开 http/https/mailto/tel（桌面壳）"
+        },
+        {
+          "description": "下载管理器：暂停任务（.part 保留可续传）",
+          "type": "string",
+          "const": "allow-pause-download",
+          "markdownDescription": "下载管理器：暂停任务（.part 保留可续传）"
         },
         {
           "description": "允许隐藏桌宠窗口",
@@ -315,10 +351,28 @@
           "markdownDescription": "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）"
         },
         {
+          "description": "下载管理器：恢复任务（Range 续传优先）",
+          "type": "string",
+          "const": "allow-resume-download",
+          "markdownDescription": "下载管理器：恢复任务（Range 续传优先）"
+        },
+        {
+          "description": "下载管理器：在系统文件管理器中显示已完成文件",
+          "type": "string",
+          "const": "allow-reveal-download",
+          "markdownDescription": "下载管理器：在系统文件管理器中显示已完成文件"
+        },
+        {
           "description": "允许运行插件保险丝环境体检",
           "type": "string",
           "const": "allow-run-doctor",
           "markdownDescription": "允许运行插件保险丝环境体检"
+        },
+        {
+          "description": "下载管理器：blob 分块写入（base64）",
+          "type": "string",
+          "const": "allow-save-blob-chunk",
+          "markdownDescription": "下载管理器：blob 分块写入（base64）"
         },
         {
           "description": "允许保存代理设置（托盘代理设置表单提交）",
@@ -339,10 +393,22 @@
           "markdownDescription": "桌面设置面板：select_remote_address"
         },
         {
+          "description": "下载管理器：调整并发上限（写 settings.yaml）",
+          "type": "string",
+          "const": "allow-set-download-concurrency",
+          "markdownDescription": "下载管理器：调整并发上限（写 settings.yaml）"
+        },
+        {
           "description": "桌面设置面板：set_local_port",
           "type": "string",
           "const": "allow-set-local-port",
           "markdownDescription": "桌面设置面板：set_local_port"
+        },
+        {
+          "description": "下载管理器：blob 下载开始（弹保存框，返回任务 id）",
+          "type": "string",
+          "const": "allow-start-blob-download",
+          "markdownDescription": "下载管理器：blob 下载开始（弹保存框，返回任务 id）"
         },
         {
           "description": "桌面设置面板：switch_profile_command",
@@ -2383,6 +2449,72 @@
           "type": "string",
           "const": "core:window:deny-unminimize",
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
+        },
+        {
+          "description": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`",
+          "type": "string",
+          "const": "dialog:default",
+          "markdownDescription": "This permission set configures the types of dialogs\navailable from the dialog plugin.\n\n#### Granted Permissions\n\nAll dialog types are enabled.\n\n\n\n#### This default permission set includes:\n\n- `allow-message`\n- `allow-save`\n- `allow-open`"
+        },
+        {
+          "description": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:allow-ask",
+          "markdownDescription": "Enables the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
+        },
+        {
+          "description": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:allow-confirm",
+          "markdownDescription": "Enables the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `allow-message` and will be removed in v3)"
+        },
+        {
+          "description": "Enables the message command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-message",
+          "markdownDescription": "Enables the message command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the open command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-open",
+          "markdownDescription": "Enables the open command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:allow-save",
+          "markdownDescription": "Enables the save command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:deny-ask",
+          "markdownDescription": "Denies the ask command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
+        },
+        {
+          "description": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)",
+          "type": "string",
+          "const": "dialog:deny-confirm",
+          "markdownDescription": "Denies the confirm command without any pre-configured scope. (**DEPRECATED**: This is now an alias to `deny-message` and will be removed in v3)"
+        },
+        {
+          "description": "Denies the message command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-message",
+          "markdownDescription": "Denies the message command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the open command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-open",
+          "markdownDescription": "Denies the open command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save command without any pre-configured scope.",
+          "type": "string",
+          "const": "dialog:deny-save",
+          "markdownDescription": "Denies the save command without any pre-configured scope."
         },
         {
           "description": "Allows the log command\n#### This default permission set includes:\n\n- `allow-log`",

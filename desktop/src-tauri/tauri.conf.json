@@ -11,16 +11,6 @@
     "macOSPrivateApi": true,
     "windows": [
       {
-        "label": "main",
-        "title": "",
-        "width": 1280,
-        "height": 840,
-        "minWidth": 940,
-        "minHeight": 620,
-        "center": true,
-        "dragDropEnabled": false
-      },
-      {
         "label": "pet",
         "url": "pet.html",
         "title": "DeepSeek Harness Desktop 桌宠",

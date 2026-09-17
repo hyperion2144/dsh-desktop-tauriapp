@@ -40,6 +40,17 @@
     "allow-remove-remote-address",
     "allow-select-remote-address",
     "allow-set-local-port",
-    "allow-switch-profile-command"
+    "allow-switch-profile-command",
+    "allow-list-downloads",
+    "allow-pause-download",
+    "allow-resume-download",
+    "allow-cancel-download",
+    "allow-clear-finished-downloads",
+    "allow-get-download-settings",
+    "allow-set-download-concurrency",
+    "allow-reveal-download",
+    "allow-start-blob-download",
+    "allow-save-blob-chunk",
+    "allow-finish-blob-download"
   ]
 }

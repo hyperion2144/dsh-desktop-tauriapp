@@ -30,6 +30,7 @@ base64 = "0.22"
 netstat2 = "0.11.2"
 libc = "0.2.189"
 cookie = "0.18"
+tauri-plugin-dialog = "2"
 
 # 重构：领域错误 + 应用错误
 thiserror = "2"
@@ -37,6 +38,6 @@ anyhow = "1"
 
 # 启动保险丝（#53）：stderr 失败检测正则 + AI explain 的 OpenAI 兼容调用（#56：必须关默认 features，两平台不编译 OpenSSL）
 regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "native-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "native-tls", "stream"] }
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
