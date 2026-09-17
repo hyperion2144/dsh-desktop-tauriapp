@@ -413,6 +413,8 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                     Ok(child) => {
                         *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                         handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
+                        // 拉起即回到启动期（#71）：新实例就绪前守护器让位、保险丝接管
+                        handle.state::<DshState>().ready_once.store(false, Ordering::SeqCst);
                         handle.state::<DshState>().mode.store(MODE_ADVANCED, Ordering::SeqCst);
                         apply_titlebar(&handle, true);
                     }

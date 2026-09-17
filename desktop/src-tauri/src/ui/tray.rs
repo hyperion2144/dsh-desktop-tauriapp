@@ -200,6 +200,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
                 *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                 handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
                 handle.state::<DshState>().mode.store(target_mode, Ordering::SeqCst);
+                // 重启即回到启动期（#71）：新实例就绪前守护器让位、保险丝接管
+                handle.state::<DshState>().ready_once.store(false, Ordering::SeqCst);
                 apply_titlebar(&handle, advanced);
             }
             Err(e) => {

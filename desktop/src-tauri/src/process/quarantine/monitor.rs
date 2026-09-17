@@ -1,7 +1,7 @@
 //! 保险丝监控任务（#58）：dsh 子进程意外退出 → 隔离 → 自动重试。
 //!
 //! 触发点唯一且明确：「进程退出 + exit code ≠ 0」（#54：端口在 settle 前 ~2.9s
-//! 就会 LISTEN，不能当就绪信号）。健康探活仍归导航/watchdog 两阶段管理，互不干扰。
+//! 就会 LISTEN，不能当就绪信号）。且仅限启动期（ready_once=false）：运行期进程异常归守护器（#71）。
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -34,10 +34,12 @@ async fn monitor(app: AppHandle) {
         }
         tokio::time::sleep(Duration::from_millis(700)).await;
         let state = app.state::<DshState>();
-        // 只看自家 spawn 的实例；重启中/已判失败/外部复用都不介入
+        // 保险丝只管启动期（ready_once=false）：运行期进程异常归守护器（#71 分工）。
+        // 只看自家 spawn 的实例；重启中/已判失败/外部复用/已就绪运行中都不介入
         if !state.spawned_this_run.load(Ordering::SeqCst)
             || state.restarting.load(Ordering::SeqCst)
             || state.spawn_failed.load(Ordering::SeqCst)
+            || state.ready_once.load(Ordering::SeqCst)
         {
             continue;
         }

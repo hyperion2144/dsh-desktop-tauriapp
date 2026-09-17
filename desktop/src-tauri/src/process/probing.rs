@@ -5,11 +5,29 @@
 //! 实现迁移自 lib.rs（票据 #49）。
 
 use std::time::Duration;
+use std::io;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+
+/// 探测连接超时（#71 实测教训：裸 connect 在 SYN 被丢时会挂满系统级 ~75s，
+/// 把「3 次失败 ≈15s」的判异常节奏拉长到分钟级）。2s 足够覆盖本地/局域网 RTT。
+const PROBE_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 带超时的探测连接：兼容 IP:port 与域名:port（后者走系统解析取首个地址）。
+fn connect_probe(addr: &str) -> io::Result<TcpStream> {
+    let sock_addr: SocketAddr = match addr.parse() {
+        Ok(a) => a,
+        Err(_) => addr
+            .to_socket_addrs()?
+            .next()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "解析结果为空"))?,
+    };
+    TcpStream::connect_timeout(&sock_addr, PROBE_CONNECT_TIMEOUT)
+}
 
 /// 裸 HTTP GET 探测：返回状态码 < 400 即 true。
 pub(crate) fn probe_http(host_port: &str, path: &str) -> std::io::Result<bool> {
     use std::io::{Read, Write};
-    let mut stream = std::net::TcpStream::connect(host_port)?;
+    let mut stream = connect_probe(host_port)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let req = format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
@@ -29,7 +47,7 @@ pub(crate) fn probe_http(host_port: &str, path: &str) -> std::io::Result<bool> {
 /// HTTP 探测只作日志细节，绝不作为判死依据。
 pub(crate) fn probe_local(port: u16) -> (bool, String) {
     let addr = format!("127.0.0.1:{port}");
-    if !matches!(std::net::TcpStream::connect(&addr), Ok(_)) {
+    if connect_probe(&addr).is_err() {
         return (false, format!("{addr} 连接失败"));
     }
     let detail = match probe_http(&addr, "/") {
@@ -43,7 +61,7 @@ pub(crate) fn probe_local(port: u16) -> (bool, String) {
 /// 远程 dsh 探测：入参可为完整 URL（新版）或 host:port（旧格式）。与本地同语义。
 pub(crate) fn probe_remote(addr: &str) -> (bool, String) {
     let host_port = crate::network::remote::remote_host_port(addr);
-    if !matches!(std::net::TcpStream::connect(&host_port), Ok(_)) {
+    if connect_probe(&host_port).is_err() {
         return (false, format!("{host_port} 连接失败"));
     }
     let detail = match probe_http(&host_port, "/") {
