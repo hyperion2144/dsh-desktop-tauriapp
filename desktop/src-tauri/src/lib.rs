@@ -62,7 +62,6 @@ use navigation::wait_ready_and_navigate;
 use settings::{load_desktop_settings, configured_port, app_port, dsh_home};
 use process::plugin::{desktop_plugin_patch_path, materialize_desktop_plugin, strip_web_profile_plugin_bundle};
 use process::probing::{probe_local, probe_remote};
-use process::watchdog::{decide_stuck, StuckDecision, STUCK_WINDOW};
 use platform::{open_external, open_external_impl};
 use commands::{
     toggle_zoom, get_mode_prompt_needed, get_desktop_client_environment,
@@ -339,31 +338,25 @@ pub fn run() {
             // 启动保险丝监控（#58）：dsh 子进程退出且非 0 → 隔离坏插件 → 自动重试。
             // 常驻任务，重启/重试后的新实例也在它的视野内。
             process::quarantine::monitor::start(app.handle());
-            // - 健康 = TCP 连接成功（监听 socket 高负载也接受连接；HTTP 状态仅作日志）；
-            // - 连续 3 次连接失败（≈15s）才算一次异常事件，且两次自动重启间隔 ≥60s；
-            // - 复用外部实例/远程：只提示、绝不代拉自动重启（不误杀用户自管实例）；
-            // - 自愈每轮 3 次封顶；自愈计数仅在「持续健康 ≥2 分钟」后重置（防抖动无限循环）；
-            // - 状态从非正常回 READY 时无额外动作。
-            // - 启动窗口有上限（#71）：子进程存活但端口不可达 ≥3 分钟 = 卡死，走完整重启并记日志；
+            // - 健康 = TCP 连接成功；运行中（已进入 Web GUI）连不上一次 = 服务异常，
+            //   立即分流：远程/外部实例只提示，本地拉起马上走完整重启（#71，无等待闸门）；
+            // - 自愈每轮 3 次封顶，连续健康 ≥2 分钟才重置计数（防无限重启循环）；
+            // - 守护器只管运行中：启动/重启期（ready_once=false）归导航流程与保险丝，
+            //   重启流程 spawn 成功即复位 ready_once，从机制上杜绝二次重启；
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_secs(5));
-                    let mut fail_streak = 0u32;
                     let mut healthy_streak = 0u32;
                     let mut epoch_failures = 0u32;
-                    let mut last_auto = Instant::now() - Duration::from_secs(60);
                     let mut last_notify = Instant::now() - Duration::from_secs(300);
-                    // 本次失联起点（#71）：与 fail_streak 分开记——下方 60s 闸门会重置 fail_streak，
-                    // 卡死计时不能跟着归零，否则窗口上限永远到不了。
-                    let mut unreachable_since: Option<Instant> = None;
-                    let mut last_skip_log = Instant::now() - Duration::from_secs(60);
                     loop {
                         interval.tick().await;
                         let state = handle.state::<DshState>();
                         if state.quitting.load(Ordering::SeqCst) {
                             break;
                         }
+                        // 只管「运行中」：未就绪（启动期）/重启中/已判失败时让位
                         if !state.ready_once.load(Ordering::SeqCst)
                             || state.restarting.load(Ordering::SeqCst)
                             || state.spawn_failed.load(Ordering::SeqCst)
@@ -377,10 +370,8 @@ pub fn run() {
                         };
                         let cur = state.status.load(Ordering::SeqCst);
                         if up {
-                            fail_streak = 0;
-                            unreachable_since = None;
                             healthy_streak += 1;
-                            // 持续健康 ≥2 分钟（24 tick）才重置自愈计数：防「短暂健康→又失败」的抖动循环
+                            // 持续健康 ≥2 分钟（24 tick）才重置自愈计数：防抖动无限循环
                             if healthy_streak >= 24 {
                                 epoch_failures = 0;
                             }
@@ -390,25 +381,7 @@ pub fn run() {
                             continue;
                         }
                         healthy_streak = 0;
-                        if unreachable_since.is_none() {
-                            unreachable_since = Some(Instant::now());
-                        }
-                        fail_streak += 1;
-                        if fail_streak < 3 {
-                            if cur != STATUS_RESTARTING {
-                                set_status(
-                                    &handle,
-                                    if settings.remote_addr.is_some() { STATUS_REMOTE } else { STATUS_STALE },
-                                    "服务异常（持续探测中）",
-                                );
-                            }
-                            continue;
-                        }
-                        if Instant::now() - last_auto < Duration::from_secs(60) {
-                            continue;
-                        }
-                        last_auto = Instant::now();
-                        fail_streak = 0;
+                        // 运行中连不上 = 服务异常（#71：单次判定，不等计数、不设闸门）
                         if settings.remote_addr.is_some() {
                             set_status(&handle, STATUS_REMOTE, "远程不可达");
                             if Instant::now() - last_notify >= Duration::from_secs(300) {
@@ -427,55 +400,7 @@ pub fn run() {
                             }
                             continue;
                         }
-                        // 自家子进程还存活 = 启动窗口内（端口未就绪属正常），不自愈——
-                        // 否则托盘/切模式重启后会在启动窗口内触发第二次重启。
-                        // 但窗口有上限（#71）：存活而端口持续不可达超限 = 卡死
-                        // （外层进程活着、里层服务已死），落入下方完整重启分支，
-                        // 不再永久静默跳过。进程已死仍由 fuse（exit≠0）与下方分支接管。
-                        {
-                            let mut child = state.child.lock().unwrap();
-                            let alive = child
-                                .as_mut()
-                                .and_then(|c| c.try_wait().ok())
-                                .map(|s| s.is_none())
-                                .unwrap_or(false);
-                            if alive {
-                                let stuck_for = unreachable_since
-                                    .map(|t| t.elapsed())
-                                    .unwrap_or_default();
-                                if decide_stuck(stuck_for, STUCK_WINDOW)
-                                    == StuckDecision::StartingWindow
-                                {
-                                    if cur != STATUS_RESTARTING {
-                                        set_status(
-                                            &handle,
-                                            STATUS_STALE,
-                                            &format!(
-                                                "启动中（等待端口就绪，已 {}s / 上限 {}s）",
-                                                stuck_for.as_secs(),
-                                                STUCK_WINDOW.as_secs()
-                                            ),
-                                        );
-                                    }
-                                    // 限频 WARN：每分钟一条，保留可观测性又不刷爆日志。
-                                    if last_skip_log.elapsed() >= Duration::from_secs(60) {
-                                        last_skip_log = Instant::now();
-                                        log::warn!(
-                                            "[watchdog] 端口不可达已 {}s，子进程存活，视为启动窗口（上限 {}s）",
-                                            stuck_for.as_secs(),
-                                            STUCK_WINDOW.as_secs()
-                                        );
-                                    }
-                                    continue;
-                                }
-                                log::error!(
-                                    "[watchdog] 子进程存活但端口已不可达 {}s（≥上限 {}s），判定卡死，走完整重启",
-                                    stuck_for.as_secs(),
-                                    STUCK_WINDOW.as_secs()
-                                );
-                                // 不 continue：落入下方 epoch 计数 + 完整重启。
-                            }
-                        }
+                        // 本地拉起的实例：立即进入完整重启流程
                         epoch_failures += 1;
                         if epoch_failures >= 3 {
                             log::error!("[watchdog] 连续自动恢复失败 3 次，停止自愈");
@@ -483,12 +408,9 @@ pub fn run() {
                             show_notification(&handle, "dsh 服务异常", "连续自动恢复失败，请手动重启");
                             continue;
                         }
-                        log::warn!("[watchdog] 检测到 dsh 异常（{verbose}），自动重启（第 {epoch_failures} 次）");
-                        show_notification(&handle, "dsh 服务异常", &format!("检测到服务异常，正在自动重启（第 {epoch_failures} 次）"));
+                        log::warn!("[watchdog] dsh 不可达（{verbose}），自动重启（第 {epoch_failures} 次）");
+                        show_notification(&handle, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
                         restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst));
-                        // 新实例获得全新启动窗口（#71）：不可达计时清零，
-                        // 否则慢启动会被旧计时立即再判卡死，3 次封顶被空烧。
-                        unreachable_since = None;
                     }
                 });
             }
