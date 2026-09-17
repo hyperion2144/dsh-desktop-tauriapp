@@ -62,6 +62,7 @@ use navigation::wait_ready_and_navigate;
 use settings::{load_desktop_settings, configured_port, app_port, dsh_home};
 use process::plugin::{desktop_plugin_patch_path, materialize_desktop_plugin, strip_web_profile_plugin_bundle};
 use process::probing::{probe_local, probe_remote};
+use process::watchdog::{decide_stuck, StuckDecision, STUCK_WINDOW};
 use platform::{open_external, open_external_impl};
 use commands::{
     toggle_zoom, get_mode_prompt_needed, get_desktop_client_environment,
@@ -343,6 +344,7 @@ pub fn run() {
             // - 复用外部实例/远程：只提示、绝不代拉自动重启（不误杀用户自管实例）；
             // - 自愈每轮 3 次封顶；自愈计数仅在「持续健康 ≥2 分钟」后重置（防抖动无限循环）；
             // - 状态从非正常回 READY 时无额外动作。
+            // - 启动窗口有上限（#71）：子进程存活但端口不可达 ≥3 分钟 = 卡死，走完整重启并记日志；
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -352,6 +354,10 @@ pub fn run() {
                     let mut epoch_failures = 0u32;
                     let mut last_auto = Instant::now() - Duration::from_secs(60);
                     let mut last_notify = Instant::now() - Duration::from_secs(300);
+                    // 本次失联起点（#71）：与 fail_streak 分开记——下方 60s 闸门会重置 fail_streak，
+                    // 卡死计时不能跟着归零，否则窗口上限永远到不了。
+                    let mut unreachable_since: Option<Instant> = None;
+                    let mut last_skip_log = Instant::now() - Duration::from_secs(60);
                     loop {
                         interval.tick().await;
                         let state = handle.state::<DshState>();
@@ -372,6 +378,7 @@ pub fn run() {
                         let cur = state.status.load(Ordering::SeqCst);
                         if up {
                             fail_streak = 0;
+                            unreachable_since = None;
                             healthy_streak += 1;
                             // 持续健康 ≥2 分钟（24 tick）才重置自愈计数：防「短暂健康→又失败」的抖动循环
                             if healthy_streak >= 24 {
@@ -383,6 +390,9 @@ pub fn run() {
                             continue;
                         }
                         healthy_streak = 0;
+                        if unreachable_since.is_none() {
+                            unreachable_since = Some(Instant::now());
+                        }
                         fail_streak += 1;
                         if fail_streak < 3 {
                             if cur != STATUS_RESTARTING {
@@ -417,9 +427,11 @@ pub fn run() {
                             }
                             continue;
                         }
-                        // 自家子进程还活着 = 正在启动（端口未就绪属正常启动窗口），
-                        // 不自愈——否则托盘/切模式重启后会在启动窗口内触发第二次重启。
-                        // 进程已死的场景由 fuse 监控（exit≠0）与下方自愈分支分别接管。
+                        // 自家子进程还存活 = 启动窗口内（端口未就绪属正常），不自愈——
+                        // 否则托盘/切模式重启后会在启动窗口内触发第二次重启。
+                        // 但窗口有上限（#71）：存活而端口持续不可达超限 = 卡死
+                        // （外层进程活着、里层服务已死），落入下方完整重启分支，
+                        // 不再永久静默跳过。进程已死仍由 fuse（exit≠0）与下方分支接管。
                         {
                             let mut child = state.child.lock().unwrap();
                             let alive = child
@@ -428,10 +440,40 @@ pub fn run() {
                                 .map(|s| s.is_none())
                                 .unwrap_or(false);
                             if alive {
-                                if cur != STATUS_RESTARTING {
-                                    set_status(&handle, STATUS_STALE, "启动中（等待端口就绪）");
+                                let stuck_for = unreachable_since
+                                    .map(|t| t.elapsed())
+                                    .unwrap_or_default();
+                                if decide_stuck(stuck_for, STUCK_WINDOW)
+                                    == StuckDecision::StartingWindow
+                                {
+                                    if cur != STATUS_RESTARTING {
+                                        set_status(
+                                            &handle,
+                                            STATUS_STALE,
+                                            &format!(
+                                                "启动中（等待端口就绪，已 {}s / 上限 {}s）",
+                                                stuck_for.as_secs(),
+                                                STUCK_WINDOW.as_secs()
+                                            ),
+                                        );
+                                    }
+                                    // 限频 WARN：每分钟一条，保留可观测性又不刷爆日志。
+                                    if last_skip_log.elapsed() >= Duration::from_secs(60) {
+                                        last_skip_log = Instant::now();
+                                        log::warn!(
+                                            "[watchdog] 端口不可达已 {}s，子进程存活，视为启动窗口（上限 {}s）",
+                                            stuck_for.as_secs(),
+                                            STUCK_WINDOW.as_secs()
+                                        );
+                                    }
+                                    continue;
                                 }
-                                continue;
+                                log::error!(
+                                    "[watchdog] 子进程存活但端口已不可达 {}s（≥上限 {}s），判定卡死，走完整重启",
+                                    stuck_for.as_secs(),
+                                    STUCK_WINDOW.as_secs()
+                                );
+                                // 不 continue：落入下方 epoch 计数 + 完整重启。
                             }
                         }
                         epoch_failures += 1;
@@ -443,6 +485,9 @@ pub fn run() {
                         }
                         log::warn!("[watchdog] 检测到 dsh 异常（{verbose}），自动重启（第 {epoch_failures} 次）");
                         restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst));
+                        // 新实例获得全新启动窗口（#71）：不可达计时清零，
+                        // 否则慢启动会被旧计时立即再判卡死，3 次封顶被空烧。
+                        unreachable_since = None;
                     }
                 });
             }

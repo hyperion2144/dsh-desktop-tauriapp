@@ -3,3 +3,4 @@ pub mod lifecycle;
 pub mod probing;
 pub mod plugin;
 pub mod quarantine;
+pub mod watchdog;
