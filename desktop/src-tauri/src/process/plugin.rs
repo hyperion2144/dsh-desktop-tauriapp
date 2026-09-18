@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use tauri::Manager;
 use crate::dsh_home;
+use crate::settings::configured_profile;
 /// 定位本应用自带的桌面 chrome 插件包（dsh-desktop-tauriapp）。
 /// 优先级：
 /// 1. `DSH_DESKTOP_PLUGIN` 环境变量（目录）
@@ -99,8 +100,8 @@ pub(crate) fn mobile_package_dir(app: &tauri::AppHandle, name: &str, rel: &str) 
     None
 }
 
-/// 把插件包挂进共享模块池 $DSH_HOME/profiles/node_modules，使 `name: <pkg>`
-/// 从任意 profile 可解析（macOS/Linux 用符号链接，Windows 退化为复制整包）。幂等。
+/// 把插件包挂进 profile 专属模块池 $DSH_HOME/profiles/<profile>/node_modules，使 `name: <pkg>`
+/// 从该 profile 可解析（macOS/Linux 用符号链接，Windows 退化为复制整包）。幂等。
 /// scoped 包名（如 @dsh-external/dsh-mobile-nav）会自动补建 scope 父目录；
 /// pool 目录本身不存在时也会一并创建，函数自足不依赖调用方预建。
 pub(crate) fn materialize_pool_package(pool: &std::path::Path, link_name: &str, dir: &std::path::Path) {
@@ -144,11 +145,15 @@ pub(crate) fn materialize_pool_package(pool: &std::path::Path, link_name: &str, 
     }
 }
 
-/// 把三个内置插件包挂进共享模块池：桌面插件 + 手机访问（dsh-mobile-access）+ 移动布局
+/// 把三个内置插件包挂进选中 profile 的模块池：桌面插件 + 手机访问（dsh-mobile-access）+ 移动布局
 /// （移动布局：上游 v2.3.0 起包名 dsh-web-mobile）。幂等。
 pub(crate) fn materialize_desktop_plugin(app: &tauri::AppHandle) {
-    let pool = dsh_home().join("profiles").join("node_modules");
+    let profile = configured_profile();
+    let pool = dsh_home().join("profiles").join(&profile).join("node_modules");
     let _ = std::fs::create_dir_all(&pool);
+    // 迁移清理：旧版本把插件挂到共享池 profiles/node_modules，
+    // 现改为 profile 专属池。删除旧位置残留，避免歧义。
+    cleanup_legacy_shared_pool();
     if let Some(dir) = desktop_plugin_dir(app) {
         materialize_pool_package(&pool, "dsh-desktop-tauriapp", &dir);
     } else {
@@ -161,12 +166,28 @@ pub(crate) fn materialize_desktop_plugin(app: &tauri::AppHandle) {
     }
     // link_name 与上游 cordis.patch.yml 的 name 一致（v2.3.0 起为无 scope 的
     // dsh-web-mobile）：dsh 从 profile 解析 'name: dsh-web-mobile' 时按这个 key
-    // 在共享模块池 node_modules 里查找，链路必须同 key。
+    // 在 profile 专属 node_modules 里查找，链路必须同 key。
     // 内嵌目录名同步改用 dsh-web-mobile；子模块 checkout 路径仍为 mobile/dsh-mobile-nav。
     if let Some(dir) = mobile_package_dir(app, "dsh-web-mobile", "dsh-mobile-nav") {
         materialize_pool_package(&pool, "dsh-web-mobile", &dir);
     } else {
         log::warn!("未定位到 dsh-web-mobile 插件包，跳过共享模块池挂载");
+    }
+}
+
+/// 清理旧共享池 $DSH_HOME/profiles/node_modules 中本应用注入的三个包残留。
+/// 迁移到 profile 专属池后，旧位置副本不再需要且可能引起解析歧义。
+fn cleanup_legacy_shared_pool() {
+    let legacy = dsh_home().join("profiles").join("node_modules");
+    for name in ["dsh-desktop-tauriapp", "dsh-mobile-access", "dsh-web-mobile"] {
+        let p = legacy.join(name);
+        if p.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&p) {
+                log::warn!("清理旧共享池残留 {} 失败：{e}", p.display());
+            } else {
+                log::info!("已清理旧共享池残留 {}", p.display());
+            }
+        }
     }
 }
 

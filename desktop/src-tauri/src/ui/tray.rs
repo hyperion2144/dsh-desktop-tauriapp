@@ -4,6 +4,7 @@
 //! 迁移自 lib.rs 功能区域（tray）。
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -131,6 +132,7 @@ pub fn navigate_to_loading(app: &AppHandle) {
         .lock()
         .unwrap()
         .clone()
+        .filter(|u| u != "about:blank")
         .unwrap_or_else(|| {
             #[cfg(target_os = "windows")]
             {
@@ -141,12 +143,17 @@ pub fn navigate_to_loading(app: &AppHandle) {
                 "tauri://localhost/index.html".to_string()
             }
         });
+    log::info!("[restart] navigate_to_loading: url = {url}");
     if let Ok(u) = url.parse::<tauri::Url>() {
         if let Err(e) = w.navigate(u) {
-            log::warn!("导航回加载页失败：{e}");
+            log::warn!("[restart] 导航回加载页失败：{e}");
+        } else {
+            log::info!("[restart] navigate 成功");
         }
     } else if let Err(e) = w.eval(&format!("window.location.replace({url:?});")) {
-        log::warn!("导航回加载页失败：{e}");
+        log::warn!("[restart] 导航回加载页失败：{e}");
+    } else {
+        log::info!("[restart] eval navigate 成功");
     }
 }
 
@@ -161,17 +168,21 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
     }
     let mode_name = if target_mode == MODE_ADVANCED { "高级" } else { "兼容" };
     log::info!("[restart] 进入{mode_name}模式：回到加载页并重启 dsh 服务");
+    log::logger().flush();
     set_status(app, STATUS_RESTARTING, &format!("重启中（{mode_name}）"));
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        // 0) 回到启动加载页（像重启一样）
+        // 0) 立即回到启动加载页，然后 kill 旧实例、拉起新实例
         navigate_to_loading(&handle);
+        log::logger().flush();
+
         let port = app_port();
         // 1) 停掉占用端口的现有 dsh（含自家子进程与外部实例，纯代码）
         if let Some(mut child) = handle.state::<DshState>().child.lock().unwrap().take() {
             let pid = child.id();
             log::info!("[restart] 停止自管 dsh 子进程（PID {pid}）");
             let _ = child.kill();
+            log::logger().flush();
             let _ = child.wait();
             log::info!("[restart] 旧 dsh 已退出");
         }
@@ -196,6 +207,7 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         let advanced = target_mode == MODE_ADVANCED;
         match spawn_dsh(&handle, port, advanced) {
             Ok(child) => {
+                log::logger().flush();
                 log::info!("[restart] 新 dsh 子进程已启动（PID {}）", child.id());
                 *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                 handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
@@ -218,14 +230,22 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         handle.state::<DshState>().spawn_failed.store(false, Ordering::SeqCst);
         let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
         let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
-        // 不能 .await：dsh 起不来时 wait_ready_and_navigate 内部循环不返回，
-        // restarting 永远 true → 监控任务永远跳过 + 托盘再点重启被 swap 拦截（死锁）。
-        // spawn 让 restarting 立即复位，子进程失败由监控任务检测→隔离→重试。
+        // .await 保持 restarting=true 直到导航完成，watchdog 见此标志跳过不干扰。
+        // 加 60s 超时防死锁：dsh 起不来时不会永远卡住。
         let nav_handle = handle.clone();
-        tauri::async_runtime::spawn(async move {
-            wait_ready_and_navigate(nav_handle, port, nport, ntoken).await;
-        });
+        log::info!("[restart] 开始等待 dsh 就绪并导航...");
+        log::logger().flush();
+        let nav_result = tokio::time::timeout(
+            Duration::from_secs(60),
+            wait_ready_and_navigate(nav_handle, port, nport, ntoken),
+        ).await;
+        if nav_result.is_err() {
+            log::warn!("[restart] 等待 dsh 就绪 60s 超时，restarting 复位，交由 watchdog 接管");
+        } else {
+            log::info!("[restart] wait_ready_and_navigate 已返回");
+        }
         handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
+        log::logger().flush();
         // 4) 刷新托盘「切换模式」标签
         refresh_tray_mode(&handle);
         log::info!("[restart] {mode_name}模式启动完成");

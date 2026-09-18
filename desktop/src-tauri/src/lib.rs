@@ -125,6 +125,8 @@ pub fn run() {
                     }),
                 ])
                 .level(log::LevelFilter::Info)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
+                .max_file_size(10_000_000)
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
@@ -256,7 +258,10 @@ pub fn run() {
             // 记录内嵌加载页 URL（重启/切换模式时回到该页，像重启应用一样）
             if let Some(w) = app.get_webview_window("main") {
                 if let Ok(u) = w.url() {
-                    *state.loading_url.lock().unwrap() = Some(u.to_string());
+                    // about:blank 是 webview 导航前的初始状态，不是加载页 URL
+                    if u.as_str() != "about:blank" {
+                        *state.loading_url.lock().unwrap() = Some(u.to_string());
+                    }
                 }
             }
             // 申请系统通知权限（macOS 弹授权窗；Windows/Linux 幂等确认）。

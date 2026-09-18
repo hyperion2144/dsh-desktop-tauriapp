@@ -4,20 +4,24 @@ use tauri::{AppHandle, Manager};
 
 use crate::network::notify::show_notification;
 
-/// 主窗口跳转到本地错误页并发系统通知。
+/// 在当前启动页上注入错误提示（红色横幅 + 状态文本变色），保留 dsh 控制台输出不动。
+/// 不导航到 error.html——桌面壳只有启动页和 dsh Web GUI 两个页面。
 pub(crate) fn show_error(app: &AppHandle, reason: &str) {
-    if let Some(w) = app.get_webview_window("main") {
-        let target = format!("error.html?reason={reason}");
-        let _ = w.eval(&format!("window.location.replace({target:?});"));
-    }
-    let body = match reason {
-        "not-found" => "未找到 dsh 命令，请按错误页提示安装。",
-        "spawn-failed" => "dsh 进程启动失败，详见日志。",
-        "boot-failed" => "dsh 启动反复失败（插件不兼容或环境异常），已按保险丝策略处理，详见日志。",
-        "timeout" => "等待本地服务就绪超时，详见日志。",
-        _ => "未知错误，详见日志。",
+    let detail = match reason {
+        "not-found" => "未找到 dsh 命令。请先执行 npm i -g @deepseek-ai/dsh，或设置 DSH_BIN 环境变量。",
+        "spawn-failed" => "dsh 进程启动失败，请查看下方日志输出。",
+        "boot-failed" => "dsh 启动反复失败（插件不兼容或环境异常），已按保险丝策略处理。请查看下方日志输出。",
+        "timeout" => "等待本地服务就绪超时，请查看下方日志输出并重试。",
+        _ => "未知错误，请查看下方日志输出。",
     };
-    show_notification(app, "DeepSeek Harness Desktop 启动失败", body);
+    if let Some(w) = app.get_webview_window("main") {
+        let safe = detail.replace('\\', "\\\\").replace('\'', "\\'");
+        let js = format!(
+            "(function(){{var s=document.getElementById('status');if(s){{s.textContent='{safe}';s.style.color='#ef4444';}}if(!document.getElementById('dsh-err-banner')){{var b=document.createElement('div');b.id='dsh-err-banner';b.style.cssText='position:fixed;top:0;left:0;right:0;background:#dc2626;color:#fff;padding:12px 24px;font-size:14px;font-family:system-ui,sans-serif;z-index:99999;box-shadow:0 2px 8px rgba(0,0,0,0.3)';b.textContent='启动失败：{safe}';document.body.prepend(b);}}}})();"
+        );
+        let _ = w.eval(&js);
+    }
+    show_notification(app, "DeepSeek Harness Desktop 启动失败", detail);
 }
 
 /// 显示并聚焦主窗口。
