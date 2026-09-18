@@ -77,6 +77,8 @@ pub(crate) struct DshState {
     pub(crate) fuse_retries: AtomicU8,
     /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
     pub(crate) fuse_summary: Mutex<Option<serde_json::Value>>,
+    /// 下载管理器（#72）：任务表/调度/句柄，内部可变。
+    pub(crate) downloads: crate::download::DownloadManager,
 }
 
 /// 运行时放行的远程 dsh 主机清单（导航守卫读，托盘远程选择写）。
@@ -123,6 +125,7 @@ mod tests {
             stderr_buf: Mutex::new(None),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
+            downloads: crate::download::DownloadManager::default(),
         };
         assert!(!state.restarting.load(Ordering::SeqCst));
         assert_eq!(state.notify_port.load(Ordering::SeqCst), 0);

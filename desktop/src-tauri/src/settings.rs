@@ -48,6 +48,8 @@ pub struct DesktopSettings {
     pub ai_base_url: Option<String>,
     /// 保险丝 AI 解读：密钥的 refs 键名/环境变量名（custom 时必填；默认 DEEPSEEK_API_KEY）。
     pub ai_key_env: Option<String>,
+    /// 下载管理器：并发下载数上限（默认 3，1-32）。
+    pub download_concurrency: Option<u32>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -192,6 +194,14 @@ pub fn configured_lane_port() -> u16 {
         .unwrap_or(3091)
 }
 
+/// 下载并发上限：settings.yaml download_concurrency，默认 3，钳制在 1..=32。
+pub fn configured_download_concurrency() -> u32 {
+    load_desktop_settings()
+        .download_concurrency
+        .unwrap_or(3)
+        .clamp(1, 32)
+}
+
 /// cloudflared 可执行文件路径（settings.yaml cloudflared_bin；空=不启用公网隧道）。
 pub fn configured_cloudflared_bin() -> String {
     load_desktop_settings().cloudflared_bin.unwrap_or_default()
@@ -244,9 +254,11 @@ mod tests {
       ai_model: Some("deepseek-v4-flash".into()),
       ai_base_url: None,
       ai_key_env: None,
+      download_concurrency: Some(5),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
+    assert_eq!(back.download_concurrency, Some(5));
     assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
     assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(back.port, Some(3081));

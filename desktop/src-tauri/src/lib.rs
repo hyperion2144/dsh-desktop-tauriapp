@@ -15,6 +15,7 @@ mod settings;         // 设置读写 + dsh_home + app_port
 mod platform;         // 平台特定：open_external
 mod commands;         // Tauri command 实现
 mod profiles;         // profile 管理
+mod download;         // 下载管理器（#72）：model/persist/transfer/manager/commands
 
 // ── 运行时核心导入 ──
 use runtime::state::{
@@ -127,6 +128,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(nav_guard_plugin())
         .plugin(
             tauri_plugin_window_state::Builder::default()
@@ -176,7 +178,18 @@ pub fn run() {
             explain_failure,
             get_fuse_summary,
             get_quarantine_settings,
-            save_quarantine_settings
+            save_quarantine_settings,
+            crate::download::commands::list_downloads,
+            crate::download::commands::pause_download,
+            crate::download::commands::resume_download,
+            crate::download::commands::cancel_download,
+            crate::download::commands::clear_finished_downloads,
+            crate::download::commands::get_download_settings,
+            crate::download::commands::set_download_concurrency,
+            crate::download::commands::reveal_download,
+            crate::download::commands::start_blob_download,
+            crate::download::commands::save_blob_chunk,
+            crate::download::commands::finish_blob_download
         ])
 .manage(DshState {
             child: Mutex::new(None),
@@ -201,8 +214,43 @@ pub fn run() {
             stderr_buf: Mutex::new(None),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
+            downloads: download::DownloadManager::new(),
         })
         .setup(|app| {
+            // #72：主窗口由代码创建（不再走 tauri.conf.json 声明）以挂载下载处理器
+            // ——wry 无 handler 时 macOS WKWebView 会静默取消所有下载。
+            let dl_app = app.handle().clone();
+            let main_window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::default(),
+            )
+            .title("")
+            .inner_size(1280.0, 840.0)
+            .min_inner_size(940.0, 620.0)
+            .center()
+            .disable_drag_drop_handler()
+            .on_download(move |_w, event| match event {
+                tauri::webview::DownloadEvent::Requested { url, destination } => {
+                    let suggested = destination
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string());
+                    let scheme = url.scheme().to_ascii_lowercase();
+                    if scheme == "http" || scheme == "https" {
+                        download::manager::start_url_download(&dl_app, url.to_string(), suggested);
+                    } else {
+                        // blob:/data: 应由 client 拦截层处理；这里是漏网兜底：取消并记日志
+                        log::warn!("[downloads] 漏网的非 http(s) 下载已取消（{}）", url);
+                    }
+                    false // 原生下载一律取消（转交 Rust 下载管理器）
+                }
+                _ => true,
+            })
+            .build();
+            if let Err(e) = main_window {
+                log::error!("[main] 主窗口创建失败：{e}");
+            }
             let port = app_port();
             let state = app.state::<DshState>();
             // 记录内嵌加载页 URL（重启/切换模式时回到该页，像重启应用一样）
