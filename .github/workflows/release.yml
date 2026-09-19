@@ -15,10 +15,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # #85：平台 × 内置 dsh 变体（latest/alpha）四 job；
+          # 每个变体先跑 prepare-builtin-runtime.mjs 打包内置运行时，
+          # 再用 tauri.<variant>.conf.json overlay 区分产物名（productName 含变体名）。
           - platform: macos-latest
             target: aarch64-apple-darwin
+            variant: latest
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            variant: alpha
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
+            variant: latest
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            variant: alpha
 
     runs-on: ${{ matrix.platform }}
 
@@ -44,6 +55,9 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
         working-directory: desktop
+      - name: Prepare builtin runtime (${{ matrix.variant }})
+        shell: bash
+        run: node desktop/scripts/prepare-builtin-runtime.mjs --variant ${{ matrix.variant }}
       - name: Rust setup
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -81,8 +95,8 @@ jobs:
           emit "📝 其他修改" "^(feat|fix|perf|refactor|style|ci|docs|chore|build|test)" 1
           echo "" >> /tmp/body.md
           echo "---" >> /tmp/body.md
-          echo "- **macOS** (Apple Silicon): .app + .dmg" >> /tmp/body.md
-          echo "- **Windows** (x86_64): .msi (WiX) + -setup.exe (NSIS)" >> /tmp/body.md
+          echo "- **macOS** (Apple Silicon): .app + .dmg（内置 latest / alpha 两变体，按需下载其一）" >> /tmp/body.md
+          echo "- **Windows** (x86_64): .msi (WiX) + -setup.exe (NSIS)（内置 latest / alpha 两变体）" >> /tmp/body.md
           echo "- **Android**: app-debug.apk（手机壳，直接安装）" >> /tmp/body.md
           echo "- **iOS**: DeepSeek.ipa（未签名，AltStore 等免费签名侧载）" >> /tmp/body.md
           echo "- **鸿蒙**: 不随 CI 发布，需本地 DevEco 构建（见 mobile/harmony/README.md）" >> /tmp/body.md
@@ -99,7 +113,7 @@ jobs:
           releaseName: "DeepSeek Harness Desktop ${{ github.ref_name }}"
           releaseDraft: true
           prerelease: false
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.${{ matrix.variant }}.conf.json
       # 修复 release body 乱码：不把多行 body 经 releaseBody/${{ }} 传给 tauri-action
       #（UTF-8 多字节在表达式内嵌 + 双平台并行竞态下会损坏成 U+FFFD，见 v0.5.5/v0.6.1/v0.6.2）。
       # 构建完成后用 gh 直接覆写正确 body（幂等：两个 job 内容相同，最后写入的即正确值）。

@@ -44,11 +44,17 @@ pub(crate) fn configured_dsh_mode() -> DshMode {
     }
 }
 
-/// 内置 dsh 包 lib 目录：resources/dsh（含 package.json 即有效）。
+/// 内置 dsh 包 lib 目录：resources/dsh 是 npm 安装根（package.json + node_modules），
+/// dsh 本体在 node_modules/@deepseek-ai/dsh/lib；launcher 依赖向上查找正好落在同根。
 fn builtin_dsh_lib(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let dir = app.path().resource_dir().ok()?.join("dsh");
-    if dir.join("package.json").is_file() {
-        Some(dir)
+    let root = app.path().resource_dir().ok()?.join("dsh");
+    let lib = root
+        .join("node_modules")
+        .join("@deepseek-ai")
+        .join("dsh")
+        .join("lib");
+    if lib.join("package.json").is_file() {
+        Some(lib)
     } else {
         None
     }

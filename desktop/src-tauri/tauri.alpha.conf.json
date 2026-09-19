@@ -1,0 +1,9 @@
+{
+  "productName": "DeepSeek Harness Desktop alpha",
+  "bundle": {
+    "externalBin": ["binaries/dsh-node"],
+    "resources": {
+      "resources/dsh/": "dsh/"
+    }
+  }
+}

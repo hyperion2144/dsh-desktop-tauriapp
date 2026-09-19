@@ -6,6 +6,10 @@ dist/
 
 # 构建产物
 desktop/src-tauri/embedded/
+desktop/src-tauri/resources/dsh/
+desktop/src-tauri/binaries/
+desktop/src-tauri/.builtin-stage/
+desktop/src-tauri/.builtin-stage-node/
 
 # 会话/工具临时产物（不提交）
 .scratch/
