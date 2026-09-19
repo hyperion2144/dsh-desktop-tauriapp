@@ -6,7 +6,8 @@ import { createRewriteProxy, POLYFILL, desktopEnvPatchScript } from '../lib/prox
 function startUpstream() {
   const sockets = new Set();
   const server = http.createServer((req, res) => {
-    const html = req.url === '/' ? '<html><head></head><body>hello</body></html>' : JSON.stringify({ url: req.url, host: req.headers['host'], origin: req.headers['origin'] ?? null });
+    const sfs = req.headers['sec-fetch-site'] ?? null;
+    const html = req.url === '/' ? '<html><head></head><body>hello</body></html>' : JSON.stringify({ url: req.url, host: req.headers['host'], origin: req.headers['origin'] ?? null, sfs });
     res.writeHead(200, { 'content-type': req.url === '/' ? 'text/html' : 'application/json' });
     res.end(html);
   });
@@ -226,5 +227,48 @@ test('401 重换重放 + 流式响应：重放后逐块到达、不破坏流', a
   } finally {
     proxy.server.closeAllConnections?.(); proxy.server.close();
     up.closeAllConnections?.(); up.close();
+  }
+});
+
+test('#78 回归：改写转发补齐 sec-fetch-site 同源信号（HTTP）', async () => {
+  const up = startUpstream();
+  const upPort = await listen(up.server);
+  const proxy = createRewriteProxy({ upstreamHost: '127.0.0.1', upstreamPort: upPort, inject: [] });
+  const lp = await listen(proxy.server);
+  try {
+    // 手机老内核场景：不发 Sec-Fetch-* 头、同源 GET 也不带 Origin → lane 补 same-origin
+    const bare = JSON.parse((await getRaw('http://127.0.0.1:' + lp + '/status', { Host: '5.tcp.cpolar.top:12710' })).body);
+    assert.equal(bare.sfs, 'same-origin');
+    // 显式值不覆盖：真正跨站请求仍由上游守卫拒绝（不引入新开放面）
+    const explicit = JSON.parse((await getRaw('http://127.0.0.1:' + lp + '/status', { Host: 'ext.cpolar.cn', 'sec-fetch-site': 'cross-site' })).body);
+    assert.equal(explicit.sfs, 'cross-site');
+  } finally { proxy.server.closeAllConnections?.(); proxy.server.close(); up.closeAll(); }
+});
+
+test('#78 回归：WS upgrade 请求同样补齐 sec-fetch-site（mux 握手路径）', async () => {
+  // 上游捕获 upgrade 请求的 sec-fetch-site，写入首帧回给客户端
+  let captured = null;
+  const upstream = http.createServer((_q, r) => { r.end(); });
+  upstream.on('upgrade', (req, sock) => {
+    captured = req.headers['sec-fetch-site'] ?? null;
+    sock.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: test\r\n\r\n');
+    sock.end(Buffer.from([0x81, 0x01, 0x6f])); // 合法 text 帧 'o' 作首帧信号
+  });
+  await new Promise((r) => upstream.listen(0, '127.0.0.1', r));
+  const proxy = createRewriteProxy({ upstreamHost: '127.0.0.1', upstreamPort: upstream.address().port, inject: [] });
+  const lp = await listen(proxy.server);
+  try {
+    const req = http.request('http://127.0.0.1:' + lp + '/api/remote.mux', {
+      headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'AQIDBAUGBwgJCgsMDQ4P' },
+    });
+    await new Promise((resolve, reject) => {
+      req.on('upgrade', (_r, sock, head) => { sock.on('error', () => {}); const finish = () => { sock.destroy(); resolve(); }; if (head?.length) finish(); else sock.once('data', finish); });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(captured, 'same-origin');
+  } finally {
+    proxy.server.closeAllConnections?.(); proxy.server.close();
+    upstream.closeAllConnections?.(); upstream.close();
   }
 });
