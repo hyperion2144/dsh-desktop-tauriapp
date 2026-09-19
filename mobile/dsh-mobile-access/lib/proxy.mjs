@@ -56,16 +56,22 @@ export function desktopEnvPatchScript(platform) {
 
 const INJECT_MARK = 'data-dsh-mobile-polyfill';
 
-/** 把浏览器可见的权威改写成 loopback 权威（Host 和 Origin 都改）。 */
+/**
+ * 把浏览器可见的权威改写成 loopback 权威（Host 和 Origin 都改）。
+ * dsh 0.1.6+ 的 API 守卫（核心 isTrustedApiRequest 与 task-board/beauticode 等
+ * 插件守卫）要求「浏览器同源信号」：sec-fetch-site: same-origin 头，或
+ * Origin == Host。手机老内核 WebView 不发 Sec-Fetch-* 头、同源 GET 也不带
+ * Origin（#78），lane 作为受信反代在此补齐：无值注入 same-origin，已有值
+ * 保留（显式 cross-site 不覆盖——真正跨站请求仍由上游守卫拒绝，不引入新开放面）。
+ */
 function loopbackAuthority(headers, upstreamHost, upstreamPort) {
   const authority = `${upstreamHost}:${upstreamPort}`;
   headers.Host = authority;
   if (headers.origin) headers.origin = `http://${authority}`;
   if (headers.Origin) headers.Origin = `http://${authority}`;
+  if (headers['sec-fetch-site'] === undefined) headers['sec-fetch-site'] = 'same-origin';
   return headers;
 }
-
-/** 上游响应是否压缩过（压缩流不能做文本注入，会损坏页面）。 */
 function isCompressed(headers) {
   return /(^|,\s*)(gzip|br|deflate)(\s*,|$)/i.test(String(headers['content-encoding'] ?? ''));
 }
