@@ -11,5 +11,5 @@
 ## Consequences
 
 - 安装包体积预计 +80~150MB（Node + dsh 依赖树）；mac 签名公证与 Windows Defender 误报需在 CI 处理。
-- 多开可行性（#82 研究结论）：上游无全局单实例锁（task-board ledger 锁是进程内的，AGENTS.md 原记载不准确），同 HOME 双 profile 双端口实测可并启；真正约束是 $DSH_HOME 单根共享文件（settings.yaml/.credentials.yaml 文件锁、sessions/、storages/pairing.json、quarantine.json）互相污染——同 HOME 同 profile 双实例绝对禁止；隔离方案（每 profile 独立 DSH_HOME vs 同 HOME + settings 按 profile 路由）见 map #80 决策票。
+- 多开隔离已拍板（#93）：方案 B——直接用默认 DSH_HOME，不做独立 HOME/派发；多窗口 = 同 HOME 多 profile 实例不同端口，数据共享是设计本意；唯一主动解决项是 lane 反代目标跟随焦点窗口（#94）；硬约束：同 HOME 同 profile 双实例绝对禁止、quarantine 按 profile 分桶；方案 A（含壳设置搬迁前置）留 map 雾区。
 - 存量用户升级后 dsh 版本可能从外部版跳到内置版，插件兼容问题由 #53 启动保险丝兜底。
