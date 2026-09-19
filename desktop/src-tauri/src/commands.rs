@@ -16,7 +16,7 @@ use crate::network::remote::{normalize_remote_url, extract_token_from_url};
 use crate::process::plugin::desktop_platform_tag;
 use crate::settings::dsh_home;
 use crate::runtime::error::SpawnError;
-use crate::settings::app_port;
+use crate::settings::port_for_profile;
 use crate::ui::window::{show_error, current_monitor_for_window};
 use crate::process::lifecycle::stop_port_owner;
 use crate::navigation::wait_ready_and_navigate;
@@ -361,7 +361,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
             state.mode.store(MODE_COMPAT, Ordering::SeqCst);
             apply_titlebar(&app, false);
             refresh_tray_mode(&app);
-            let port = app_port();
+            let port = port_for_profile(&configured_profile());
             let nport = state.notify_port.load(Ordering::SeqCst);
             let ntoken = state.notify_token.lock().unwrap().clone();
             let handle = app.clone();
@@ -397,7 +397,8 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
             log::info!("[mode] 用户选择高级模式：停用外部实例并以桌面 overlay 实例重启");
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                let port = app_port();
+                let profile = configured_profile();
+                let port = port_for_profile(&profile);
                 // 1) 停用占用端口的现有 dsh（纯代码，跨平台：netstat2 查 PID + SIGTERM/SIGKILL）
                 log::info!("[mode] 停用端口 {port} 上的现有 dsh 进程");
                 let freed = stop_port_owner(port).await;
@@ -409,7 +410,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                 log::info!("[mode] 端口 {port} 已释放，用桌面 overlay 实例重启");
                 // 3) 以桌面 overlay 实例拉起（先清旧 token：新实例 token 必然不同）
                 clear_web_token(&handle);
-                match spawn_dsh(&handle, port, true) {
+                match spawn_dsh(&handle, &profile, port, true) {
                     Ok(child) => {
                         *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                         handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);

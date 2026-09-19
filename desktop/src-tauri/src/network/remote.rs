@@ -157,6 +157,11 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
         }
         let mut settings = load_desktop_settings();
         settings.port = Some(port);
+        // #86：web 端口同时写入 per-profile 覆盖表（settings.port 保留作 legacy 回退/展示）
+        settings
+            .profile_ports
+            .get_or_insert_with(Default::default)
+            .insert("web".to_string(), port);
         save_desktop_settings(&settings);
         log::info!("[tray] 本地端口 -> {port}");
         if settings.remote_addr.is_some() {

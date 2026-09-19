@@ -50,6 +50,12 @@ pub struct DesktopSettings {
     pub ai_key_env: Option<String>,
     /// 下载管理器：并发下载数上限（默认 3，1-32）。
     pub download_concurrency: Option<u32>,
+    /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
+    /// 其余 profile 首次 spawn 时按公式分配并持久化到这里，保证后续启动稳定。
+    pub profile_ports: Option<std::collections::BTreeMap<String, u16>>,
+    /// 每 profile lane（手机访问反代）端口覆盖（#86）：web 缺省 3091、desktop 缺省 3092，
+    /// 其余从 3093 起自动分配。
+    pub profile_lane_ports: Option<std::collections::BTreeMap<String, u16>>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -168,13 +174,119 @@ pub fn save_desktop_settings(settings: &DesktopSettings) {
     }
 }
 
-/// 本地 dsh 端口：DSH_DESKTOP_PORT 环境变量 > settings.yaml desktop.port > 3080。
+/// 旧全局端口（web profile 的 legacy 存储位）：DSH_DESKTOP_PORT env > settings.port > 3080。
+/// #86 起端口入口是 port_for_profile；本函数仅作 web 兼容回退与外部实例复用判定。
 pub fn configured_port() -> u16 {
     std::env::var("DSH_DESKTOP_PORT")
         .ok()
         .and_then(|v| v.parse().ok())
         .or_else(|| load_desktop_settings().port)
         .unwrap_or(3080)
+}
+
+/// 端口分配基数：web=3080（不变）、desktop=3081、其余 profile 在其名字散列落点冲突时向后探测（#86）。
+pub(crate) const PORT_BASE_OTHER: u16 = 3082;
+/// lane 端口分配基数：web=3091、desktop=3092、其余从 3093 起分配。
+pub(crate) const LANE_BASE_OTHER: u16 = 3093;
+
+/// FNV-1a 64：给 profile 名算稳定散列，跨进程为其它 profile 选出一致的端口起点。
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// profile 的默认端口公式（纯函数，不含覆盖与持久化；#86）。
+pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
+    match profile {
+        "web" => 3080,
+        "desktop" => 3081,
+        other => PORT_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
+    }
+}
+
+/// profile 的默认 lane 端口公式（纯函数；#86）。
+pub(crate) fn default_lane_port_for_profile(profile: &str) -> u16 {
+    match profile {
+        "web" => 3091,
+        "desktop" => 3092,
+        other => LANE_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
+    }
+}
+
+/// 在 [base, base+1024) 内找第一个不在 taken 里的端口（纯函数；分配冲突时向后探测）。
+pub(crate) fn assign_port_avoiding(base: u16, taken: &[u16]) -> u16 {
+    let mut candidate = base;
+    while taken.contains(&candidate) && candidate != base.wrapping_add(1023) {
+        candidate = candidate.wrapping_add(1);
+    }
+    candidate
+}
+
+/// 取 profile 的启动端口（#86）：
+/// DSH_DESKTOP_PORT env（遗留全局覆盖，供脚本/测试）> profile_ports[profile]
+/// > web 的 legacy settings.port > 默认公式（desktop=3081，其余散列落点+避让并持久化）。
+pub fn port_for_profile(profile: &str) -> u16 {
+    if let Ok(v) = std::env::var("DSH_DESKTOP_PORT") {
+        if let Ok(p) = v.parse() {
+            return p;
+        }
+    }
+    let mut settings = load_desktop_settings();
+    if let Some(p) = settings.profile_ports.as_ref().and_then(|m| m.get(profile).copied()) {
+        return p;
+    }
+    match profile {
+        "web" => settings.port.unwrap_or_else(|| default_port_for_profile(profile)),
+        _ => {
+            let taken: Vec<u16> = settings
+                .profile_ports
+                .as_ref()
+                .map(|m| m.values().copied().collect())
+                .unwrap_or_default();
+            let p = assign_port_avoiding(default_port_for_profile(profile), &taken);
+            settings
+                .profile_ports
+                .get_or_insert_with(Default::default)
+                .insert(profile.to_string(), p);
+            save_desktop_settings(&settings);
+            log::info!("[ports] profile {profile} 分配启动端口 {p}");
+            p
+        }
+    }
+}
+
+/// 取 profile 的 lane 端口（#86）：语义同 port_for_profile，基数换成 lane。
+pub fn lane_port_for_profile(profile: &str) -> u16 {
+    if let Ok(v) = std::env::var("DSH_MOBILE_LANE_PORT") {
+        if let Ok(p) = v.parse() {
+            return p;
+        }
+    }
+    let mut settings = load_desktop_settings();
+    if let Some(p) = settings.profile_lane_ports.as_ref().and_then(|m| m.get(profile).copied()) {
+        return p;
+    }
+    match profile {
+        "web" => settings.lane_port.unwrap_or_else(|| default_lane_port_for_profile(profile)),
+        _ => {
+            let taken: Vec<u16> = settings
+                .profile_lane_ports
+                .as_ref()
+                .map(|m| m.values().copied().collect())
+                .unwrap_or_default();
+            let p = assign_port_avoiding(default_lane_port_for_profile(profile), &taken);
+            settings
+                .profile_lane_ports
+                .get_or_insert_with(Default::default)
+                .insert(profile.to_string(), p);
+            save_desktop_settings(&settings);
+            p
+        }
+    }
 }
 
 /// 激活 profile（settings.yaml desktop.active_profile，非法值回退 web）。
@@ -208,12 +320,12 @@ pub fn configured_cloudflared_bin() -> String {
 }
 
 
-/// dsh 服务端口（= configured_port）。端口策略：
-/// 已有 dsh web → 复用并降级接入；空闲/高级 → 由本应用 spawn 实例并注入桌面 chrome。
-/// 注意：同一 profile 只允许一个 dsh web 实例并发（task-board 等插件持有排它锁），
-/// 因此不要用独立端口再起第二实例。
+/// 当前激活 profile 的 dsh 服务端口（= port_for_profile(configured_profile())）。
+/// 端口策略（#86 拍板）：web=3080 不变 / desktop=3081 / 其余自动分配，per-profile 可覆盖；
+/// 同一 profile 仍只允许一个实例（同 HOME 同 profile 双实例绝对禁止，#93；
+/// 旧「task-board 全局锁」说法不准确，真约束是 HOME 共享文件互污，见 #82 报告）。
 pub(crate) fn app_port() -> u16 {
-    configured_port()
+    port_for_profile(&configured_profile())
 }
 
 
@@ -255,10 +367,14 @@ mod tests {
       ai_base_url: None,
       ai_key_env: None,
       download_concurrency: Some(5),
+      profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
+      profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
     assert_eq!(back.download_concurrency, Some(5));
+    assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desktop")).copied(), Some(3081));
+    assert_eq!(back.profile_lane_ports.as_ref().and_then(|m| m.get("web")).copied(), Some(3091));
     assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
     assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(back.port, Some(3081));
@@ -288,5 +404,41 @@ mod tests {
   }
 
   // ==================== 代理设置测试 ====================
+  // ==================== 每 profile 端口模型（#86）测试 ====================
+
+  #[test]
+  fn default_port_formula_fixed_profiles() {
+    assert_eq!(default_port_for_profile("web"), 3080);
+    assert_eq!(default_port_for_profile("desktop"), 3081);
+    // 其余 profile 落在 [3082, 3594)，不与固定端口重叠
+    for name in ["research", "work-2", "x"] {
+      let p = default_port_for_profile(name);
+      assert!((PORT_BASE_OTHER..PORT_BASE_OTHER + 512).contains(&p), "{name} -> {p}");
+    }
+  }
+
+  #[test]
+  fn default_lane_formula_fixed_profiles() {
+    assert_eq!(default_lane_port_for_profile("web"), 3091);
+    assert_eq!(default_lane_port_for_profile("desktop"), 3092);
+    let p = default_lane_port_for_profile("research");
+    assert!((LANE_BASE_OTHER..LANE_BASE_OTHER + 512).contains(&p));
+  }
+
+  #[test]
+  fn assign_port_avoiding_skips_taken() {
+    assert_eq!(assign_port_avoiding(3082, &[]), 3082);
+    assert_eq!(assign_port_avoiding(3082, &[3082]), 3083);
+    assert_eq!(assign_port_avoiding(3100, &[3100, 3101, 3102]), 3103);
+  }
+
+  #[test]
+  fn port_hash_is_deterministic() {
+    // 同名 profile 两次计算必须同值（跨进程稳定，否则重启后端口漂移）
+    assert_eq!(default_port_for_profile("abc"), default_port_for_profile("abc"));
+    assert_eq!(default_port_for_profile("abc"), default_port_for_profile("abc"));
+    // 不同名不要求不同值（冲突由 assign_port_avoiding 兜住）
+
+  }
 
 }

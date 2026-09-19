@@ -16,7 +16,7 @@ use crate::network::web_token::clear_web_token;
 use crate::runtime::state::{
     DshState, MODE_ADVANCED, STATUS_STARTING, set_status,
 };
-use crate::settings::{configured_port, configured_profile, dsh_home, load_desktop_settings};
+use crate::settings::{configured_profile, dsh_home, load_desktop_settings, port_for_profile};
 use crate::ui::window::show_error;
 use crate::ui::tray::navigate_to_loading;
 use crate::navigation::wait_ready_and_navigate;
@@ -53,20 +53,15 @@ async fn monitor(app: AppHandle) {
         let Some(status) = status else { continue };
         // 子进程已退出。成功退出（0）但仍在托管期 = 异常死亡（无报错上下文）；
         // 非 0 = 启动失败，走隔离。
-        let stderr = state
-            .stderr_buf
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|b| b.lock().unwrap().snapshot())
-            .unwrap_or_default();
+        // #86：stderr 缓冲按 profile 分桶，退出检测取对应实例的快照
+        let profile = configured_profile();
+        let stderr = state.stderr_snapshot_for(&profile);
         drop(state);
         if status.success() {
             log::warn!("[fuse] dsh 子进程意外退出（exit 0），无失败上下文可隔离");
             fail_closed(&app, "dsh 进程意外退出（exit 0），请查看日志");
             continue;
         }
-        let profile = configured_profile();
         let settings = load_desktop_settings();
         let inject = desktop_plugin_patch_path(&app);
         let outcome = quarantine::run_cycle(&dsh_home(), &profile, Some(&inject), &stderr, &settings);
@@ -111,8 +106,7 @@ async fn monitor(app: AppHandle) {
                 "插件保险丝 · 已自动禁用不兼容插件",
                 &format!("{note}"),
             );
-            respawn(&app, configured_port(), note).await;
-            continue;
+            respawn(&app, &profile, note).await;
         }
         // 无可隔离 / 重试预算用尽 → 停在错误页
         let reason = if outcome.patch_parse {
@@ -139,11 +133,10 @@ fn fail_closed(app: &AppHandle, reason: &str) {
 }
 
 /// 隔离后重试：确保端口释放 → 清 token → 重新 spawn → 重新进入就绪导航。
-async fn respawn(app: &AppHandle, port: u16, note: String) {
-    let state = app.state::<DshState>();
+async fn respawn(app: &AppHandle, profile: &str, note: String) {
+    let port = port_for_profile(profile);
     // 旧子进程已退出，但端口可能仍被占用（TIME_WAIT/晚退出的子进程）：
     // stop_port_owner 会先 SIGTERM 再 SIGKILL，纯代码跨平台。
-    drop(state);
     let freed = stop_port_owner(port).await;
     if !freed {
         log::error!("[fuse] 重试前端口 {port} 未释放，转失败收尾");
@@ -152,7 +145,7 @@ async fn respawn(app: &AppHandle, port: u16, note: String) {
     }
     set_status(app, STATUS_STARTING, "保险丝重试启动");
     clear_web_token(app);
-    match spawn_dsh(app, port, true) {
+    match spawn_dsh(app, profile, port, true) {
         Ok(child) => {
             let state = app.state::<DshState>();
             log::info!("[fuse] 重试 spawn 成功（PID {}）", child.id());
@@ -166,14 +159,7 @@ async fn respawn(app: &AppHandle, port: u16, note: String) {
             // 内嵌加载页的事件监听需要 ~1s 才就绪；就绪后重放缓冲尾部 + 保险丝状态行，
             // 否则重试实例的早期输出全部丢失，加载页日志看起来像卡死（用户实测）。
             tokio::time::sleep(Duration::from_millis(1200)).await;
-            let tail = app
-                .state::<DshState>()
-                .stderr_buf
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|b| b.lock().unwrap().tail_lines(40))
-                .unwrap_or_default();
+            let tail = app.state::<DshState>().stderr_tail_for(profile, 40);
             for line in &tail {
                 let _ = app.emit(
                     "dsh-console",

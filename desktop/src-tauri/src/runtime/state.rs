@@ -70,15 +70,55 @@ pub(crate) struct DshState {
     /// 双击拖拽区"缩放"前的主窗口几何（None = 当前处于标准尺寸，可触发放大；
     /// Some = 当前已放大，再双击恢复到此几何）。Mutex 防并发双击。
     pub(crate) pre_zoom_geom: Mutex<Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>>,
-    /// 启动保险丝：当前 dsh 子进程的 stderr 累积缓冲（spawn 时创建，转发线程写、
-    /// 保险丝监控任务读；子进程退出且非 0 时取快照做失败检测）。
-    pub(crate) stderr_buf: Mutex<Option<crate::process::quarantine::SharedStderr>>,
+    /// 启动保险丝：每 profile 的 stderr 累积缓冲（#86 起按实例隔离；spawn 时创建，
+    /// 转发线程写、保险丝监控任务读；子进程退出且非 0 时取快照做失败检测）。
+    pub(crate) stderr_bufs: Mutex<std::collections::BTreeMap<String, crate::process::quarantine::SharedStderr>>,
     /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
     pub(crate) fuse_retries: AtomicU8,
     /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
     pub(crate) fuse_summary: Mutex<Option<serde_json::Value>>,
     /// 下载管理器（#72）：任务表/调度/句柄，内部可变。
     pub(crate) downloads: crate::download::DownloadManager,
+}
+
+impl DshState {
+    /// 写入 profile 的 stderr 缓冲（spawn 时调用；覆盖旧实例残留）。
+    pub(crate) fn set_stderr_buf(
+        &self,
+        profile: &str,
+        buf: crate::process::quarantine::SharedStderr,
+    ) {
+        self.stderr_bufs
+            .lock()
+            .unwrap()
+            .insert(profile.to_string(), buf);
+    }
+
+    /// 取 profile 的 stderr 缓冲引用（可能不存在：非本壳 spawn 的实例）。
+    pub(crate) fn stderr_buf_for(
+        &self,
+        profile: &str,
+    ) -> Option<crate::process::quarantine::SharedStderr> {
+        self.stderr_bufs
+            .lock()
+            .unwrap()
+            .get(profile)
+            .cloned()
+    }
+
+    /// 取 profile 的 stderr 快照（无缓冲 → 空串）。
+    pub(crate) fn stderr_snapshot_for(&self, profile: &str) -> String {
+        self.stderr_buf_for(profile)
+            .map(|b| b.lock().unwrap().snapshot())
+            .unwrap_or_default()
+    }
+
+    /// 取 profile 的 stderr 尾部 N 行（重试后重放到加载页用）。
+    pub(crate) fn stderr_tail_for(&self, profile: &str, n: usize) -> Vec<String> {
+        self.stderr_buf_for(profile)
+            .map(|b| b.lock().unwrap().tail_lines(n))
+            .unwrap_or_default()
+    }
 }
 
 /// 运行时放行的远程 dsh 主机清单（导航守卫读，托盘远程选择写）。
@@ -122,7 +162,7 @@ mod tests {
             notify_token: Mutex::new(String::new()),
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
-            stderr_buf: Mutex::new(None),
+            stderr_bufs: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),

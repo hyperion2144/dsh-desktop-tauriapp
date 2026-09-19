@@ -60,7 +60,7 @@ use ui::window::{show_main, show_error};
 use navigation::wait_ready_and_navigate;
 
 // ── 设置/插件/平台/command 导入 ──
-use settings::{load_desktop_settings, configured_port, app_port, dsh_home};
+use settings::{load_desktop_settings, configured_port, app_port, dsh_home, configured_profile};
 use process::plugin::{desktop_plugin_patch_path, materialize_desktop_plugin, strip_web_profile_plugin_bundle};
 use process::probing::{probe_local, probe_remote};
 use platform::{open_external, open_external_impl};
@@ -90,7 +90,7 @@ use tauri_plugin_log::{Target, TargetKind};
 
 // ── 测试专用导入（cargo fix 会移除非测试构建未用的项，这里统一补回）──
 #[cfg(test)]
-use settings::{DesktopSettings, settings_path, save_desktop_settings, from_yaml_value, legacy_desktop_block, configured_profile, configured_lane_port, configured_cloudflared_bin};
+use settings::{DesktopSettings, settings_path, save_desktop_settings, from_yaml_value, legacy_desktop_block, configured_lane_port, configured_cloudflared_bin};
 #[cfg(test)]
 use network::proxy::{
     ProxyEnv, PROXY_MODE_OFF, PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL, PROXY_LOOPBACK_ENTRIES,
@@ -213,7 +213,7 @@ pub fn run() {
             notify_token: Mutex::new(String::new()),
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
-            stderr_buf: Mutex::new(None),
+             stderr_bufs: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
@@ -254,6 +254,7 @@ pub fn run() {
                 log::error!("[main] 主窗口创建失败：{e}");
             }
             let port = app_port();
+            let profile = configured_profile();
             let state = app.state::<DshState>();
             // 记录内嵌加载页 URL（重启/切换模式时回到该页，像重启应用一样）
             if let Some(w) = app.get_webview_window("main") {
@@ -270,38 +271,65 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 request_notification_permission(&handle);
             });
-            if port_open(port) {
-                log::info!("127.0.0.1:{port} 已有服务在监听，直接复用现有实例");
-                // 外部实例复用会禁用桌面 chrome：在加载页弹「兼容/高级」模式选择
-                state.mode_prompt_needed.store(true, Ordering::SeqCst);
-                set_status(app.handle(), STATUS_EXTERNAL, "复用外部实例");
-            } else {
-                // 即将由本应用拉起 dsh：先确保 web profile 已挂载桌面 chrome 插件
-                //（参考项目机制：检测缺失则用官方 `dsh plugin --profile web add` 装上）。
-                // 桌面插件改为 --patch 注入：先挂共享模块池（解析实体），再迁移旧 bundle 注册
-                log::info!("桌面插件 --patch 注入准备：挂共享模块池 + 迁移旧 bundle 注册");
-                set_status(app.handle(), STATUS_STARTING, "启动中");
-                materialize_desktop_plugin(app.handle());
-                strip_web_profile_plugin_bundle();
-                // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
-                clear_web_token(app.handle());
-                match spawn_dsh(app.handle(), port, true) {
-                    Ok(child) => {
-                        log::info!("dsh 子进程已启动（PID {}）", child.id());
-                        *state.child.lock().unwrap() = Some(child);
-                        state.spawned_this_run.store(true, Ordering::SeqCst);
-                        state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+            // 认领判定（#86）：端口有监听不再盲目复用——台账确认是本 profile 的实例、
+            // 或落在 web 的 legacy 端口（外部 dsh 兼容）才复用；陌生占用者明确报错不代拉。
+            let claim = crate::runtime::instances::decide_claim(
+                &profile,
+                port,
+                port_open(port),
+                &crate::runtime::instances::load_instances(),
+                configured_port(),
+            );
+            use crate::runtime::instances::ClaimDecision;
+            match claim {
+                ClaimDecision::Free => {
+                    // 即将由本应用拉起 dsh：先挂共享模块池并迁移旧 bundle 注册（--patch 注入）
+                    log::info!("桌面插件 --patch 注入准备：挂共享模块池 + 迁移旧 bundle 注册");
+                    set_status(app.handle(), STATUS_STARTING, "启动中");
+                    materialize_desktop_plugin(app.handle());
+                    strip_web_profile_plugin_bundle();
+                    // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
+                    clear_web_token(app.handle());
+                    match spawn_dsh(app.handle(), &profile, port, true) {
+                        Ok(child) => {
+                            log::info!("dsh 子进程已启动（PID {}）", child.id());
+                            *state.child.lock().unwrap() = Some(child);
+                            state.spawned_this_run.store(true, Ordering::SeqCst);
+                            state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+                        }
+                        Err(SpawnError::NotFound(e)) => {
+                            log::error!("启动 dsh 失败：{e}");
+                            state.spawn_failed.store(true, Ordering::SeqCst);
+                            show_error(app.handle(), "not-found");
+                        }
+                        Err(SpawnError::Other(e)) => {
+                            log::error!("启动 dsh 失败：{e}");
+                            state.spawn_failed.store(true, Ordering::SeqCst);
+                            show_error(app.handle(), "spawn-failed");
+                        }
                     }
-                    Err(SpawnError::NotFound(e)) => {
-                        log::error!("启动 dsh 失败：{e}");
-                        state.spawn_failed.store(true, Ordering::SeqCst);
-                        show_error(app.handle(), "not-found");
-                    }
-                    Err(SpawnError::Other(e)) => {
-                        log::error!("启动 dsh 失败：{e}");
-                        state.spawn_failed.store(true, Ordering::SeqCst);
-                        show_error(app.handle(), "spawn-failed");
-                    }
+                }
+                ClaimDecision::Ours => {
+                    // 上次壳拉起的实例仍存活（如壳崩溃后重启）：按复用流程接入
+                    log::info!("127.0.0.1:{port} 是 profile {profile} 的在跑实例，直接复用");
+                    state.mode_prompt_needed.store(true, Ordering::SeqCst);
+                    set_status(app.handle(), STATUS_EXTERNAL, "复用本 profile 实例");
+                }
+                ClaimDecision::ForeignWeb => {
+                    log::info!("127.0.0.1:{port} 已有外部服务在监听（web legacy 端口），直接复用现有实例");
+                    // 外部实例复用会禁用桌面 chrome：在加载页弹「兼容/高级」模式选择
+                    state.mode_prompt_needed.store(true, Ordering::SeqCst);
+                    set_status(app.handle(), STATUS_EXTERNAL, "复用外部实例");
+                }
+                ClaimDecision::ForeignUnknown => {
+                    // 端口被别的 profile / 陌生程序占用：绝不盲目复用，也不代杀
+                    let detail = format!(
+                        "端口 {port} 被其他实例或程序占用（profile={profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试"
+                    );
+                    log::error!("{detail}");
+                    state.spawn_failed.store(true, Ordering::SeqCst);
+                    show_notification(app.handle(), "DeepSeek Harness Desktop · 启动受阻", &detail);
+                    show_error(app.handle(), "spawn-failed");
                 }
             }
 // 先起通知桥，把端口/token 交给导航任务并保存到 state（重启 dsh 时复用）；
@@ -419,7 +447,7 @@ pub fn run() {
                         let settings = load_desktop_settings();
                         let (up, verbose) = match settings.remote_addr.as_deref() {
                             Some(addr) => probe_remote(addr),
-                            None => probe_local(configured_port()),
+                            None => probe_local(app_port()),
                         };
                         let cur = state.status.load(Ordering::SeqCst);
                         if up {
@@ -552,6 +580,8 @@ pub fn run() {
                         let _ = child.kill();
                         let _ = child.wait();
                         log::info!("dsh 子进程已退出");
+                        // 实例台账（#86）：自家实例已停，摘除记录
+                        crate::runtime::instances::remove_instance(&configured_profile());
                     }
                 }
             }

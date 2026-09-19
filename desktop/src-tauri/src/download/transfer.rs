@@ -47,9 +47,8 @@ fn auth_cookie_header(app: &AppHandle, url: &tauri::Url) -> Option<String> {
         return None;
     }
     let authority = authority_of(url);
-    let local_port = crate::settings::configured_port();
-    let matches_local =
-        authority == format!("127.0.0.1:{local_port}") || authority == format!("localhost:{local_port}");
+    // #86：本地实例判定交给台账（覆盖所有已 spawn 实例端口 + web legacy 端口）
+    let matches_local = crate::runtime::instances::is_local_instance_authority(&authority);
     let matches_remote = loading_authority.as_deref() == Some(authority.as_str());
     if !matches_local && !matches_remote {
         return None; // 与壳对接实例无关的外部源，不带凭据

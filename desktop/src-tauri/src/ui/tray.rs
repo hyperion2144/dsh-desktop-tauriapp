@@ -18,10 +18,11 @@ use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::clear_web_token;
 use crate::ui::pet::toggle_pet;
 use crate::{
-    show_main, set_status, show_notification, app_port,
+    show_main, set_status, show_notification,
     stop_port_owner, wait_ready_and_navigate,
     STATUS_RESTARTING,
 };
+use crate::settings::{configured_profile, port_for_profile};
 
 /// 按当前接入模式构建托盘菜单（含「切换模式」项，标签显示当前模式）。
 pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -176,7 +177,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         navigate_to_loading(&handle);
         log::logger().flush();
 
-        let port = app_port();
+        let profile = configured_profile();
+        let port = port_for_profile(&profile);
         // 1) 停掉占用端口的现有 dsh（含自家子进程与外部实例，纯代码）
         if let Some(mut child) = handle.state::<DshState>().child.lock().unwrap().take() {
             let pid = child.id();
@@ -186,6 +188,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
             let _ = child.wait();
             log::info!("[restart] 旧 dsh 已退出");
         }
+        // 实例台账（#86）：旧实例已停，摘除记录（新 spawn 会重新登记）
+        crate::runtime::instances::remove_instance(&profile);
         let freed = stop_port_owner(port).await;
         if !freed {
             log::error!("[restart] 端口 {port} 未能停用/释放，重启中止");
@@ -205,7 +209,7 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
         clear_web_token(&handle);
         let advanced = target_mode == MODE_ADVANCED;
-        match spawn_dsh(&handle, port, advanced) {
+        match spawn_dsh(&handle, &profile, port, advanced) {
             Ok(child) => {
                 log::logger().flush();
                 log::info!("[restart] 新 dsh 子进程已启动（PID {}）", child.id());

@@ -18,9 +18,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::runtime::error::SpawnError;
-use crate::settings::{
-    configured_cloudflared_bin, configured_lane_port, configured_profile,
-};
+use crate::settings::{configured_cloudflared_bin, lane_port_for_profile};
 use crate::network::proxy::inject_proxy_env;
 use crate::network::web_token::{parse_web_token_line, store_web_token};
 
@@ -116,8 +114,8 @@ pub(crate) fn kill_process_force(pid: u32) {
 pub trait DshLifecycle {
     /// 定位 dsh 可执行文件。
     fn find_binary() -> Option<PathBuf>;
-    /// spawn dsh web 子进程。
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError>;
+    /// spawn dsh web 子进程（profile 显式传入：#86 起端口与实例按 profile 隔离）。
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError>;
     /// 优雅终止进程（SIGTERM / TerminateProcess）。
     fn kill(pid: u32);
     /// 强制终止进程（SIGKILL / TerminateProcess 再调一次）。
@@ -237,7 +235,7 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
 /// spawn `dsh web --host 127.0.0.1 --port <port>`（unix）；stdout/stderr 转发到日志，
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     let bin = find_dsh_bin().ok_or_else(|| {
         SpawnError::NotFound(
             "未找到 dsh 命令。请执行 `npm i -g @deepseek-ai/dsh` 或设置 DSH_BIN 环境变量。"
@@ -246,9 +244,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     })?;
     let mut cmd = Command::new(&bin);
     // 统一用 `dsh --profile web ...`（等价于 `dsh web`）。桌面插件经 --patch 注入
-    //（包名行，实体在共享模块池），不禁用 stock ui-layout；仅当设置
-    // DSH_DESKTOP_EXTRA_PATCH 调试环境变量时再叠加一个调试 overlay。
-    let profile = configured_profile();
+    //（包名行，实体在共享模块池）；profile 由调用方传入（#86 per-profile 实例）。
     log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
     let mut launcher_args: Vec<std::ffi::OsString> =
         vec!["--profile".into(), profile.into()];
@@ -275,9 +271,10 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         "--port".into(),
         port.to_string().into(),
     ]);
+    let lane = lane_port_for_profile(profile);
     cmd.args(&launcher_args)
         .env("PATH", dsh_runtime_path(&bin))
-        .env("DSH_MOBILE_LANE_PORT", configured_lane_port().to_string())
+        .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
     let cloudflared = configured_cloudflared_bin();
@@ -296,11 +293,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
         std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
     );
-    *app
-        .state::<crate::runtime::state::DshState>()
-        .stderr_buf
-        .lock()
-        .unwrap() = Some(stderr_buf.clone());
+    app.state::<crate::runtime::state::DshState>()
+        .set_stderr_buf(profile, stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
     {
@@ -333,6 +327,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         .spawn()
         .map_err(|e| SpawnError::Other(format!("spawn {} 失败：{e}", bin.display())))?;
     log::info!("已启动 dsh web（{}，PID {}）", bin.display(), child.id());
+    // 实例台账（#86）：登记 profile × 端口 × pid，供认领判定与停止自家实例使用
+    crate::runtime::instances::register_instance(profile, port, lane, child.id());
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
         thread::spawn(move || {
@@ -382,8 +378,8 @@ impl DshLifecycle for NativeLifecycle {
         find_dsh_bin()
     }
 
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-        spawn_dsh(app, port, advanced)
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+        spawn_dsh(app, profile, port, advanced)
     }
 
     fn kill(pid: u32) {
@@ -517,7 +513,7 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 /// npm 全局安装的 dsh 在 Windows 是 dsh.cmd shim，直接 CreateProcess 有引号
 /// 转义坑，所以直接用 node.exe 执行 bin.js；CREATE_NO_WINDOW 防止闪黑窗。
 #[cfg(windows)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     use std::os::windows::process::CommandExt;
     let node = find_node().ok_or_else(|| {
         SpawnError::NotFound(
@@ -531,11 +527,12 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         )
     })?;
     let mut cmd = Command::new(&node);
+    let lane = lane_port_for_profile(profile);
     let mut launcher_args: Vec<std::ffi::OsString> =
         vec![
             bin_js.clone().into(),
             "--profile".into(),
-            configured_profile().into(),
+            profile.into(),
         ];
     // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
     // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
@@ -558,7 +555,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         port.to_string().into(),
     ]);
     cmd.args(&launcher_args)
-        .env("DSH_MOBILE_LANE_PORT", configured_lane_port().to_string())
+        .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
     let cloudflared = configured_cloudflared_bin();
@@ -575,11 +572,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
         std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
     );
-    *app
-        .state::<crate::runtime::state::DshState>()
-        .stderr_buf
-        .lock()
-        .unwrap() = Some(stderr_buf.clone());
+    app.state::<crate::runtime::state::DshState>()
+        .set_stderr_buf(profile, stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -592,6 +586,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         bin_js.display(),
         child.id()
     );
+    // 实例台账（#86）：同 unix 分支
+    crate::runtime::instances::register_instance(profile, port, lane, child.id());
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
         thread::spawn(move || {
@@ -640,8 +636,8 @@ impl DshLifecycle for JsLifecycle {
         find_dsh_bin_js()
     }
 
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-        spawn_dsh(app, port, advanced)
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+        spawn_dsh(app, profile, port, advanced)
     }
 
     fn kill(pid: u32) {
