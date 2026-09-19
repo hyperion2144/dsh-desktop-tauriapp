@@ -34,12 +34,27 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)?;
-    // 设置能力（服务地址/Profile/端口/代理）已迁移至 dsh web 设置面板的「桌面设置」Tab，
-    // 托盘只保留操作类入口（#61 实测反馈）。
+    // PROFILE 窗口分组（#89 定稿 A）：运行中点击聚焦、未运行点击开新窗（每 profile 至多一窗）
+    let mut sub = tauri::menu::SubmenuBuilder::with_id(app, "profile-windows", "PROFILE 窗口");
+    for info in crate::profiles::scan_profiles() {
+        let port = port_for_profile(&info.name);
+        let running = crate::process::lifecycle::port_open(port);
+        let id = format!("open-profile-{}", info.name);
+        let text = if running {
+            format!("● {} · {}（点击聚焦）", info.name, port)
+        } else {
+            format!("在新窗口打开 {}", info.name)
+        };
+        sub = sub.text(&id, &text);
+    }
+    let profile_sub = sub
+        .text("new-profile", "新建 Profile…")
+        .text("migrate-profile", "迁移 Profile…")
+        .build()?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(app, &[&show, &pet, &restart, &toggle, &quit])?)
+    Ok(Menu::with_items(app, &[&show, &pet, &profile_sub, &restart, &toggle, &quit])?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -77,6 +92,12 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "show" => show_main(app),
             "pet" => toggle_pet(app),
             "restart" => restart_dsh(app),
+            id if id.starts_with("open-profile-") => {
+                let name = id.strip_prefix("open-profile-").unwrap_or("").to_string();
+                crate::ui::multiwin::open_profile_window(app, &name);
+            }
+            "new-profile" => crate::profiles::create_profile_flow(app),
+            "migrate-profile" => crate::profiles::migrate_profile_flow(app),
             "toggle-mode" => toggle_desktop_mode(app),
             "quit" => {
                 app.state::<DshState>().quitting.store(true, Ordering::SeqCst);

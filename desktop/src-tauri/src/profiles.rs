@@ -363,6 +363,49 @@ pub(crate) async fn migrate_profile(
     Ok(summary)
 }
 
+/// 托盘/设置入口的迁移流（#88）：prompt 源/目标 + 覆盖确认 → migrate_profile。
+pub(crate) fn migrate_profile_flow(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(source) = prompt_input(&handle, "migrate-src", "迁移 Profile · 源", "要复制的 profile 名称", "").await else {
+            return;
+        };
+        let Some(dest) = prompt_input(
+            &handle,
+            "migrate-dst",
+            "迁移 Profile · 目标",
+            "目标 profile 名称（不存在则创建）",
+            "",
+        )
+        .await
+        else {
+            return;
+        };
+        let mut overwrite = false;
+        if dsh_home().join("profiles").join(&dest).exists() {
+            let Some(yes) = prompt_input(
+                &handle,
+                "migrate-confirm",
+                "目标已存在",
+                &format!("{dest} 已存在；输入 YES 覆盖（旧目标备份为 .bak-时间戳）"),
+                "",
+            )
+            .await
+            else {
+                return;
+            };
+            if yes.trim() != "YES" {
+                show_notification(&handle, "迁移已取消", "未确认覆盖");
+                return;
+            }
+            overwrite = true;
+        }
+        if let Err(e) = migrate_profile(&handle, source, dest, overwrite).await {
+            show_notification(&handle, "迁移失败", &e);
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -73,6 +73,12 @@ pub(crate) struct DshState {
     /// 启动保险丝：每 profile 的 stderr 累积缓冲（#86 起按实例隔离；spawn 时创建，
     /// 转发线程写、保险丝监控任务读；子进程退出且非 0 时取快照做失败检测）。
     pub(crate) stderr_bufs: Mutex<std::collections::BTreeMap<String, crate::process::quarantine::SharedStderr>>,
+    /// #89 多窗口：非激活 profile 的子进程（窗口↔实例绑定；激活 profile 走 `child`）。
+    pub(crate) children: Mutex<std::collections::BTreeMap<String, Child>>,
+    /// #89 多窗口：profile → 窗口 label（"profile-<name>"）。
+    pub(crate) windows: Mutex<std::collections::BTreeMap<String, String>>,
+    /// #89 多窗口：每 profile 的 dsh web process token（stdout 解析；激活 profile 另存 `web_token` 供主流程）。
+    pub(crate) web_tokens: Mutex<std::collections::BTreeMap<String, String>>,
     /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
     pub(crate) fuse_retries: AtomicU8,
     /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
@@ -121,6 +127,45 @@ impl DshState {
     }
 }
 
+impl DshState {
+    /// 绑定 profile → 窗口 label。
+    pub(crate) fn bind_window(&self, profile: &str, label: String) {
+        self.windows.lock().unwrap().insert(profile.to_string(), label);
+    }
+
+    /// 取 profile 的窗口 label。
+    pub(crate) fn window_of(&self, profile: &str) -> Option<String> {
+        self.windows.lock().unwrap().get(profile).cloned()
+    }
+
+    /// 解除绑定（窗口关闭/实例停止）。
+    pub(crate) fn unbind_window(&self, profile: &str) {
+        self.windows.lock().unwrap().remove(profile);
+    }
+
+    /// 取 per-profile web token（克隆语义；导航轮询反复取用）。
+    pub(crate) fn web_token_for(&self, profile: &str) -> Option<String> {
+        self.web_tokens.lock().unwrap().get(profile).cloned()
+    }
+    /// 存 per-profile web token（spawn stdout 线程调用）。
+    pub(crate) fn set_web_token(&self, profile: &str, token: String) {
+        self.web_tokens
+            .lock()
+            .unwrap()
+            .insert(profile.to_string(), token);
+    }
+
+    /// 存非激活 profile 的子进程。
+    pub(crate) fn set_child(&self, profile: &str, child: Child) {
+        self.children.lock().unwrap().insert(profile.to_string(), child);
+    }
+
+    /// 取走非激活 profile 的子进程（停止时；负责 kill+wait 回收）。
+    pub(crate) fn take_child(&self, profile: &str) -> Option<Child> {
+        self.children.lock().unwrap().remove(profile)
+    }
+}
+
 /// 运行时放行的远程 dsh 主机清单（导航守卫读，托盘远程选择写）。
 pub(crate) static INTERNAL_HOSTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
@@ -163,6 +208,9 @@ mod tests {
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
             stderr_bufs: Mutex::new(Default::default()),
+            children: Mutex::new(Default::default()),
+            windows: Mutex::new(Default::default()),
+            web_tokens: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),

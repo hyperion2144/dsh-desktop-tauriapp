@@ -325,6 +325,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     // 实例台账（#86）：登记 profile × 端口 × pid，供认领判定与停止自家实例使用
     crate::runtime::instances::register_instance(profile, port, lane, child.id());
     if let Some(out) = child.stdout.take() {
+        let profile = profile.to_string();
         let app = app.clone();
         thread::spawn(move || {
             // split(b'\n') + from_utf8_lossy：`.lines().map_while(Result::ok)` 遇到
@@ -338,6 +339,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
+                    app.state::<crate::runtime::state::DshState>()
+                        .set_web_token(&profile, token.clone());
                     store_web_token(&app, token);
                 }
                 log::info!("[dsh] {line}");
@@ -580,6 +583,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     crate::runtime::instances::register_instance(profile, port, lane, child.id());
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
+        let profile = profile.to_string();
         thread::spawn(move || {
             // split(b'\n') + from_utf8_lossy：非法 UTF-8 字节不断流（同 unix 分支）
             for raw in BufReader::new(out).split(b'\n') {
@@ -591,6 +595,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
+                    app.state::<crate::runtime::state::DshState>()
+                        .set_web_token(&profile, token.clone());
                     store_web_token(&app, token);
                 }
                 log::info!("[dsh] {line}");

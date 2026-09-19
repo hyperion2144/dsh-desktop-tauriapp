@@ -216,6 +216,9 @@ pub fn run() {
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
              stderr_bufs: Mutex::new(Default::default()),
+            children: Mutex::new(Default::default()),
+            windows: Mutex::new(Default::default()),
+            web_tokens: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
@@ -546,6 +549,16 @@ pub fn run() {
                     }
                     _ => {}
                 },
+                label if label.starts_with("profile-") => {
+                    // #89 次窗口：关闭 = 停该实例并摘台账（放行关闭）
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        let profile = label.strip_prefix("profile-").unwrap_or("").to_string();
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::ui::multiwin::close_profile_instance(&app, &profile, true);
+                        });
+                    }
+                }
                 "main" => {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         let state = window.state::<DshState>();
@@ -592,6 +605,21 @@ pub fn run() {
                         let _ = child.kill();
                         let _ = child.wait();
                         log::info!("dsh 子进程已退出");
+                        // #89 多窗口：回收非激活 profile 的次实例
+                        {
+                            let state = app.state::<DshState>();
+                            let mut children = state.children.lock().unwrap();
+                            let profiles: Vec<String> = children.keys().cloned().collect();
+                            for profile in profiles {
+                                if let Some(mut child) = children.remove(&profile) {
+                                    let pid = child.id();
+                                    log::info!("[exit] 停止 {profile} 实例（PID {pid}）");
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    crate::runtime::instances::remove_instance(&profile);
+                                }
+                            }
+                        }
                         // 实例台账（#86）：自家实例已停，摘除记录
                         crate::runtime::instances::remove_instance(&configured_profile());
                     }

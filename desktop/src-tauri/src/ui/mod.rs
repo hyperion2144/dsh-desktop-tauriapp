@@ -3,3 +3,4 @@ pub mod tray;
 pub mod pet;
 pub mod nav_guard;
 pub mod window;
+pub mod multiwin;
