@@ -106,17 +106,8 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle) -> Result<PathBuf, String>
     Ok(path)
 }
 
-/// 尝试内置来源：resources/dsh 存在 + node sidecar 可用 + 启动器写出成功。
-fn try_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
-    let dsh_lib = builtin_dsh_lib(app)
-        .ok_or_else(|| "resources/dsh 不存在（内置运行时未打包）".to_string())?;
-    let node = find_builtin_node().ok_or_else(|| "内置 node sidecar 未找到".to_string())?;
-    let launcher = ensure_launcher(app)?;
-    Ok(DshSource::Builtin { node, dsh_lib, launcher })
-}
-
-/// 外部来源：沿用现有 find 链路（unix: dsh CLI；windows: node + bin.js）。
-fn try_external() -> Option<PathBuf> {
+/// 外部 dsh 可执行文件定位（unix: dsh CLI；windows: bin.js）——设置 Tab 检测与来源解析共用。
+pub(crate) fn find_external_bin() -> Option<PathBuf> {
     #[cfg(unix)]
     {
         crate::process::lifecycle::find_dsh_bin()
@@ -125,6 +116,15 @@ fn try_external() -> Option<PathBuf> {
     {
         crate::process::lifecycle::find_dsh_bin_js()
     }
+}
+
+/// 尝试内置来源：resources/dsh 存在 + node sidecar 可用 + 启动器写出成功。
+fn try_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
+    let dsh_lib = builtin_dsh_lib(app)
+        .ok_or_else(|| "resources/dsh 不存在（内置运行时未打包）".to_string())?;
+    let node = find_builtin_node().ok_or_else(|| "内置 node sidecar 未找到".to_string())?;
+    let launcher = ensure_launcher(app)?;
+    Ok(DshSource::Builtin { node, dsh_lib, launcher })
 }
 
 /// 解析 dsh 来源（#85 拍板）：内置优先；内置不可用自动回退外部并告警；两者皆缺才报错。
@@ -137,13 +137,23 @@ pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String
             }
         }
     }
-    match try_external() {
+    match find_external_bin() {
         Some(bin) => Ok(DshSource::External { bin }),
         None => Err(
             "未找到可用的 dsh：内置运行时未打包，外部 dsh 也未找到（DSH_BIN / PATH / npm 全局）。"
                 .to_string(),
         ),
     }
+}
+
+/// 内置运行时信息（设置 Tab 展示用）：lib 路径 + dsh 版本（读包内 package.json）。
+pub(crate) fn builtin_lib_info(app: &tauri::AppHandle) -> Option<(PathBuf, String)> {
+    let lib = builtin_dsh_lib(app)?;
+    let pkg = lib.parent()?.join("package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let version = v.get("version")?.as_str()?.to_string();
+    Some((lib, version))
 }
 
 /// 启动器 argv 组装（纯函数，便于单测）：
@@ -170,6 +180,7 @@ pub(crate) fn launcher_args(
         args.push("--patch".into());
         args.push(p.as_os_str().to_os_string());
     }
+
     args
 }
 

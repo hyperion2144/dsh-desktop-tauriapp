@@ -201,6 +201,12 @@
           "markdownDescription": "下载管理器：清空已完成任务记录"
         },
         {
+          "description": "桌面设置面板：create_profile_flow_command（#90）",
+          "type": "string",
+          "const": "allow-create-profile-flow-command",
+          "markdownDescription": "桌面设置面板：create_profile_flow_command（#90）"
+        },
+        {
           "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
           "type": "string",
           "const": "allow-explain-failure",
@@ -229,6 +235,12 @@
           "type": "string",
           "const": "allow-get-download-settings",
           "markdownDescription": "下载管理器：读取并发上限设置"
+        },
+        {
+          "description": "桌面设置面板：get_dsh_source（#90）",
+          "type": "string",
+          "const": "allow-get-dsh-source",
+          "markdownDescription": "桌面设置面板：get_dsh_source（#90）"
         },
         {
           "description": "允许查询 dsh 服务状态（侧边栏状态标识）",
@@ -271,6 +283,12 @@
           "type": "string",
           "const": "allow-list-downloads",
           "markdownDescription": "下载管理器：读取任务列表快照"
+        },
+        {
+          "description": "桌面设置面板：list_profile_ports（#90）",
+          "type": "string",
+          "const": "allow-list-profile-ports",
+          "markdownDescription": "桌面设置面板：list_profile_ports（#90）"
         },
         {
           "description": "允许读取插件保险丝隔离名单",
@@ -405,10 +423,22 @@
           "markdownDescription": "下载管理器：调整并发上限（写 settings.yaml）"
         },
         {
+          "description": "桌面设置面板：set_dsh_source（#90）",
+          "type": "string",
+          "const": "allow-set-dsh-source",
+          "markdownDescription": "桌面设置面板：set_dsh_source（#90）"
+        },
+        {
           "description": "桌面设置面板：set_local_port",
           "type": "string",
           "const": "allow-set-local-port",
           "markdownDescription": "桌面设置面板：set_local_port"
+        },
+        {
+          "description": "桌面设置面板：set_profile_port（#90）",
+          "type": "string",
+          "const": "allow-set-profile-port",
+          "markdownDescription": "桌面设置面板：set_profile_port（#90）"
         },
         {
           "description": "下载管理器：blob 下载开始（弹保存框，返回任务 id）",

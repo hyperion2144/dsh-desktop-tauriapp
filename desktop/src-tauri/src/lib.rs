@@ -74,7 +74,8 @@ use commands::{
     get_quarantine_settings, save_quarantine_settings, list_ai_providers,
     get_desktop_settings_data, add_remote_address, remove_remote_address,
     select_remote_address, set_local_port, switch_profile_command,
-    migrate_profile,
+    migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
+    create_profile_flow_command,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -174,6 +175,8 @@ pub fn run() {
             select_remote_address,
             set_local_port,
             switch_profile_command,
+            migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
+            create_profile_flow_command,
             migrate_profile,
             list_quarantine,
             restore_quarantine,

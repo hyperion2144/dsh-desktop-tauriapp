@@ -118,6 +118,18 @@ function buildPanel(): HTMLElement {
   let msg: { ok: boolean; text: string } | null = null
   let busy = false
 
+  async function renderSourceInfo(target: HTMLElement): Promise<void> {
+    try {
+      const s = await invoke<{ mode: string; builtin: { dsh_version: string } | null; external: { dsh_version: string; path: string } | null }>('get_dsh_source')
+      const parts: string[] = []
+      if (s.builtin) parts.push(`内置 dsh ${s.builtin.dsh_version}`)
+      if (s.external) parts.push(`外部 dsh ${s.external.dsh_version}（${s.external.path}）`)
+      target.textContent = parts.length ? `当前来源 ${s.mode} · ${parts.join(' | ')}` : '未检测到任何可用 dsh'
+    } catch (err) {
+      target.textContent = `检测失败：${String(err)}`
+    }
+  }
+
   function section(title: string): { box: HTMLElement; body: HTMLElement } {
     const box = el('div', undefined, 'border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:14px 16px;')
     box.appendChild(el('div', title, 'pf-title'))
@@ -199,6 +211,138 @@ function buildPanel(): HTMLElement {
       root.appendChild(box)
     }
 
+    // ── dsh 来源（#90）──
+    {
+      const { box } = section('dsh 来源')
+      const modeSel = document.createElement('select')
+      modeSel.style.cssText = 'width:100%;margin-bottom:8px;'
+      ;[['builtin', '内置（随应用分发，推荐）'], ['external', '外部（DSH_BIN → PATH → npm 全局）']].forEach(([v, l]) => {
+        const o = document.createElement('option')
+        o.value = v
+        o.textContent = l
+        modeSel.appendChild(o)
+      })
+      const info = el('div', '检测中…', 'pf-note')
+      box.appendChild(modeSel)
+      box.appendChild(info)
+      const refreshBtn = el('button', '重新检测')
+      refreshBtn.className = 'pf-btn ghost'
+      refreshBtn.addEventListener('click', () => void renderSourceInfo(info))
+      box.appendChild(refreshBtn)
+      modeSel.addEventListener('change', () => {
+        void invoke('set_dsh_source', { mode: modeSel.value })
+          .then(() => {
+            setMsg(true, `dsh 来源已切换为 ${modeSel.value === 'builtin' ? '内置' : '外部'}；重启 dsh 后生效。`)
+            void renderSourceInfo(info)
+          })
+          .catch((e) => setMsg(false, `设置失败：${String(e)}`))
+      })
+      note(box, '内置：随应用分发的 dsh 依赖树 + Node，直调内部启动接口（不依赖系统环境）。外部：使用系统安装的 dsh CLI。')
+      void renderSourceInfo(info)
+    }
+
+    // ── Profile 端口（#90）──
+    {
+      const { box } = section('Profile 端口')
+      const tbl = document.createElement('table')
+      tbl.style.cssText = 'width:100%;font-size:12px;border-collapse:collapse;'
+      box.appendChild(el('div', '加载中…', 'pf-note'))
+      invoke<Array<{ profile: string; port: number; lane_port: number; running: boolean }>>('list_profile_ports')
+        .then((rows) => {
+          tbl.replaceChildren()
+          const head = document.createElement('tr')
+          ;['Profile', '启动端口', 'Lane 端口', '状态', ''].forEach((h) => {
+            const th = document.createElement('th')
+            th.textContent = h
+            th.style.textAlign = 'left'
+            head.appendChild(th)
+          })
+          tbl.appendChild(head)
+          for (const r of rows) {
+            const tr = document.createElement('tr')
+            const name = document.createElement('td')
+            name.textContent = r.profile
+            tr.appendChild(name)
+            const portCell = document.createElement('td')
+            const portInput = document.createElement('input')
+            portInput.placeholder = String(r.port)
+            portInput.style.width = '84px'
+            portInput.dataset.desktopSettings = `profile-port-${r.profile}`
+            const saveBtn = el('button', '保存')
+            saveBtn.className = 'pf-btn ghost'
+            saveBtn.style.marginLeft = '6px'
+            const doSave = () => {
+              const v = Number(portInput.value)
+              if (!portInput.value || Number.isNaN(v) || v < 1 || v > 65535) return
+              invoke('set_profile_port', { profile: r.profile, port: v })
+                .then(() => note(box, `${r.profile} 端口已改为 ${v}；重启该 profile 生效。`))
+                .catch((e) => note(box, `保存失败：${String(e)}`))
+            }
+            portInput.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') doSave() })
+            saveBtn.addEventListener('click', () => doSave())
+            portCell.append(portInput, saveBtn)
+            tr.appendChild(portCell)
+            const laneCell = document.createElement('td')
+            laneCell.textContent = String(r.lane_port)
+            tr.appendChild(laneCell)
+            const stCell = document.createElement('td')
+            stCell.textContent = r.running ? '● 运行中' : '未运行'
+            stCell.style.color = r.running ? 'var(--dsw-alias-state-success-primary,#2fbf71)' : 'var(--dsw-alias-label-secondary,#9aa4b2)'
+            tr.appendChild(stCell)
+            tbl.appendChild(tr)
+          }
+        })
+        .catch(() => {
+          tbl.replaceChildren(el('div', '端口表加载失败（无 Tauri IPC？）', 'pf-note'))
+        })
+      note(box, 'web 固定默认 3080 · desktop 固定默认 3081 · 其余自动分配；lane 同规则错开（3092 起）。改动后重启该 profile 生效。')
+      root.appendChild(box)
+    }
+
+    // ── 迁移 Profile（#88/#90）──
+    {
+      const { box } = section('迁移 Profile')
+      box.appendChild(el('div', '源 profile → 目标 profile（全量复制；目标已存在需覆盖确认）', 'pf-label'))
+      const row = el('div', undefined, 'display:flex;gap:8px;')
+      const srcSel = document.createElement('select')
+      srcSel.style.cssText = 'flex:1;'
+      for (const p of desktop.profiles) {
+        const o = document.createElement('option')
+        o.value = p.name
+        o.textContent = p.name
+        srcSel.appendChild(o)
+      }
+      const dstInput = document.createElement('input')
+      dstInput.placeholder = '目标名称'
+      dstInput.className = 'pf-input'
+      dstInput.style.flex = '1'
+      dstInput.dataset.desktopSettings = 'migrate-dest'
+      const migBtn = el('button', '迁移…')
+      migBtn.className = 'pf-btn ghost'
+      migBtn.addEventListener('click', () => {
+        const dest = dstInput.value.trim()
+        if (!dest) { setMsg(false, '请输入目标 profile 名称'); render(); return }
+        void invoke<string>('migrate_profile', { source: srcSel.value, dest, overwrite: false })
+          .then((s) => { setMsg(true, s); dstInput.value = '' })
+          .catch((e) => {
+            const msg = String(e)
+            if (msg.includes('需确认覆盖')) {
+              void invoke<string>('migrate_profile', { source: srcSel.value, dest, overwrite: true })
+                .then((s) => { setMsg(true, s); dstInput.value = '' })
+                .catch((e2) => setMsg(false, `迁移失败：${String(e2)}`))
+            } else {
+              setMsg(false, `迁移失败：${msg}`)
+            }
+          })
+          .finally(() => render())
+      })
+      row.append(srcSel, dstInput, migBtn)
+      box.appendChild(row)
+      note(box, '源为当前运行中的 profile 时会先停止其实例；外部实例在跑则拒绝。目标为激活 profile 时拒绝迁移。')
+      root.appendChild(box)
+    }
+
+    // ── 本地端口 ──
     // ── 本地端口 ──
     {
       const { box } = section('本地端口')

@@ -718,6 +718,83 @@ pub(crate) async fn migrate_profile(
 ) -> Result<String, String> {
     crate::profiles::migrate_profile(&app, source, dest, overwrite).await
 }
+
+/// dsh 来源与内置/外部检测信息（#90 设置 Tab）。
+#[tauri::command]
+pub(crate) fn get_dsh_source(app: tauri::AppHandle) -> serde_json::Value {
+    let mode = crate::runtime::builtin::configured_dsh_mode();
+    let mode_str = match mode {
+        crate::runtime::builtin::DshMode::Builtin => "builtin",
+        crate::runtime::builtin::DshMode::External => "external",
+    };
+    let builtin = crate::runtime::builtin::builtin_lib_info(&app)
+        .map(|(lib, version)| serde_json::json!({ "lib": lib.display().to_string(), "dsh_version": version }))
+        .unwrap_or(serde_json::Value::Null);
+    let external = crate::runtime::builtin::find_external_bin()
+        .map(|bin| {
+            let version = crate::profiles::dsh_version().unwrap_or_default();
+            serde_json::json!({ "path": bin.display().to_string(), "dsh_version": version })
+        })
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({ "mode": mode_str, "builtin": builtin, "external": external })
+}
+
+/// 设置 dsh 来源（#85 拍板两态；重启后生效）。
+#[tauri::command]
+pub(crate) fn set_dsh_source(mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "builtin" | "external") {
+        return Err(format!("未知 dsh 来源：{mode}"));
+    }
+    let mut settings = crate::settings::load_desktop_settings();
+    settings.dsh_mode = Some(mode);
+    crate::settings::save_desktop_settings(&settings);
+    Ok(())
+}
+
+/// 每 profile 端口表（#90）：profile × 启动端口 × lane 端口 × 运行状态。
+#[tauri::command]
+pub(crate) fn list_profile_ports() -> Vec<serde_json::Value> {
+    crate::profiles::scan_profiles()
+        .into_iter()
+        .map(|p| {
+            let port = crate::settings::port_for_profile(&p.name);
+            let lane_port = crate::settings::lane_port_for_profile(&p.name);
+            let running = crate::process::lifecycle::port_open(port);
+            serde_json::json!({ "profile": p.name, "port": port, "lane_port": lane_port, "running": running })
+        })
+        .collect()
+}
+
+/// 设置某 profile 的启动端口（占用时拒绝；web 双写 legacy settings.port）。
+#[tauri::command]
+pub(crate) fn set_profile_port(profile: String, port: u16) -> Result<(), String> {
+    if !crate::profiles::valid_profile_name(&profile) {
+        return Err("profile 名不合法".into());
+    }
+    if port == 0 {
+        return Err("端口不能为 0".into());
+    }
+    if crate::process::lifecycle::port_open(port) {
+        return Err(format!("端口 {port} 已被占用（本机其他实例或程序）"));
+    }
+    let mut settings = crate::settings::load_desktop_settings();
+    settings
+        .profile_ports
+        .get_or_insert_with(Default::default)
+        .insert(profile.clone(), port);
+    if profile == "web" {
+        settings.port = Some(port); // 双写 legacy 位（外部工具兼容）
+    }
+    crate::settings::save_desktop_settings(&settings);
+    log::info!("[ports] {profile} 启动端口 → {port}（重启生效）");
+    Ok(())
+}
+
+/// 新建 Profile（prompt 流，与托盘入口同一链路）。
+#[tauri::command]
+pub(crate) fn create_profile_flow_command(app: tauri::AppHandle) {
+    crate::profiles::create_profile_flow(&app);
+}
 /// 最近一次启动的隔离事件摘要（通知区）。
 #[tauri::command]
 pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {

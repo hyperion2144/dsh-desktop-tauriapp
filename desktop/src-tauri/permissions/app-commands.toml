@@ -170,6 +170,31 @@ description = "下载管理器：读取任务列表快照"
 commands = { allow = ["list_downloads"] }
 
 [[permission]]
+identifier = "allow-get-dsh-source"
+description = "桌面设置面板：get_dsh_source（#90）"
+commands = { allow = ["get_dsh_source"] }
+
+[[permission]]
+identifier = "allow-set-dsh-source"
+description = "桌面设置面板：set_dsh_source（#90）"
+commands = { allow = ["set_dsh_source"] }
+
+[[permission]]
+identifier = "allow-list-profile-ports"
+description = "桌面设置面板：list_profile_ports（#90）"
+commands = { allow = ["list_profile_ports"] }
+
+[[permission]]
+identifier = "allow-set-profile-port"
+description = "桌面设置面板：set_profile_port（#90）"
+commands = { allow = ["set_profile_port"] }
+
+[[permission]]
+identifier = "allow-create-profile-flow-command"
+description = "桌面设置面板：create_profile_flow_command（#90）"
+commands = { allow = ["create_profile_flow_command"] }
+
+[[permission]]
 identifier = "allow-pause-download"
 description = "下载管理器：暂停任务（.part 保留可续传）"
 commands = { allow = ["pause_download"] }
