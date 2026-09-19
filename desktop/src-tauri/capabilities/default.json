@@ -41,6 +41,7 @@
     "allow-select-remote-address",
     "allow-set-local-port",
     "allow-switch-profile-command",
+    "allow-migrate-profile",
     "allow-list-downloads",
     "allow-pause-download",
     "allow-resume-download",

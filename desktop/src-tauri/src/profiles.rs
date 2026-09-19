@@ -158,3 +158,271 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
     });
 }
 
+
+// ── profile 迁移（#88，设计契约来自 #83 研究报告）────────────────
+
+/// 迁移排除规则（纯函数）：
+/// - 锁/临时/编辑器残留：*.lock *.pid *.tmp *.swp ._*/.DS_Store
+/// - 启动即重写：cordis.yml（prepareProfile 每次写 []，复制无意义）
+/// - 绝对路径符号链接目录：.dsh-module-fallback/（dsh 启动自动重建）
+/// - 纯诊断日志：.plugin-manager/logs/、node_modules/.cache/
+pub(crate) fn migration_skips(rel: &str, file_name: &str, is_dir: bool) -> bool {
+    if file_name == ".DS_Store" || file_name == "cordis.yml" || file_name.starts_with("._") {
+        return true;
+    }
+    const SUFFIXES: [&str; 4] = [".lock", ".pid", ".tmp", ".swp"];
+    if SUFFIXES.iter().any(|s| file_name.ends_with(s)) {
+        return true;
+    }
+    if rel.starts_with(".dsh-module-fallback") || rel.starts_with(".plugin-manager/logs") {
+        return true;
+    }
+    if is_dir && file_name == ".cache" && rel.starts_with("node_modules") {
+        return true;
+    }
+    false
+}
+
+/// 复制统计（迁移结果汇报用）。
+#[derive(Default)]
+pub(crate) struct CopyStats {
+    pub(crate) files: u64,
+    pub(crate) dirs: u64,
+    pub(crate) links: u64,
+    pub(crate) skipped: u64,
+}
+
+/// 递归复制 profile 目录树（排除规则 + 符号链接感知）。
+/// `root` 用于计算相对路径供排除规则；unix 符号链接原样重建（node_modules/.bin
+/// 是相对链接，portable）；windows 重建需要特权，树内目标退化为复制、树外跳过。
+fn copy_dir_filtered(
+    root: &std::path::Path,
+    cur: &std::path::Path,
+    dst_cur: &std::path::Path,
+    stats: &mut CopyStats,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst_cur)?;
+    for entry in std::fs::read_dir(cur)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let ft = entry.file_type()?;
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| name.clone());
+        if migration_skips(&rel, &name, ft.is_dir()) {
+            stats.skipped += 1;
+            continue;
+        }
+        if ft.is_symlink() {
+            let target = std::fs::read_link(entry.path())?;
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&target, dst_cur.join(&name))?;
+                stats.links += 1;
+            }
+            #[cfg(windows)]
+            {
+                let resolved = if target.is_absolute() {
+                    target.clone()
+                } else {
+                    cur.join(&target)
+                };
+                match resolved.canonicalize() {
+                    Ok(p) if p.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) => {
+                        if p.is_dir() {
+                            copy_dir_filtered(root, &p, &dst_cur.join(&name), stats)?;
+                        } else {
+                            std::fs::copy(&p, dst_cur.join(&name))?;
+                            stats.files += 1;
+                        }
+                    }
+                    _ => stats.skipped += 1,
+                }
+            }
+            continue;
+        }
+        if ft.is_dir() {
+            copy_dir_filtered(root, &entry.path(), &dst_cur.join(&name), stats)?;
+            stats.dirs += 1;
+        } else {
+            std::fs::copy(entry.path(), dst_cur.join(&name))?;
+            stats.files += 1;
+        }
+    }
+    Ok(())
+}
+
+/// 读 profile 的 dsh.profile.bundles（迁移后校验用）。
+fn profile_bundles(profile_dir: &std::path::Path) -> Option<Vec<String>> {
+    let text = std::fs::read_to_string(profile_dir.join("package.json")).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&text).ok()?;
+    pkg.get("dsh")?
+        .get("profile")?
+        .get("bundles")?
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+}
+
+/// 迁移 profile（A→B 全量复制，#88）：
+/// - 目标为当前激活 profile 直接拒绝；目标已存在需 overwrite=true（先备份 mv 为 .bak-<ts>）
+/// - 源为激活 profile 时先停自家实例（台账/child 判定）；外部实例在跑则拒绝不代杀
+/// - 复制排除锁/临时/cordis.yml/.dsh-module-fallback 等；完成后校验 bundles 一致
+/// - 不自动切换：用户另行在设置里切换（switch_profile_command）
+pub(crate) async fn migrate_profile(
+    app: &AppHandle,
+    source: String,
+    dest: String,
+    overwrite: bool,
+) -> Result<String, String> {
+    if !valid_profile_name(&source) || !valid_profile_name(&dest) {
+        return Err("名称仅允许字母、数字、_ 与 -（1-32 字符）".into());
+    }
+    let active = crate::settings::configured_profile();
+    if dest == active {
+        return Err(format!("目标 profile {dest} 正在使用，拒绝迁移（请先切换到其他 profile）"));
+    }
+    let profiles_root = dsh_home().join("profiles");
+    let src_dir = profiles_root.join(&source);
+    let dst_dir = profiles_root.join(&dest);
+    if !src_dir.join("package.json").is_file() {
+        return Err(format!("源 profile {source} 不存在或缺少 package.json"));
+    }
+    // 源为激活 profile：先停自家实例（#83：锁/manifest 被运行中实例持有，必须停机复制）
+    if source == active {
+        let port = crate::settings::port_for_profile(&source);
+        let ours = crate::runtime::instances::load_instances()
+            .iter()
+            .any(|r| r.profile == source);
+        let child_alive = app.state::<DshState>().child.lock().unwrap().is_some();
+        if !ours && !child_alive && crate::process::lifecycle::port_open(port) {
+            return Err(format!(
+                "源 profile {source} 的外部实例正在运行，请先手动停止（不代杀外部进程）"
+            ));
+        }
+        if let Some(mut child) = app.state::<DshState>().child.lock().unwrap().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        crate::runtime::instances::remove_instance(&source);
+        let _ = crate::process::lifecycle::stop_port_owner(port).await;
+        log::info!("[migrate] 源 {source} 为激活 profile，已停自家实例");
+    }
+    // 目标已存在：备份后替换
+    let mut bak: Option<std::path::PathBuf> = None;
+    if dst_dir.exists() {
+        if !overwrite {
+            return Err(format!("目标 profile {dest} 已存在（需确认覆盖）"));
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bak_path = profiles_root.join(format!("{dest}.bak-{stamp}"));
+        std::fs::rename(&dst_dir, &bak_path).map_err(|e| format!("备份旧目标失败：{e}"))?;
+        bak = Some(bak_path);
+    }
+    // 复制（阻塞 IO 放 spawn_blocking）
+    let root = src_dir.clone();
+    let dst = dst_dir.clone();
+    let stats = tauri::async_runtime::spawn_blocking(move || {
+        let mut stats = CopyStats::default();
+        let result = copy_dir_filtered(&root, &root, &dst, &mut stats);
+        result.map(|_| stats)
+    })
+    .await
+    .map_err(|e| format!("复制任务异常：{e}"))?
+    .map_err(|e| format!("复制失败：{e}"))?;
+    // 校验 bundles 一致（源没有 bundles 时跳过校验）
+    let src_bundles = profile_bundles(&src_dir);
+    let dst_bundles = profile_bundles(&dst_dir);
+    if src_bundles.is_some() && src_bundles != dst_bundles {
+        return Err(format!(
+            "迁移后 bundles 校验不一致（源 {src_bundles:?} vs 目标 {dst_bundles:?}），请检查目标目录"
+        ));
+    }
+    let summary = format!(
+        "已迁移 {source} → {dest}：文件 {}、目录 {}、链接 {}、排除 {}{}",
+        stats.files,
+        stats.dirs,
+        stats.links,
+        stats.skipped,
+        bak.as_ref()
+            .map(|p| format!("；旧目标已备份为 {}", p.display()))
+            .unwrap_or_default()
+    );
+    log::info!("[migrate] {summary}");
+    show_notification(app, "Profile 迁移完成", &summary);
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_skips_locks_and_regenerables() {
+        // 锁/临时/编辑器残留
+        assert!(migration_skips("a/ledger.lock", "ledger.lock", false));
+        assert!(migration_skips("x.pid", "x.pid", false));
+        assert!(migration_skips("y.tmp", "y.tmp", false));
+        assert!(migration_skips("z.swp", "z.swp", false));
+        assert!(migration_skips("._Icon", "._Icon", false));
+        assert!(migration_skips(".DS_Store", ".DS_Store", false));
+        // 启动即重写 / 绝对符号链接目录 / 诊断日志
+        assert!(migration_skips("cordis.yml", "cordis.yml", false));
+        assert!(migration_skips(".dsh-module-fallback/node_modules", "node_modules", true));
+        assert!(migration_skips(".plugin-manager/logs/a.log", "a.log", false));
+        assert!(migration_skips("node_modules/.cache", ".cache", true));
+        // 正常文件不排
+        assert!(!migration_skips("package.json", "package.json", false));
+        assert!(!migration_skips("node_modules/.bin/dsh", "dsh", false));
+        assert!(!migration_skips("cordis.patch.yml", "cordis.patch.yml", false));
+    }
+
+    #[test]
+    fn copy_tree_filters_and_preserves_links() {
+        let dir = std::env::temp_dir().join(format!("dsh-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        std::fs::create_dir_all(src.join("node_modules/.bin")).unwrap();
+        std::fs::create_dir_all(src.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(src.join(".dsh-module-fallback/node_modules")).unwrap();
+        std::fs::write(
+            src.join("package.json"),
+            r#"{"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(src.join("cordis.yml"), "[]").unwrap();
+        std::fs::write(src.join("run.lock"), "x").unwrap();
+        std::fs::write(src.join("node_modules/pkg/index.js"), "hi").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../pkg", src.join("node_modules/.bin/pkg-link")).unwrap();
+
+        let mut stats = CopyStats::default();
+        copy_dir_filtered(&src, &src, &dst, &mut stats).unwrap();
+
+        // 排除项没过来
+        assert!(!dst.join("cordis.yml").exists());
+        assert!(!dst.join("run.lock").exists());
+        assert!(!dst.join(".dsh-module-fallback").exists());
+        // 正常内容在
+        assert!(dst.join("node_modules/pkg/index.js").is_file());
+        // bundles 校验可读且一致
+        assert_eq!(
+            profile_bundles(&src),
+            Some(vec!["@deepseek-ai/dsh-base".to_string()])
+        );
+        assert_eq!(profile_bundles(&src), profile_bundles(&dst));
+        // 符号链接重建（unix）
+        #[cfg(unix)]
+        {
+            let l = dst.join("node_modules/.bin/pkg-link");
+            assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_link(&l).unwrap(), std::path::PathBuf::from("../pkg"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

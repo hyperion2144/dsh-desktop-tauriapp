@@ -291,6 +291,12 @@
           "markdownDescription": "允许桌面 client 把诊断信息写入应用日志"
         },
         {
+          "description": "桌面设置面板：migrate_profile（#88 profile 迁移）",
+          "type": "string",
+          "const": "allow-migrate-profile",
+          "markdownDescription": "桌面设置面板：migrate_profile（#88 profile 迁移）"
+        },
+        {
           "description": "允许在外链点击/导航守卫中通过系统默认浏览器/应用打开 http/https/mailto/tel（桌面壳）",
           "type": "string",
           "const": "allow-open-external",

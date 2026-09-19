@@ -706,6 +706,18 @@ pub(crate) fn switch_profile_command(app: tauri::AppHandle, name: String) -> Res
     crate::profiles::switch_profile(&app, &name);
     Ok(())
 }
+
+/// 迁移 Profile（#88）：全量复制 A→B；源为激活 profile 时先停自家实例，
+/// 目标已存在需 overwrite=true（旧目标备份为 .bak-<ts>）。
+#[tauri::command]
+pub(crate) async fn migrate_profile(
+    app: tauri::AppHandle,
+    source: String,
+    dest: String,
+    overwrite: bool,
+) -> Result<String, String> {
+    crate::profiles::migrate_profile(&app, source, dest, overwrite).await
+}
 /// 最近一次启动的隔离事件摘要（通知区）。
 #[tauri::command]
 pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {

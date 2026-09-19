@@ -157,6 +157,11 @@ identifier = "allow-switch-profile-command"
 description = "桌面设置面板：switch_profile_command"
 commands = { allow = ["switch_profile_command"] }
 
+
+[[permission]]
+identifier = "allow-migrate-profile"
+description = "桌面设置面板：migrate_profile（#88 profile 迁移）"
+commands = { allow = ["migrate_profile"] }
 # ── 下载管理器（#72）：右侧边栏下载 tab / blob 拦截 / 桌面设置并发项 ──
 
 [[permission]]
