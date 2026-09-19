@@ -207,6 +207,12 @@
           "markdownDescription": "桌面设置面板：create_profile_flow_command（#90）"
         },
         {
+          "description": "桌面设置面板：下载并安装 dsh 运行时（#95）",
+          "type": "string",
+          "const": "allow-download-runtime",
+          "markdownDescription": "桌面设置面板：下载并安装 dsh 运行时（#95）"
+        },
+        {
           "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
           "type": "string",
           "const": "allow-explain-failure",
@@ -297,6 +303,12 @@
           "markdownDescription": "允许读取插件保险丝隔离名单"
         },
         {
+          "description": "桌面设置面板：运行时版本目录/已装列表（#95）",
+          "type": "string",
+          "const": "allow-list-runtime-catalog",
+          "markdownDescription": "桌面设置面板：运行时版本目录/已装列表（#95）"
+        },
+        {
           "description": "允许 WebView initialization_script 把 console.* 写入 ~/.dsh/dsh-desktop-webview.log",
           "type": "string",
           "const": "allow-log-console",
@@ -313,6 +325,12 @@
           "type": "string",
           "const": "allow-migrate-profile",
           "markdownDescription": "桌面设置面板：migrate_profile（#88 profile 迁移）"
+        },
+        {
+          "description": "桌面设置面板：migration_status（#90 迁移进度条）",
+          "type": "string",
+          "const": "allow-migration-status",
+          "markdownDescription": "桌面设置面板：migration_status（#90 迁移进度条）"
         },
         {
           "description": "允许在外链点击/导航守卫中通过系统默认浏览器/应用打开 http/https/mailto/tel（桌面壳）",
@@ -357,6 +375,12 @@
           "markdownDescription": "桌面设置面板：remove_remote_address"
         },
         {
+          "description": "桌面设置面板：删除已下载的 dsh 运行时（#95）",
+          "type": "string",
+          "const": "allow-remove-runtime",
+          "markdownDescription": "桌面设置面板：删除已下载的 dsh 运行时（#95）"
+        },
+        {
           "description": "允许触发插件修复（dsh plugin add 重装）",
           "type": "string",
           "const": "allow-repair-plugin",
@@ -391,6 +415,12 @@
           "type": "string",
           "const": "allow-run-doctor",
           "markdownDescription": "允许运行插件保险丝环境体检"
+        },
+        {
+          "description": "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）",
+          "type": "string",
+          "const": "allow-runtime-download-status",
+          "markdownDescription": "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）"
         },
         {
           "description": "下载管理器：blob 分块写入（base64）",
@@ -451,6 +481,12 @@
           "type": "string",
           "const": "allow-switch-profile-command",
           "markdownDescription": "桌面设置面板：switch_profile_command"
+        },
+        {
+          "description": "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）",
+          "type": "string",
+          "const": "allow-task-status",
+          "markdownDescription": "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）"
         },
         {
           "description": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）",

@@ -79,6 +79,9 @@ pub(crate) struct DshState {
     pub(crate) windows: Mutex<std::collections::BTreeMap<String, String>>,
     /// #89 多窗口：每 profile 的 dsh web process token（stdout 解析；激活 profile 另存 `web_token` 供主流程）。
     pub(crate) web_tokens: Mutex<std::collections::BTreeMap<String, String>>,
+    /// #90：每 profile 实际使用的 dsh 来源（"builtin"/"external"，spawn 时记录；
+    /// 设置 Tab 显示实际运行来源而非设置值——用户实测反馈）。
+    pub(crate) running_sources: Mutex<std::collections::BTreeMap<String, String>>,
     /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
     pub(crate) fuse_retries: AtomicU8,
     /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
@@ -147,6 +150,22 @@ impl DshState {
     pub(crate) fn web_token_for(&self, profile: &str) -> Option<String> {
         self.web_tokens.lock().unwrap().get(profile).cloned()
     }
+
+    /// 记录/清除 profile 实际使用的 dsh 来源（spawn/停止时调用）。
+    pub(crate) fn set_running_source(&self, profile: &str, source: &str) {
+        self.running_sources
+            .lock()
+            .unwrap()
+            .insert(profile.to_string(), source.to_string());
+    }
+
+    pub(crate) fn running_source_for(&self, profile: &str) -> Option<String> {
+        self.running_sources.lock().unwrap().get(profile).cloned()
+    }
+
+    pub(crate) fn clear_running_source(&self, profile: &str) {
+        self.running_sources.lock().unwrap().remove(profile);
+    }
     /// 存 per-profile web token（spawn stdout 线程调用）。
     pub(crate) fn set_web_token(&self, profile: &str, token: String) {
         self.web_tokens
@@ -211,6 +230,7 @@ mod tests {
             children: Mutex::new(Default::default()),
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
+             running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
@@ -230,6 +250,51 @@ mod tests {
         *g.lock().unwrap() = Some((tauri::PhysicalPosition::new(100, 200),
                                     tauri::PhysicalSize::new(800, 600)));
         assert!(g.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn multiwin_bindings_roundtrip() {
+        // #89：窗口绑定与 per-profile token 的存取语义
+        let state = DshState {
+            child: Mutex::new(None),
+            spawned_this_run: AtomicBool::new(false),
+            mode_prompt_needed: AtomicBool::new(false),
+            mode: AtomicU8::new(MODE_ADVANCED),
+            status: AtomicU8::new(STATUS_IDLE),
+            loading_url: Mutex::new(None),
+            tray: Mutex::new(None),
+            spawn_failed: AtomicBool::new(false),
+            restarting: AtomicBool::new(false),
+            ready_once: AtomicBool::new(false),
+            pending_input: Mutex::new(None),
+            quitting: AtomicBool::new(false),
+            tray_tip_shown: AtomicBool::new(false),
+            unread: AtomicU32::new(0),
+            pet_save_at: Mutex::new(None),
+            notify_port: AtomicU16::new(0),
+            notify_token: Mutex::new(String::new()),
+            web_token: Mutex::new(String::new()),
+            pre_zoom_geom: Mutex::new(None),
+            stderr_bufs: Mutex::new(Default::default()),
+            children: Mutex::new(Default::default()),
+            windows: Mutex::new(Default::default()),
+            web_tokens: Mutex::new(Default::default()),
+            running_sources: Mutex::new(Default::default()),
+            fuse_retries: AtomicU8::new(0),
+            fuse_summary: Mutex::new(None),
+            downloads: crate::download::DownloadManager::default(),
+        };
+        // 窗口绑定：写入/覆盖/解除
+        state.bind_window("desktop", "profile-desktop".into());
+        assert_eq!(state.window_of("desktop").as_deref(), Some("profile-desktop"));
+        state.bind_window("desktop", "profile-desktop-2".into());
+        assert_eq!(state.window_of("desktop").as_deref(), Some("profile-desktop-2"));
+        state.unbind_window("desktop");
+        assert!(state.window_of("desktop").is_none());
+        // per-profile token：写入/读取
+        state.set_web_token("desktop", "tok-1".into());
+        assert_eq!(state.web_token_for("desktop").as_deref(), Some("tok-1"));
+        assert!(state.web_token_for("web").is_none());
     }
 
 }

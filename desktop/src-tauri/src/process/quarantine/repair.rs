@@ -26,16 +26,17 @@ pub fn is_repairable(reason: &str, name: &str) -> bool {
 
 /// 执行修复：重装包（`@latest`），由调用方在 spawn_blocking 里跑。
 /// 返回 Ok(()) 表示 `dsh plugin add` 成功（是否真正修复由下次启动验证）。
-pub fn repair(profile: &str, name: &str) -> Result<(), String> {
+pub fn repair(app: &tauri::AppHandle, profile: &str, name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("缺少包名，无法修复".into());
     }
     let spec = format!("{name}@latest");
     log::info!("[fuse] 修复：dsh plugin --profile {profile} add {spec}");
-    if run_profile_plugin_add(profile, &spec) {
+    let (ok, stderr_tail) = run_profile_plugin_add(app, profile, &spec);
+    if ok {
         Ok(())
     } else {
-        Err(format!("dsh plugin add {spec} 失败（详见日志）"))
+        Err(format!("dsh plugin add {spec} 失败：{stderr_tail}"))
     }
 }
 

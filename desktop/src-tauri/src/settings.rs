@@ -1,7 +1,7 @@
 //! 设置读写模块。
 //!
 //! 迁移自 lib.rs 功能区域 1（settings）+ 功能区域 2（configured_* 辅助）。
-//! 包含 DesktopSettings、load/save_desktop_settings、from_yaml_value、
+//! 包含 DesktopSettings、load_desktop_settings、from_yaml_value、
 //! legacy_desktop_block、configured_port/profile/lane_port/cloudflared_bin、settings_path。
 
 use std::path::PathBuf;
@@ -59,6 +59,15 @@ pub struct DesktopSettings {
     /// dsh 来源（#85 拍板）：builtin=内置运行时（默认，内部 runProfile 代码路径启动）/
     /// external=外部 CLI（DSH_BIN → PATH → npm 全局）。DSH_MODE env 可覆盖。
     pub dsh_mode: Option<String>,
+    /// 运行时版本（#95）：选中的已下载 dsh 运行时版本；None=用内置版本。
+    #[serde(default)]
+    pub dsh_runtime: Option<String>,
+    /// 运行时下载源（#95）：github（默认）| npm。
+    #[serde(default)]
+    pub runtime_source: Option<String>,
+    /// GitHub 运行时仓库（owner/repo，github 源用；默认官方仓库）。
+    #[serde(default)]
+    pub runtime_github_repo: Option<String>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -140,43 +149,11 @@ pub fn legacy_desktop_block(value: &serde_yaml::Value) -> Option<&serde_yaml::Va
     }
 }
 
-/// 保存桌面壳设置：与现有 settings.yaml 合并（只写 `dsh-desktop-tauriapp:` 键），原子写；
-/// 解析失败时先备份原文件，再以仅含 `dsh-desktop-tauriapp:` 的新文档落盘，绝不丢用户内容。
-pub fn save_desktop_settings(settings: &DesktopSettings) {
-    let path = settings_path();
-    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_yaml::from_str(&text).unwrap_or_else(|_| {
-            let _ = std::fs::copy(&path, path.with_extension("yaml.bak"));
-            serde_yaml::Value::Mapping(serde_yaml::Mapping::new())
-        }),
-        Err(_) => serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-    };
-    if let Some(map) = root.as_mapping_mut() {
-        map.insert(
-            serde_yaml::Value::String("dsh-desktop-tauriapp".into()),
-            serde_yaml::to_value(settings).unwrap_or(serde_yaml::Value::Null),
-        );
-        // 迁移清理：删掉上一版 bug 遗留的 `desktop:` 块（仅 schema 匹配时）
-        if let Some(legacy) = map.get(&serde_yaml::Value::String("desktop".into())) {
-            if legacy_desktop_block(&serde_yaml::Value::Mapping(
-                [(serde_yaml::Value::String("desktop".into()), legacy.clone())]
-                    .into_iter()
-                    .collect(),
-            ))
-            .is_some()
-            {
-                map.remove(&serde_yaml::Value::String("desktop".into()));
-                log::info!("settings.yaml 已把遗留 desktop: 块迁移到 dsh-desktop-tauriapp:");
-            }
-        }
-    }
-    let out = serde_yaml::to_string(&root).unwrap_or_default();
-    let tmp = path.with_extension("yaml.tmp");
-    if std::fs::write(&tmp, &out).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
-}
+// #90 架构约束（用户拍板）：Rust 不写 settings.yaml。设置修改一律由桌面插件
+// （dsh-desktop-tauriapp 的 host 端）经 dsh settings 服务（settings.mutate）落盘；
+// Rust 仅读取（启动前读不到/无对应设置时使用内置默认值）。
 
+// 注意：注释保留说明——settings.yaml 由 dsh settings 服务整体管理，本模块只读。
 /// 旧全局端口（web profile 的 legacy 存储位）：DSH_DESKTOP_PORT env > settings.port > 3080。
 /// #86 起端口入口是 port_for_profile；本函数仅作 web 兼容回退与外部实例复用判定。
 pub fn configured_port() -> u16 {
@@ -206,7 +183,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
     match profile {
         "web" => 3080,
-        "desktop" => 3081,
+        "desk" => 3081,
         other => PORT_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
     }
 }
@@ -216,7 +193,7 @@ pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
 pub(crate) fn default_lane_port_for_profile(profile: &str) -> u16 {
     match profile {
         "web" => 3092,
-        "desktop" => 3093,
+        "desk" => 3093,
         other => LANE_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
     }
 }
@@ -256,11 +233,12 @@ pub fn port_for_profile(profile: &str) -> u16 {
                 .profile_ports
                 .get_or_insert_with(Default::default)
                 .insert(profile.to_string(), p);
-            save_desktop_settings(&settings);
+            // #90 架构约束：Rust 不写 settings.yaml——分配仅会话内存；
+            // 确定性散列保证跨启动稳定，显式改端口由 client→插件→settings 服务持久化
             log::info!("[ports] profile {profile} 分配启动端口 {p}");
             p
-        }
     }
+}
 }
 
 /// 取 profile 的 lane 端口（#86/#94）：语义同 port_for_profile，基数换成 lane。
@@ -287,16 +265,15 @@ pub fn lane_port_for_profile(profile: &str) -> u16 {
                 .profile_lane_ports
                 .get_or_insert_with(Default::default)
                 .insert(profile.to_string(), p);
-            save_desktop_settings(&settings);
+            // 同上：会话内存，不写 settings.yaml
             p
         }
     }
 }
 
-/// 全新安装的默认 profile（#87 拍板：叫 desktop）。
-/// 注意：dsh 0.1.6+ 的 CLI 把 `desktop` 保留给官方 Electron 应用（拒绝 --profile desktop），
-/// 0.1.5-rc.2（latest）无此限制；alpha 安装包变体的兼容归 #85 评估直接入口。
-pub(crate) const FRESH_DEFAULT_PROFILE: &str = "desktop";
+/// 全新安装的默认 profile（#87 原名 desktop，#95 改名 desk：dsh CLI 把 `desktop` 保留给
+/// 官方 Electron 应用——plugin add 被拒、生态处处绕行，非保留名一马平川）。
+pub(crate) const FRESH_DEFAULT_PROFILE: &str = "desk";
 
 /// 未设置 active_profile 时的默认值（纯函数，便于单测）：
 /// 全新安装（settings.yaml 不存在）→ desktop；存量（文件存在但未设置）→ web，不静默搬家。
@@ -308,13 +285,15 @@ pub(crate) fn default_profile_when_unset(settings_file_exists: bool) -> String {
     }
 }
 
-/// 激活 profile（settings.yaml active_profile；未设置时：全新安装→desktop、存量→web）。
+/// 激活 profile（settings.yaml active_profile；未设置时：全新安装→desk、存量→web）。
+/// #95 改名兼容：旧值 desktop 自动映射 desk（settings.yaml 单写者归 dsh settings 服务，
+/// 读侧映射避免碰写路径）。
 pub fn configured_profile() -> String {
     if let Some(p) = load_desktop_settings()
         .active_profile
         .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
     {
-        return p;
+        return if p == "desktop" { "desk".to_string() } else { p };
     }
     default_profile_when_unset(settings_path().exists())
 }
@@ -391,14 +370,17 @@ mod tests {
       ai_base_url: None,
       ai_key_env: None,
       download_concurrency: Some(5),
-      profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
+      profile_ports: Some([("web".into(), 3080), ("desk".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
        dsh_mode: Some("builtin".into()),
+      dsh_runtime: None,
+      runtime_source: None,
+      runtime_github_repo: None,
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
     assert_eq!(back.download_concurrency, Some(5));
-    assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desktop")).copied(), Some(3081));
+    assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desk")).copied(), Some(3081));
     assert_eq!(back.profile_lane_ports.as_ref().and_then(|m| m.get("web")).copied(), Some(3091));
     assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
     assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
@@ -434,7 +416,7 @@ mod tests {
   #[test]
   fn default_port_formula_fixed_profiles() {
     assert_eq!(default_port_for_profile("web"), 3080);
-    assert_eq!(default_port_for_profile("desktop"), 3081);
+    assert_eq!(default_port_for_profile("desk"), 3081);
     // 其余 profile 落在 [3082, 3594)，不与固定端口重叠
     for name in ["research", "work-2", "x"] {
       let p = default_port_for_profile(name);
@@ -445,7 +427,7 @@ mod tests {
   #[test]
   fn default_lane_formula_fixed_profiles() {
      assert_eq!(default_lane_port_for_profile("web"), 3092);
-     assert_eq!(default_lane_port_for_profile("desktop"), 3093);
+     assert_eq!(default_lane_port_for_profile("desk"), 3093);
     let p = default_lane_port_for_profile("research");
     assert!((LANE_BASE_OTHER..LANE_BASE_OTHER + 512).contains(&p));
   }
@@ -468,9 +450,9 @@ mod tests {
   #[test]
   fn fresh_install_defaults_to_desktop_profile() {
     // #87：全新安装（无 settings.yaml）默认 desktop；存量（文件在但未设置）保持 web
-    assert_eq!(default_profile_when_unset(false), "desktop");
+    assert_eq!(default_profile_when_unset(false), "desk");
     assert_eq!(default_profile_when_unset(true), "web");
-    assert_eq!(FRESH_DEFAULT_PROFILE, "desktop");
+    assert_eq!(FRESH_DEFAULT_PROFILE, "desk");
   }
 
 

@@ -88,13 +88,19 @@ fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
         return;
     }
     app.state::<DshState>().bind_window(profile, label.clone());
+    // 标题栏形态 + 三插件注入都跟随主窗口当前模式（#90 用户拍板：次窗与主窗一致）
+    let advanced = app.state::<DshState>().mode.load(std::sync::atomic::Ordering::SeqCst)
+        == crate::MODE_ADVANCED;
+    if let Some(w) = app.get_webview_window(&label) {
+        crate::ui::tray::apply_titlebar_for(&w, advanced);
+    }
 
     let app = app.clone();
     let profile = profile.to_string();
     tauri::async_runtime::spawn(async move {
         // 清 per-profile token 残留（旧实例的 token 对新实例无效）
         app.state::<DshState>().web_tokens.lock().unwrap().remove(&profile);
-        match spawn_dsh(&app, &profile, port, true) {
+        match spawn_dsh(&app, &profile, port, advanced) {
             Ok(child) => {
                 app.state::<DshState>().set_child(&profile, child);
                 crate::ui::tray::refresh_tray_mode(&app);

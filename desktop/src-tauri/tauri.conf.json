@@ -60,7 +60,11 @@
     "resources": {
       "embedded/dsh-desktop-tauriapp": "plugins/dsh-desktop-tauriapp/",
       "embedded/dsh-mobile-access": "plugins/dsh-mobile-access/",
-      "embedded/dsh-web-mobile": "plugins/dsh-web-mobile/"
-    }
+      "embedded/dsh-web-mobile": "plugins/dsh-web-mobile/",
+      "resources/dsh/": "dsh/"
+    },
+    "externalBin": [
+      "binaries/dsh-node"
+    ]
   }
 }

@@ -452,7 +452,7 @@ pub(crate) fn set_concurrency(app: &AppHandle, value: u32) {
     let clamped = value.clamp(1, 32);
     let mut settings = crate::settings::load_desktop_settings();
     settings.download_concurrency = Some(clamped);
-    crate::settings::save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     app.state::<crate::DshState>()
         .downloads
         .concurrency

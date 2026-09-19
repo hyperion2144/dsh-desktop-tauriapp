@@ -124,10 +124,24 @@ async fn monitor(app: AppHandle) {
 }
 
 /// 失败收尾：置 spawn_failed（导航/watchdog 都会让位），导航到错误页。
+/// 失败收尾：置 spawn_failed；stderr 尾部落盘 + 回放到页面控制台（#90 实测：
+/// 冷启动早期事件在页面 listener 就绪前丢失，控制台全空、用户无诊断线索）。
 fn fail_closed(app: &AppHandle, reason: &str) {
     let state = app.state::<DshState>();
     state.spawn_failed.store(true, Ordering::SeqCst);
+    let profile = crate::settings::configured_profile();
+    let tail = state.stderr_tail_for(&profile, 40).join("\n");
+    // 落盘：~/.dsh/dsh-desktop-tauriapp/last-boot-failure.log（诊断证据）
+    let dir = crate::settings::dsh_home().join("dsh-desktop-tauriapp");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(
+        dir.join("last-boot-failure.log"),
+        format!("time: {}\nprofile: {}\nreason: {}\n\n{}\n", chrono_like_now(), profile, reason, tail),
+    );
     drop(state);
+    for line in tail.lines() {
+        let _ = app.emit("dsh-console", serde_json::json!({ "stream": "stderr", "line": line }));
+    }
     show_notification(app, "dsh 启动失败", reason);
     show_error(app, "boot-failed");
 }

@@ -9,11 +9,11 @@
 // 资源时自动回退外部 dsh，见 runtime/builtin.rs）。
 import { execSync } from "node:child_process";
 import { rmSync, mkdirSync, writeFileSync, chmodSync, cpSync, readdirSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, resolve, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const srcTauri = resolve(scriptDir, "..");
+const srcTauri = resolve(scriptDir, "..", "src-tauri");
 
 // ── 参数 ──
 const argv = process.argv.slice(2);
@@ -48,17 +48,15 @@ if (!skipPackages) {
   if (!version) die(`npm dist-tags 里没有 ${variant}（现有：${Object.keys(distTags).join(", ")}）`);
   log(`内置 dsh ${variant} = ${version}`);
 
-  rmSync(stage, { recursive: true, force: true });
   mkdirSync(stage, { recursive: true });
   writeFileSync(join(stage, "package.json"), JSON.stringify({ private: true }));
-  execSync(`npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@${version}`, {
+  execSync(`npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@${version} pnpm@10`, {
     cwd: stage, stdio: "inherit",
   });
 
   rmSync(resourcesDsh, { recursive: true, force: true });
+  cpSync(join(stage, "node_modules"), join(resourcesDsh, "node_modules"), { recursive: true, verbatimSymlinks: true });
   mkdirSync(dirname(resourcesDsh), { recursive: true });
-  // verbatimSymlinks: node_modules/.bin 相对链接原样保留（#83 迁移研究同款结论）
-  cpSync(join(stage, "node_modules"), resourcesDsh, { recursive: true, verbatimSymlinks: true });
   writeFileSync(
     join(resourcesDsh, "desktop-runtime.json"),
     JSON.stringify({ variant, dsh: version, node: nodeVersionTag, staged_at: new Date().toISOString() }, null, 2)
@@ -80,20 +78,26 @@ if (!skipNode) {
         : "x86_64-unknown-linux-gnu";
 
   const index = await (await fetch(`https://nodejs.org/dist/${nodeVersionTag}/`)).text();
-  const re = new RegExp(`href="((?:node-)?v?[0-9][0-9.]*-${os}-${nodeArch}\\.${ext})"`);
+  // dist 索引的 href 是绝对路径（/dist/<tag>/node-vX-darwin-arm64.tar.gz）
+  const re = new RegExp(`href="([^"]*-${os}-${nodeArch}\\.${ext})"`);
   const m = index.match(re);
   if (!m) die(`node dist ${nodeVersionTag} 里找不到 ${os}-${nodeArch}.${ext} 的包`);
-  const file = m[1];
-  const url = `https://nodejs.org/dist/${nodeVersionTag}/${file}`;
+  const url = new URL(m[1], "https://nodejs.org").toString();
   log(`下载 Node sidecar：${url}`);
 
   const tmp = join(srcTauri, ".builtin-stage-node");
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
-  const archive = join(tmp, file);
+  const archive = join(tmp, basename(m[1]));
   const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
   writeFileSync(archive, buf);
-  execSync(`tar -x${ext === "zip" ? "f" : "zf"} "${archive}" -C "${tmp}"`, { stdio: "inherit" });
+  // Windows：GNU tar 会把 "D:\" 当远程主机（Cannot connect to D:），zip 用 PowerShell 展开；
+  // unix 用 tar -xzf。
+  if (ext === "zip") {
+    execSync(`powershell -NoProfile -Command "Expand-Archive -LiteralPath '${archive}' -DestinationPath '${tmp}' -Force"`, { stdio: "inherit" });
+  } else {
+    execSync(`tar -xzf "${archive}" -C "${tmp}"`, { stdio: "inherit" });
+  }
 
   const extracted = readdirSync(tmp).find((d) => d.startsWith("node-"));
   if (!extracted) die("解压后找不到 node-v* 目录");

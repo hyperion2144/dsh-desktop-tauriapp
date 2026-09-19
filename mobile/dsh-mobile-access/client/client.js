@@ -33,7 +33,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// mobile/dsh-mobile-access/client/client.source.js
+// mobile/dsh-mobile-access/client/client.source.jsx
 var client_source_exports = {};
 __export(client_source_exports, {
   apply: () => apply,
@@ -1676,7 +1676,8 @@ var createDataURL = function(width, height, getPixel) {
 var qrcode_default = qrcode;
 var stringToBytes = qrcode.stringToBytes;
 
-// mobile/dsh-mobile-access/client/client.source.js
+// mobile/dsh-mobile-access/client/client.source.jsx
+var import_jsx_runtime = require("react/jsx-runtime");
 var inject = ["slots"];
 function apply(ctx) {
   const slots = ctx?.slots;
@@ -1684,12 +1685,18 @@ function apply(ctx) {
     ctx?.logger?.warn?.("dsh-mobile-access: slots \u670D\u52A1\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u8BBE\u7F6E\u5165\u53E3");
     return;
   }
-  slots.inject("settings.section", () => slots.register({
-    name: "settings.section",
-    id: "dsh-mobile-access",
-    order: 20,
-    label: () => "\u8FDC\u7A0B\u8BBF\u95EE"
-  }, MobileAccessPanel));
+  slots.inject(
+    "settings.section",
+    () => slots.register(
+      {
+        name: "settings.section",
+        id: "dsh-mobile-access",
+        order: 20,
+        label: () => "\u8FDC\u7A0B\u8BBF\u95EE"
+      },
+      MobileAccessPanel
+    )
+  );
 }
 var lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
 var LANE = "http://127.0.0.1:" + lanePort;
@@ -1710,320 +1717,223 @@ async function lane(path, opts = {}) {
   if (res.status === 204) return null;
   return res.json();
 }
-function el(tag, text, style) {
-  const e = document.createElement(tag);
-  if (text != null) e.textContent = text;
-  if (style) e.style.cssText = style;
-  return e;
+function readCssVar(name, fallback) {
+  if (typeof document === "undefined") return fallback;
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+var BUTTON_CSS = `
+[data-mobile-access-btn] {
+transition: transform .08s ease, filter .15s ease, background .15s ease, border-color .15s ease, color .15s ease;
+user-select: none;
+}
+[data-mobile-access-btn]:hover { filter: brightness(1.18); }
+[data-mobile-access-btn]:active {
+transform: translateY(1px) scale(0.97);
+filter: brightness(0.92);
+}
+[data-mobile-access-btn][data-busy="1"] {
+opacity: 0.55;
+cursor: progress;
+}
+[data-mobile-access-btn][data-flash="ok"] {
+background: #2fbf71 !important;
+border-color: #2fbf71 !important;
+color: #fff !important;
+}
+[data-mobile-access-btn][data-flash="err"] {
+background: #e5484d !important;
+border-color: #e5484d !important;
+color: #fff !important;
+}
+`;
+function PanelButton({ text, ghost, cssVars, onClick }) {
+  const [busy, setBusy] = (0, import_react.useState)(false);
+  const [flash, setFlash] = (0, import_react.useState)(null);
+  const [flashText, setFlashText] = (0, import_react.useState)(null);
+  const flashTimerRef = (0, import_react.useRef)(null);
+  (0, import_react.useEffect)(
+    () => () => {
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    },
+    []
+  );
+  const handleClick = async () => {
+    if (busy || !onClick) return;
+    setBusy(true);
+    try {
+      await onClick({
+        flash: (kind, newText, ms = 1500) => {
+          if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+          if (newText != null) setFlashText(newText);
+          setFlash(kind);
+          flashTimerRef.current = setTimeout(() => {
+            setFlash(null);
+            setFlashText(null);
+            flashTimerRef.current = null;
+          }, ms);
+        }
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const style = {
+    background: ghost ? "transparent" : cssVars.accent,
+    color: ghost ? cssVars.text2 : "#fff",
+    border: `1px solid ${ghost ? cssVars.line : "transparent"}`,
+    borderRadius: 8,
+    padding: "5px 12px",
+    fontSize: 12,
+    cursor: "pointer"
+  };
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+    "button",
+    {
+      type: "button",
+      "data-mobile-access-btn": "1",
+      "data-busy": busy ? "1" : void 0,
+      "data-flash": flash ?? void 0,
+      style,
+      onClick: handleClick,
+      children: flashText ?? text
+    }
+  );
+}
+function makeQr(link) {
+  if (!link) return null;
+  try {
+    const qr = qrcode_default(0, "M");
+    qr.addData(link);
+    qr.make();
+    return qr.createDataURL(4, 8);
+  } catch {
+    return null;
+  }
+}
+function ChannelCard({
+  label,
+  desc,
+  cssVars,
+  beforeLink,
+  link,
+  qrSrc,
+  hint,
+  actions
+}) {
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+    "div",
+    {
+      style: {
+        border: `1px solid ${cssVars.line}`,
+        borderRadius: 10,
+        padding: 14,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { fontSize: 13, fontWeight: 600 }, children: label }),
+        desc && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cssVars.text2, fontSize: 12 }, children: desc }),
+        beforeLink,
+        link && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          "code",
+          {
+            style: {
+              color: cssVars.text,
+              fontSize: 12,
+              wordBreak: "break-all",
+              background: cssVars.panel,
+              border: `1px solid ${cssVars.line}`,
+              borderRadius: 6,
+              padding: 6,
+              display: "block"
+            },
+            children: link
+          }
+        ),
+        qrSrc && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          "img",
+          {
+            alt: label + " \u914D\u5BF9\u4E8C\u7EF4\u7801",
+            src: qrSrc,
+            style: {
+              width: 180,
+              height: 180,
+              imageRendering: "pixelated",
+              borderRadius: 8,
+              border: `1px solid ${cssVars.line}`
+            }
+          }
+        ),
+        hint?.text && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: hint.color, fontSize: 12 }, children: hint.text }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" }, children: actions })
+      ]
+    }
+  );
 }
 function MobileAccessPanel() {
-  const ref = import_react.default.useRef(null);
-  import_react.default.useEffect(() => {
-    const host = ref.current;
-    if (!host || host.childNodes.length) return;
-    const panel = buildPanelDom();
-    host.appendChild(panel);
+  const cssVars = (0, import_react.useMemo)(
+    () => ({
+      text: readCssVar("--dsw-alias-label-primary", "#e7eaf0"),
+      text2: readCssVar("--dsw-alias-label-secondary", "#9aa4b2"),
+      panel: readCssVar("--dsw-alias-bg-layer-1", "#171a21"),
+      line: readCssVar("--dsw-alias-border-l2", "#2a2f3a"),
+      accent: readCssVar("--dsw-alias-state-accent-primary", "#4d6bfe")
+    }),
+    []
+  );
+  (0, import_react.useEffect)(() => {
+    const styleEl = document.createElement("style");
+    styleEl.setAttribute("data-mobile-access", "1");
+    styleEl.textContent = BUTTON_CSS;
+    document.head.appendChild(styleEl);
     return () => {
-      try {
-        panel._cfClose?.();
-      } catch {
-      }
-      panel.remove();
+      styleEl.remove();
     };
   }, []);
-  return import_react.default.createElement("div", { ref });
-}
-function buildPanelDom() {
-  const root = document.createElement("div");
-  root.dataset.mobileAccessPanel = "1";
-  root.style.cssText = "display:flex;flex-direction:column;gap:12px;max-width:640px;";
-  const cssVar = (name, fallback) => {
-    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    return v || fallback;
-  };
-  const c = {
-    text: () => cssVar("--dsw-alias-label-primary", "#e7eaf0"),
-    text2: () => cssVar("--dsw-alias-label-secondary", "#9aa4b2"),
-    panel: () => cssVar("--dsw-alias-bg-layer-1", "#171a21"),
-    line: () => cssVar("--dsw-alias-border-l2", "#2a2f3a"),
-    accent: () => cssVar("--dsw-alias-state-accent-primary", "#4d6bfe")
-  };
-  const btn = (text, ghost) => {
-    const b = el(
-      "button",
-      text,
-      `background:${ghost ? "transparent" : c.accent()};color:${ghost ? c.text2() : "#fff"};border:1px solid ${ghost ? c.line() : "transparent"};border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer`
-    );
-    b.dataset.mobileAccessBtn = "1";
-    return b;
-  };
-  const btnCss = document.createElement("style");
-  btnCss.textContent = `
-    [data-mobile-access-btn] {
-      transition: transform .08s ease, filter .15s ease, background .15s ease, border-color .15s ease, color .15s ease;
-      user-select: none;
-    }
-    [data-mobile-access-btn]:hover { filter: brightness(1.18); }
-    [data-mobile-access-btn]:active {
-      transform: translateY(1px) scale(0.97);
-      filter: brightness(0.92);
-    }
-    [data-mobile-access-btn][data-busy="1"] {
-      opacity: 0.55;
-      cursor: progress;
-    }
-    [data-mobile-access-btn][data-flash="ok"] {
-      background: #2fbf71 !important;
-      border-color: #2fbf71 !important;
-      color: #fff !important;
-    }
-    [data-mobile-access-btn][data-flash="err"] {
-      background: #e5484d !important;
-      border-color: #e5484d !important;
-      color: #fff !important;
-    }
-  `;
-  document.head.appendChild(btnCss);
-  const flashCopy = (btnEl, link) => {
-    if (!link) link = btnEl.dataset.link;
-    if (!link) return;
-    navigator.clipboard?.writeText(link).catch(() => {
-    });
-    const orig = btnEl.dataset.origText || btnEl.textContent;
-    btnEl.dataset.origText = orig;
-    btnEl.textContent = "\u5DF2\u590D\u5236 \u2713";
-    btnEl.dataset.flash = "ok";
-    setTimeout(() => {
-      btnEl.textContent = orig;
-      btnEl.dataset.flash = "";
-    }, 1500);
-  };
-  const flash = (btnEl, kind, text, ms = 1500) => {
-    const orig = btnEl.dataset.origText || btnEl.textContent;
-    btnEl.dataset.origText = orig;
-    if (text) btnEl.textContent = text;
-    btnEl.dataset.flash = kind;
-    setTimeout(() => {
-      btnEl.textContent = orig;
-      btnEl.dataset.flash = "";
-    }, ms);
-  };
-  const withBusy = async (btnEl, fn) => {
-    btnEl.dataset.busy = "1";
-    try {
-      return await fn();
-    } finally {
-      delete btnEl.dataset.busy;
-    }
-  };
-  const title = el("div", "\u8FDC\u7A0B\u8BBF\u95EE", "font-size:15px;font-weight:600");
-  const sub = el(
-    "div",
-    "\u4E09\u4E2A\u901A\u9053\u72EC\u7ACB\u7EF4\u62A4\u914D\u5BF9\u4E8C\u7EF4\u7801\uFF1A\u626B\u7801/\u6253\u5F00\u94FE\u63A5\u5373\u53EF\u914D\u5BF9\uFF08\u4E00\u6B21\u6027\u4EE4\u724C + \u4F1A\u8BDD Cookie\uFF09\u3002",
-    `color:${c.text2()};font-size:13px`
-  );
-  function makeChannelCard(label, desc) {
-    const card = el(
-      "div",
-      null,
-      `border:1px solid ${c.line()};border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px`
-    );
-    card.appendChild(el("div", label, "font-size:13px;font-weight:600"));
-    if (desc) card.appendChild(el("div", desc, `color:${c.text2()};font-size:12px`));
-    const linkBox = el(
-      "code",
-      "",
-      `color:${c.text()};font-size:12px;word-break:break-all;background:${c.panel()};border:1px solid ${c.line()};border-radius:6px;padding:6px;display:none`
-    );
-    const qrImg = document.createElement("img");
-    qrImg.alt = label + " \u914D\u5BF9\u4E8C\u7EF4\u7801";
-    qrImg.style.cssText = `width:180px;height:180px;image-rendering:pixelated;border-radius:8px;border:1px solid ${c.line()};display:none`;
-    const hint = el("div", "", `color:${c.text2()};font-size:12px`);
-    const row = el("div", null, "display:flex;gap:8px;flex-wrap:wrap");
-    card.appendChild(linkBox);
-    card.appendChild(qrImg);
-    card.appendChild(hint);
-    card.appendChild(row);
-    const showQr = (link) => {
-      linkBox.textContent = link;
-      linkBox.style.display = "block";
-      linkBox.dataset.link = link;
-      try {
-        const qr = qrcode_default(0, "M");
-        qr.addData(link);
-        qr.make();
-        qrImg.src = qr.createDataURL(4, 8);
-        qrImg.style.display = "block";
-      } catch {
-        qrImg.style.display = "none";
-      }
-    };
-    return { card, linkBox, qrImg, hint, row, showQr };
-  }
-  const lan = makeChannelCard("\u5C40\u57DF\u7F51", "\u624B\u673A\u8FDE\u540C\u4E00 WiFi\uFF0C\u626B\u6B64\u7801\u76F4\u8FDE\uFF08\u4EC5\u5C40\u57DF\u7F51\u53EF\u8FBE\uFF09\u3002");
-  let lanBase = null;
-  const lanMintBtn = btn("\u94F8\u9020\u5C40\u57DF\u7F51\u4EE4\u724C");
-  const lanCopy = btn("\u590D\u5236\u94FE\u63A5", true);
-  lanCopy.onclick = () => flashCopy(lanCopy, lan.linkBox.dataset.link);
-  lan.row.appendChild(lanMintBtn);
-  lan.row.appendChild(lanCopy);
-  const tun = makeChannelCard(
-    "\u7B2C\u4E09\u65B9\u96A7\u9053\uFF08cpolar \u7B49\uFF09",
-    "\u96A7\u9053\u9700\u6307\u5411\u6539\u5199\u4EE3\u7406\u7AEF\u53E3 127.0.0.1:" + lanePort + "\uFF1B\u7C98\u8D34\u5730\u5740\u6821\u9A8C\u53EF\u8FBE\u540E\uFF0C\u7528\u6B64\u5730\u5740\u751F\u6210\u81EA\u5DF1\u7684\u914D\u5BF9\u4E8C\u7EF4\u7801\u3002"
-  );
-  const tunInput = el(
-    "input",
-    null,
-    `background:${c.panel()};border:1px solid ${c.line()};color:${c.text()};border-radius:8px;padding:7px 10px;font-size:13px`
-  );
-  tunInput.placeholder = "https://xxxx.cpolar.cn";
-  const tunResult = el("div", "", `color:${c.text2()};font-size:12px`);
-  const tunProbeBtn = btn("\u6821\u9A8C\u5E76\u4FDD\u5B58", true);
-  let tunSavedUrl = "";
-  tunProbeBtn.onclick = () => withBusy(tunProbeBtn, async () => {
-    tunResult.textContent = "\u6821\u9A8C\u4E2D\u2026";
-    tunResult.style.color = c.text2();
-    const url = tunInput.value.trim();
-    if (!url) {
-      tunResult.textContent = "\u8BF7\u8F93\u5165\u96A7\u9053\u5730\u5740";
-      tunResult.style.color = "#e5484d";
-      return;
-    }
-    try {
-      const r = await lane("/api/pair/probe?url=" + encodeURIComponent(url));
-      if (r.ok) {
-        await lane("/api/pair/tunnel", { method: "POST", body: { url } });
-        tunSavedUrl = url;
-        tunResult.textContent = "\u2713 \u53EF\u8FBE\u5DF2\u4FDD\u5B58\uFF08HTTP " + (r.status ?? "") + "\uFF09";
-        tunResult.style.color = "#2fbf71";
-        await refreshLanBase();
-      } else {
-        tunResult.textContent = "\u2717 \u4E0D\u53EF\u8FBE\uFF1A" + (r.reason ?? "");
-        tunResult.style.color = "#e5484d";
-      }
-    } catch (e) {
-      tunResult.textContent = "\u6821\u9A8C\u5931\u8D25\uFF1A" + e.message;
-      tunResult.style.color = "#e5484d";
-    }
+  const lanBaseRef = (0, import_react.useRef)(null);
+  const [lanLink, setLanLink] = (0, import_react.useState)(null);
+  const [lanHint, setLanHint] = (0, import_react.useState)(null);
+  const [tunInputValue, setTunInputValue] = (0, import_react.useState)("");
+  const [tunSavedUrl, setTunSavedUrl] = (0, import_react.useState)("");
+  const [tunResult, setTunResult] = (0, import_react.useState)({ text: "", color: "" });
+  const [tunLink, setTunLink] = (0, import_react.useState)(null);
+  const [tunHint, setTunHint] = (0, import_react.useState)(null);
+  const [cfState, setCfState] = (0, import_react.useState)({
+    bin: "",
+    url: null,
+    running: false,
+    reason: null,
+    phase: "idle",
+    detail: "",
+    message: ""
   });
-  const tunMintBtn = btn("\u94F8\u9020\u96A7\u9053\u4EE4\u724C");
-  tun.card.insertBefore(tunInput, tun.linkBox);
-  tun.card.insertBefore(tunResult, tun.linkBox);
-  tun.row.insertBefore(tunProbeBtn, tun.row.firstChild);
-  tun.row.appendChild(tunMintBtn);
-  const tunCopy = btn("\u590D\u5236\u94FE\u63A5", true);
-  tunCopy.onclick = () => flashCopy(tunCopy, tun.linkBox.dataset.link);
-  tun.row.appendChild(tunCopy);
-  const cf = makeChannelCard(
-    "cloudflared \u516C\u7F51\u96A7\u9053",
-    "PATH \u6709 cloudflared \u5C31\u76F4\u63A5\u7528\uFF1B\u5426\u5219 ~/.dsh/bin \u7F13\u5B58\u547D\u4E2D\u590D\u7528\uFF1B\u90FD\u6CA1\u6709\u5C31\u4E00\u952E\u4ECE GitHub/ghproxy \u7B49\u591A\u955C\u50CF\u4E0B\u8F7D\u5230\u7F13\u5B58\u3002"
-  );
-  const cfInput = el(
-    "input",
-    null,
-    `background:${c.panel()};border:1px solid ${c.line()};color:${c.text()};border-radius:8px;padding:7px 10px;font-size:13px`
-  );
-  cfInput.placeholder = "cloudflared \u5B8C\u6574\u8DEF\u5F84\uFF08\u7559\u7A7A = \u4E00\u952E\u542F\u52A8\uFF09";
-  const cfStatus = el("div", "\u8BFB\u53D6\u4E2D\u2026", `color:${c.text2()};font-size:12px`);
-  const cfAutoBtn = btn("\u4E00\u952E\u542F\u52A8\uFF08\u65E0\u4F9D\u8D56\uFF09");
-  const cfApply = btn("\u5E94\u7528\u5E76\u542F\u52A8");
-  const cfStop = btn("\u505C\u6B62", true);
-  let cfState = { bin: "", url: null, running: false, reason: null, phase: "idle", detail: "", message: "" };
-  const renderCf = () => {
-    const st = cfState;
-    cfInput.value = st.bin || "";
-    const phase = st.phase ?? "idle";
-    if (st.running || st.url) {
-      cfStatus.textContent = st.url ? "\u8FD0\u884C\u4E2D \xB7 " + st.url : st.detail || "\u8FD0\u884C\u4E2D \xB7 \u7B49\u5F85\u96A7\u9053\u5730\u5740\u2026";
-      cfStatus.style.color = "#2fbf71";
-    } else if (phase === "error") {
-      cfStatus.textContent = "\u542F\u52A8\u5931\u8D25\uFF1A" + (st.message || st.detail || "cloudflared \u65E0\u6CD5\u542F\u52A8");
-      cfStatus.style.color = "#e5484d";
-    } else if (phase === "resolving" || phase === "downloading") {
-      cfStatus.textContent = (phase === "downloading" ? "\u4E0B\u8F7D\u4E2D \xB7 " : "\u89E3\u6790\u4E2D \xB7 ") + (st.detail || "\u2026");
-      cfStatus.style.color = "#4d6bfe";
-    } else if (phase === "starting" || phase === "registering") {
-      cfStatus.textContent = st.detail || "\u542F\u52A8\u4E2D\u2026";
-      cfStatus.style.color = "#4d6bfe";
-    } else if (st.bin) {
-      cfStatus.textContent = "\u5DF2\u914D\u7F6E \xB7 \u672A\u8FD0\u884C";
-      cfStatus.style.color = c.text2();
-    } else {
-      cfStatus.textContent = "\u672A\u914D\u7F6E \xB7 \u672A\u8FD0\u884C";
-      cfStatus.style.color = c.text2();
-    }
-  };
-  const cfMintBtn = btn("\u94F8\u9020\u96A7\u9053\u4EE4\u724C");
-  const cfCopy = btn("\u590D\u5236\u94FE\u63A5", true);
-  cfCopy.onclick = () => flashCopy(cfCopy, cf.linkBox.dataset.link);
-  cf.card.insertBefore(cfInput, cf.linkBox);
-  cf.card.insertBefore(cfStatus, cf.linkBox);
-  cf.row.insertBefore(cfApply, cf.row.firstChild);
-  cf.row.insertBefore(cfAutoBtn, cf.row.firstChild);
-  cf.row.insertBefore(cfStop, cfAutoBtn.nextSibling);
-  cf.row.appendChild(cfMintBtn);
-  cf.row.appendChild(cfCopy);
-  cfAutoBtn.onclick = () => withBusy(cfAutoBtn, async () => {
-    cfStatus.textContent = "\u89E3\u6790\u4E2D \xB7 \u68C0\u67E5 PATH \u4E0E\u672C\u5730\u7F13\u5B58\u2026";
-    cfStatus.style.color = "#4d6bfe";
+  const [cfInputValue, setCfInputValue] = (0, import_react.useState)("");
+  const [cfInFlight, setCfInFlight] = (0, import_react.useState)(null);
+  const [cfStatusError, setCfStatusError] = (0, import_react.useState)(null);
+  const [cfLink, setCfLink] = (0, import_react.useState)(null);
+  const [cfHint, setCfHint] = (0, import_react.useState)(null);
+  const [devices, setDevices] = (0, import_react.useState)([]);
+  const [devicesError, setDevicesError] = (0, import_react.useState)(null);
+  const [deviceErrors, setDeviceErrors] = (0, import_react.useState)({});
+  const tunSavedUrlRef = (0, import_react.useRef)("");
+  tunSavedUrlRef.current = tunSavedUrl;
+  const refreshDevices = (0, import_react.useCallback)(async () => {
     try {
-      const r = await lane("/api/pair/cloudflared", { method: "POST", body: { bin: "", action: "apply" } });
-      cfState = {
-        bin: r.bin ?? "",
-        url: r.url ?? null,
-        running: !!r.running,
-        reason: r.running ? null : r.reason ?? null,
-        message: r.message,
-        phase: r.phase ?? "resolving",
-        detail: ""
-      };
-      renderCf();
+      const st = await lane("/api/pair/devices");
+      setDevices(st.devices ?? []);
+      setDevicesError(null);
+      setDeviceErrors({});
     } catch (e) {
-      cfStatus.textContent = "\u4E00\u952E\u542F\u52A8\u5931\u8D25\uFF1A" + e.message;
-      cfStatus.style.color = "#e5484d";
+      setDevices([]);
+      setDevicesError("\u914D\u5BF9\u670D\u52A1\u4E0D\u53EF\u8FBE\uFF1A" + e.message);
     }
-  });
-  cfApply.onclick = () => withBusy(cfApply, async () => {
-    cfStatus.textContent = "\u5E94\u7528\u4E2D\u2026";
-    cfStatus.style.color = c.text2();
-    try {
-      const r = await lane("/api/pair/cloudflared", { method: "POST", body: { bin: cfInput.value.trim(), action: "apply" } });
-      cfState = {
-        bin: r.bin ?? "",
-        url: r.url ?? null,
-        running: !!r.running,
-        reason: r.running ? null : r.reason ?? null,
-        message: r.message,
-        phase: r.phase ?? "resolving",
-        detail: ""
-      };
-      renderCf();
-    } catch (e) {
-      cfStatus.textContent = "\u5E94\u7528\u5931\u8D25\uFF1A" + e.message;
-      cfStatus.style.color = "#e5484d";
-    }
-  });
-  cfStop.onclick = () => withBusy(cfStop, async () => {
-    try {
-      await lane("/api/pair/cloudflared", { method: "POST", body: { action: "stop" } });
-      cfState = { bin: cfState.bin, url: null, running: false, reason: null };
-      renderCf();
-    } catch (e) {
-      cfStatus.textContent = "\u505C\u6B62\u5931\u8D25\uFF1A" + e.message;
-      cfStatus.style.color = "#e5484d";
-    }
-  });
-  const devicesCard = el(
-    "div",
-    null,
-    `border:1px solid ${c.line()};border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px`
-  );
-  devicesCard.appendChild(el("div", "\u5DF2\u914D\u5BF9\u8BBE\u5907", "font-size:13px;font-weight:600"));
-  const deviceList = el("div", null, "display:flex;flex-direction:column;gap:6px");
-  const refreshCf = async () => {
+  }, []);
+  const refreshCf = (0, import_react.useCallback)(async () => {
     try {
       const st = await lane("/api/pair/cloudflared");
-      cfState = {
+      setCfState({
         bin: st.bin ?? "",
         url: st.url ?? null,
         running: !!st.running,
@@ -2031,115 +1941,496 @@ function buildPanelDom() {
         message: st.message,
         phase: st.phase ?? "idle",
         detail: st.detail ?? ""
-      };
-      renderCf();
+      });
+      setCfStatusError(null);
     } catch (e) {
-      cfStatus.textContent = "\u67E5\u8BE2\u5931\u8D25\uFF1A" + e.message;
-      cfStatus.style.color = "#e5484d";
+      setCfStatusError("\u67E5\u8BE2\u5931\u8D25\uFF1A" + e.message);
     }
-  };
-  const refreshLanBase = async () => {
+  }, []);
+  const refreshLanBase = (0, import_react.useCallback)(async () => {
     try {
       const info = await lane("/api/pair/info");
-      if (info.lanIp) lanBase = { base: info.lanIp + ":" + (info.lanePort ?? lanePort), scheme: "http" };
-      else lanBase = { base: "127.0.0.1:" + (info.lanePort ?? lanePort), scheme: "http" };
-      if (!tunSavedUrl && info.customTunnelUrl) {
-        tunSavedUrl = info.customTunnelUrl;
-        tunInput.value = info.customTunnelUrl;
+      if (info.lanIp) {
+        lanBaseRef.current = {
+          base: info.lanIp + ":" + (info.lanePort ?? lanePort),
+          scheme: "http"
+        };
+      } else {
+        lanBaseRef.current = {
+          base: "127.0.0.1:" + (info.lanePort ?? lanePort),
+          scheme: "http"
+        };
+      }
+      if (!tunSavedUrlRef.current && info.customTunnelUrl) {
+        setTunSavedUrl(info.customTunnelUrl);
+        setTunInputValue(info.customTunnelUrl);
       }
     } catch {
     }
-  };
-  const refresh = async () => {
-    try {
-      const st = await lane("/api/pair/devices");
-      deviceList.textContent = "";
-      if (!st.devices.length) {
-        deviceList.appendChild(el("div", "\u6682\u65E0\u914D\u5BF9\u8BBE\u5907", `color:${c.text2()};font-size:12px`));
-      } else {
-        for (const d of st.devices) {
-          const row = el("div", null, "display:flex;justify-content:space-between;align-items:center;gap:8px");
-          row.appendChild(el("span", `${d.name} \xB7 ${d.online ? "\u5728\u7EBF" : "\u79BB\u7EBF"}`, `color:${c.text()};font-size:13px`));
-          const rm = btn("\u79FB\u9664", true);
-          rm.onclick = () => withBusy(rm, async () => {
-            try {
-              await lane("/api/pair/remove", { method: "POST", body: { deviceId: d.deviceId } });
-              await refresh();
-            } catch (e) {
-              row.appendChild(el("span", "\u79FB\u9664\u5931\u8D25\uFF1A" + e.message, `color:#e5484d;font-size:12px`));
-            }
-          });
-          row.appendChild(rm);
-          deviceList.appendChild(row);
-        }
-      }
-    } catch (e) {
-      deviceList.textContent = "";
-      deviceList.appendChild(el("div", "\u914D\u5BF9\u670D\u52A1\u4E0D\u53EF\u8FBE\uFF1A" + e.message, `color:#e5484d;font-size:12px`));
+  }, []);
+  (0, import_react.useEffect)(() => {
+    void refreshDevices();
+    void refreshCf();
+    void refreshLanBase();
+    const id = setInterval(() => {
+      void refreshDevices();
+      void refreshCf();
+    }, 2e3);
+    return () => clearInterval(id);
+  }, [refreshDevices, refreshCf, refreshLanBase]);
+  (0, import_react.useEffect)(() => {
+    setCfInputValue(cfState.bin || "");
+  }, [cfState.bin]);
+  const cfStatus = (0, import_react.useMemo)(() => {
+    if (cfInFlight) return cfInFlight;
+    if (cfStatusError) return { text: cfStatusError, color: "#e5484d" };
+    const s = cfState;
+    if (s.running || s.url) {
+      return {
+        text: s.url ? "\u8FD0\u884C\u4E2D \xB7 " + s.url : s.detail || "\u8FD0\u884C\u4E2D \xB7 \u7B49\u5F85\u96A7\u9053\u5730\u5740\u2026",
+        color: "#2fbf71"
+      };
     }
-  };
+    if (s.phase === "error") {
+      return {
+        text: "\u542F\u52A8\u5931\u8D25\uFF1A" + (s.message || s.detail || "cloudflared \u65E0\u6CD5\u542F\u52A8"),
+        color: "#e5484d"
+      };
+    }
+    if (s.phase === "resolving" || s.phase === "downloading") {
+      return {
+        text: (s.phase === "downloading" ? "\u4E0B\u8F7D\u4E2D \xB7 " : "\u89E3\u6790\u4E2D \xB7 ") + (s.detail || "\u2026"),
+        color: "#4d6bfe"
+      };
+    }
+    if (s.phase === "starting" || s.phase === "registering") {
+      return { text: s.detail || "\u542F\u52A8\u4E2D\u2026", color: "#4d6bfe" };
+    }
+    if (s.bin) return { text: "\u5DF2\u914D\u7F6E \xB7 \u672A\u8FD0\u884C", color: cssVars.text2 };
+    return { text: "\u672A\u914D\u7F6E \xB7 \u672A\u8FD0\u884C", color: cssVars.text2 };
+  }, [cfState, cfStatusError, cfInFlight, cssVars.text2]);
+  const lanQr = (0, import_react.useMemo)(() => makeQr(lanLink), [lanLink]);
+  const tunQr = (0, import_react.useMemo)(() => makeQr(tunLink), [tunLink]);
+  const cfQr = (0, import_react.useMemo)(() => makeQr(cfLink), [cfLink]);
   const pairLink = (base, scheme, token) => scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
-  const mintFor = async (base, scheme, chan) => {
+  const mintFor = async (base, scheme, setLink, setHint) => {
     try {
       const r = await lane("/api/pair/mint", { method: "POST", body: {} });
       const link = pairLink(base, scheme, r.token);
-      chan.showQr(link);
-      chan.hint.textContent = "10 \u5206\u949F\u6709\u6548 \xB7 \u4E00\u6B21\u6027 \xB7 \u626B\u7801/\u6253\u5F00\u5373\u914D\u5BF9";
-      chan.hint.style.color = "#2fbf71";
+      setLink(link);
+      setHint({
+        text: "10 \u5206\u949F\u6709\u6548 \xB7 \u4E00\u6B21\u6027 \xB7 \u626B\u7801/\u6253\u5F00\u5373\u914D\u5BF9",
+        color: "#2fbf71"
+      });
     } catch (e) {
-      chan.hint.textContent = "\u94F8\u9020\u5931\u8D25\uFF1A" + e.message;
-      chan.hint.style.color = "#e5484d";
+      setHint({ text: "\u94F8\u9020\u5931\u8D25\uFF1A" + e.message, color: "#e5484d" });
     }
   };
-  lanMintBtn.onclick = () => withBusy(lanMintBtn, async () => {
-    if (!lanBase) await refreshLanBase();
-    if (lanBase) await mintFor(lanBase.base, lanBase.scheme, lan);
-    else lan.hint.textContent = "\u65E0\u6CD5\u786E\u5B9A\u5C40\u57DF\u7F51\u5730\u5740";
-  });
-  tunMintBtn.onclick = () => withBusy(tunMintBtn, async () => {
-    if (!tunSavedUrl) await refreshLanBase();
-    if (tunSavedUrl) {
-      const u = new URL(tunSavedUrl);
-      await mintFor(u.host, u.protocol === "https:" ? "https" : "http", tun);
-    } else {
-      tun.hint.textContent = "\u8BF7\u5148\u6821\u9A8C\u5E76\u4FDD\u5B58\u96A7\u9053\u5730\u5740";
-      tun.hint.style.color = "#e5484d";
+  return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+    "div",
+    {
+      "data-mobile-access-panel": "1",
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        maxWidth: 640
+      },
+      children: [
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { fontSize: 15, fontWeight: 600 }, children: "\u8FDC\u7A0B\u8BBF\u95EE" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cssVars.text2, fontSize: 13 }, children: "\u4E09\u4E2A\u901A\u9053\u72EC\u7ACB\u7EF4\u62A4\u914D\u5BF9\u4E8C\u7EF4\u7801\uFF1A\u626B\u7801/\u6253\u5F00\u94FE\u63A5\u5373\u53EF\u914D\u5BF9\uFF08\u4E00\u6B21\u6027\u4EE4\u724C + \u4F1A\u8BDD Cookie\uFF09\u3002" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          ChannelCard,
+          {
+            label: "\u5C40\u57DF\u7F51",
+            desc: "\u624B\u673A\u8FDE\u540C\u4E00 WiFi\uFF0C\u626B\u6B64\u7801\u76F4\u8FDE\uFF08\u4EC5\u5C40\u57DF\u7F51\u53EF\u8FBE\uFF09\u3002",
+            cssVars,
+            link: lanLink,
+            qrSrc: lanQr,
+            hint: lanHint,
+            actions: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u94F8\u9020\u5C40\u57DF\u7F51\u4EE4\u724C",
+                  cssVars,
+                  onClick: async () => {
+                    if (!lanBaseRef.current) await refreshLanBase();
+                    if (lanBaseRef.current) {
+                      await mintFor(
+                        lanBaseRef.current.base,
+                        lanBaseRef.current.scheme,
+                        setLanLink,
+                        setLanHint
+                      );
+                    } else {
+                      setLanHint({ text: "\u65E0\u6CD5\u786E\u5B9A\u5C40\u57DF\u7F51\u5730\u5740", color: "#e5484d" });
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u590D\u5236\u94FE\u63A5",
+                  ghost: true,
+                  cssVars,
+                  onClick: async ({ flash }) => {
+                    if (!lanLink) return;
+                    try {
+                      await navigator.clipboard?.writeText(lanLink);
+                    } catch {
+                    }
+                    flash("ok", "\u5DF2\u590D\u5236 \u2713");
+                  }
+                }
+              )
+            ] })
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          ChannelCard,
+          {
+            label: "\u7B2C\u4E09\u65B9\u96A7\u9053\uFF08cpolar \u7B49\uFF09",
+            desc: "\u96A7\u9053\u9700\u6307\u5411\u6539\u5199\u4EE3\u7406\u7AEF\u53E3 127.0.0.1:" + lanePort + "\uFF1B\u7C98\u8D34\u5730\u5740\u6821\u9A8C\u53EF\u8FBE\u540E\uFF0C\u7528\u6B64\u5730\u5740\u751F\u6210\u81EA\u5DF1\u7684\u914D\u5BF9\u4E8C\u7EF4\u7801\u3002",
+            cssVars,
+            link: tunLink,
+            qrSrc: tunQr,
+            hint: tunHint,
+            beforeLink: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                "input",
+                {
+                  type: "text",
+                  placeholder: "https://xxxx.cpolar.cn",
+                  value: tunInputValue,
+                  onChange: (e) => setTunInputValue(e.target.value),
+                  style: {
+                    background: cssVars.panel,
+                    border: `1px solid ${cssVars.line}`,
+                    color: cssVars.text,
+                    borderRadius: 8,
+                    padding: "7px 10px",
+                    fontSize: 13
+                  }
+                }
+              ),
+              tunResult.text && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: tunResult.color, fontSize: 12 }, children: tunResult.text })
+            ] }),
+            actions: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u6821\u9A8C\u5E76\u4FDD\u5B58",
+                  ghost: true,
+                  cssVars,
+                  onClick: async () => {
+                    setTunResult({ text: "\u6821\u9A8C\u4E2D\u2026", color: cssVars.text2 });
+                    const url = tunInputValue.trim();
+                    if (!url) {
+                      setTunResult({ text: "\u8BF7\u8F93\u5165\u96A7\u9053\u5730\u5740", color: "#e5484d" });
+                      return;
+                    }
+                    try {
+                      const r = await lane(
+                        "/api/pair/probe?url=" + encodeURIComponent(url)
+                      );
+                      if (r.ok) {
+                        await lane("/api/pair/tunnel", {
+                          method: "POST",
+                          body: { url }
+                        });
+                        setTunSavedUrl(url);
+                        setTunResult({
+                          text: "\u2713 \u53EF\u8FBE\u5DF2\u4FDD\u5B58\uFF08HTTP " + (r.status ?? "") + "\uFF09",
+                          color: "#2fbf71"
+                        });
+                        await refreshLanBase();
+                      } else {
+                        setTunResult({
+                          text: "\u2717 \u4E0D\u53EF\u8FBE\uFF1A" + (r.reason ?? ""),
+                          color: "#e5484d"
+                        });
+                      }
+                    } catch (e) {
+                      setTunResult({
+                        text: "\u6821\u9A8C\u5931\u8D25\uFF1A" + e.message,
+                        color: "#e5484d"
+                      });
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u94F8\u9020\u96A7\u9053\u4EE4\u724C",
+                  cssVars,
+                  onClick: async () => {
+                    if (!tunSavedUrl) await refreshLanBase();
+                    if (tunSavedUrl) {
+                      const u = new URL(tunSavedUrl);
+                      await mintFor(
+                        u.host,
+                        u.protocol === "https:" ? "https" : "http",
+                        setTunLink,
+                        setTunHint
+                      );
+                    } else {
+                      setTunHint({
+                        text: "\u8BF7\u5148\u6821\u9A8C\u5E76\u4FDD\u5B58\u96A7\u9053\u5730\u5740",
+                        color: "#e5484d"
+                      });
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u590D\u5236\u94FE\u63A5",
+                  ghost: true,
+                  cssVars,
+                  onClick: async ({ flash }) => {
+                    if (!tunLink) return;
+                    try {
+                      await navigator.clipboard?.writeText(tunLink);
+                    } catch {
+                    }
+                    flash("ok", "\u5DF2\u590D\u5236 \u2713");
+                  }
+                }
+              )
+            ] })
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+          ChannelCard,
+          {
+            label: "cloudflared \u516C\u7F51\u96A7\u9053",
+            desc: "PATH \u6709 cloudflared \u5C31\u76F4\u63A5\u7528\uFF1B\u5426\u5219 ~/.dsh/bin \u7F13\u5B58\u547D\u4E2D\u590D\u7528\uFF1B\u90FD\u6CA1\u6709\u5C31\u4E00\u952E\u4ECE GitHub/ghproxy \u7B49\u591A\u955C\u50CF\u4E0B\u8F7D\u5230\u7F13\u5B58\u3002",
+            cssVars,
+            link: cfLink,
+            qrSrc: cfQr,
+            hint: cfHint,
+            beforeLink: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                "input",
+                {
+                  type: "text",
+                  placeholder: "cloudflared \u5B8C\u6574\u8DEF\u5F84\uFF08\u7559\u7A7A = \u4E00\u952E\u542F\u52A8\uFF09",
+                  value: cfInputValue,
+                  onChange: (e) => setCfInputValue(e.target.value),
+                  style: {
+                    background: cssVars.panel,
+                    border: `1px solid ${cssVars.line}`,
+                    color: cssVars.text,
+                    borderRadius: 8,
+                    padding: "7px 10px",
+                    fontSize: 13
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cfStatus.color, fontSize: 12 }, children: cfStatus.text })
+            ] }),
+            actions: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u4E00\u952E\u542F\u52A8\uFF08\u65E0\u4F9D\u8D56\uFF09",
+                  cssVars,
+                  onClick: async () => {
+                    setCfInFlight({
+                      text: "\u89E3\u6790\u4E2D \xB7 \u68C0\u67E5 PATH \u4E0E\u672C\u5730\u7F13\u5B58\u2026",
+                      color: "#4d6bfe"
+                    });
+                    setCfStatusError(null);
+                    try {
+                      const r = await lane("/api/pair/cloudflared", {
+                        method: "POST",
+                        body: { bin: "", action: "apply" }
+                      });
+                      setCfState({
+                        bin: r.bin ?? "",
+                        url: r.url ?? null,
+                        running: !!r.running,
+                        reason: r.running ? null : r.reason ?? null,
+                        message: r.message,
+                        phase: r.phase ?? "resolving",
+                        detail: ""
+                      });
+                      setCfStatusError(null);
+                      setCfInFlight(null);
+                    } catch (e) {
+                      setCfInFlight(null);
+                      setCfStatusError("\u4E00\u952E\u542F\u52A8\u5931\u8D25\uFF1A" + e.message);
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u505C\u6B62",
+                  ghost: true,
+                  cssVars,
+                  onClick: async () => {
+                    try {
+                      await lane("/api/pair/cloudflared", {
+                        method: "POST",
+                        body: { action: "stop" }
+                      });
+                      setCfState((prev) => ({
+                        bin: prev.bin,
+                        url: null,
+                        running: false,
+                        reason: null,
+                        phase: "idle",
+                        detail: "\u5DF2\u505C\u6B62",
+                        message: ""
+                      }));
+                      setCfStatusError(null);
+                    } catch (e) {
+                      setCfStatusError("\u505C\u6B62\u5931\u8D25\uFF1A" + e.message);
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u5E94\u7528\u5E76\u542F\u52A8",
+                  cssVars,
+                  onClick: async () => {
+                    setCfInFlight({ text: "\u5E94\u7528\u4E2D\u2026", color: cssVars.text2 });
+                    setCfStatusError(null);
+                    try {
+                      const r = await lane("/api/pair/cloudflared", {
+                        method: "POST",
+                        body: { bin: cfInputValue.trim(), action: "apply" }
+                      });
+                      setCfState({
+                        bin: r.bin ?? "",
+                        url: r.url ?? null,
+                        running: !!r.running,
+                        reason: r.running ? null : r.reason ?? null,
+                        message: r.message,
+                        phase: r.phase ?? "resolving",
+                        detail: ""
+                      });
+                      setCfStatusError(null);
+                      setCfInFlight(null);
+                    } catch (e) {
+                      setCfInFlight(null);
+                      setCfStatusError("\u5E94\u7528\u5931\u8D25\uFF1A" + e.message);
+                    }
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u94F8\u9020\u96A7\u9053\u4EE4\u724C",
+                  cssVars,
+                  onClick: async () => {
+                    if (!cfState.url) {
+                      setCfHint({
+                        text: "\u96A7\u9053\u672A\u8FD0\u884C\u6216\u65E0\u5730\u5740\uFF0C\u8BF7\u5148\u542F\u52A8 cloudflared",
+                        color: "#e5484d"
+                      });
+                      return;
+                    }
+                    await mintFor(
+                      cfState.url.replace(/^https?:\/\//, ""),
+                      cfState.url.startsWith("https") ? "https" : "http",
+                      setCfLink,
+                      setCfHint
+                    );
+                  }
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                PanelButton,
+                {
+                  text: "\u590D\u5236\u94FE\u63A5",
+                  ghost: true,
+                  cssVars,
+                  onClick: async ({ flash }) => {
+                    if (!cfLink) return;
+                    try {
+                      await navigator.clipboard?.writeText(cfLink);
+                    } catch {
+                    }
+                    flash("ok", "\u5DF2\u590D\u5236 \u2713");
+                  }
+                }
+              )
+            ] })
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+          "div",
+          {
+            style: {
+              border: `1px solid ${cssVars.line}`,
+              borderRadius: 10,
+              padding: 14,
+              display: "flex",
+              flexDirection: "column",
+              gap: 8
+            },
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { fontSize: 13, fontWeight: 600 }, children: "\u5DF2\u914D\u5BF9\u8BBE\u5907" }),
+              /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: devicesError ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: "#e5484d", fontSize: 12 }, children: devicesError }) : devices.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cssVars.text2, fontSize: 12 }, children: "\u6682\u65E0\u914D\u5BF9\u8BBE\u5907" }) : devices.map((d) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 8
+                  },
+                  children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { style: { color: cssVars.text, fontSize: 13 }, children: [
+                      d.name,
+                      " \xB7 ",
+                      d.online ? "\u5728\u7EBF" : "\u79BB\u7EBF"
+                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
+                      /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
+                        PanelButton,
+                        {
+                          text: "\u79FB\u9664",
+                          ghost: true,
+                          cssVars,
+                          onClick: async () => {
+                            try {
+                              await lane("/api/pair/remove", {
+                                method: "POST",
+                                body: { deviceId: d.deviceId }
+                              });
+                              await refreshDevices();
+                            } catch (e) {
+                              setDeviceErrors((prev) => ({
+                                ...prev,
+                                [d.deviceId]: "\u79FB\u9664\u5931\u8D25\uFF1A" + e.message
+                              }));
+                            }
+                          }
+                        }
+                      ),
+                      deviceErrors[d.deviceId] && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: "#e5484d", fontSize: 12 }, children: deviceErrors[d.deviceId] })
+                    ] })
+                  ]
+                },
+                d.deviceId
+              )) })
+            ]
+          }
+        )
+      ]
     }
-  });
-  cfMintBtn.onclick = () => withBusy(cfMintBtn, async () => {
-    if (!cfState.url) {
-      cf.hint.textContent = "\u96A7\u9053\u672A\u8FD0\u884C\u6216\u65E0\u5730\u5740\uFF0C\u8BF7\u5148\u542F\u52A8 cloudflared";
-      cf.hint.style.color = "#e5484d";
-      return;
-    }
-    await mintFor(
-      cfState.url.replace(/^https?:\/\//, ""),
-      cfState.url.startsWith("https") ? "https" : "http",
-      cf
-    );
-  });
-  const pollTimer = setInterval(() => {
-    void refresh();
-    void refreshCf();
-  }, 2e3);
-  const _cfClose = () => {
-    try {
-      clearInterval(pollTimer);
-    } catch {
-    }
-  };
-  root.appendChild(title);
-  root.appendChild(sub);
-  root.appendChild(lan.card);
-  root.appendChild(tun.card);
-  root.appendChild(cf.card);
-  root.appendChild(devicesCard);
-  devicesCard.appendChild(deviceList);
-  void refresh();
-  void refreshCf();
-  void refreshLanBase();
-  root._cfClose = _cfClose;
-  return root;
+  );
 }
 return module.exports;
   }

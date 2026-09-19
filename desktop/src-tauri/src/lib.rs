@@ -75,7 +75,8 @@ use commands::{
     get_desktop_settings_data, add_remote_address, remove_remote_address,
     select_remote_address, set_local_port, switch_profile_command,
     migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
-    create_profile_flow_command,
+    create_profile_flow_command, migration_status, task_status, list_runtime_catalog, download_runtime,
+    remove_runtime, runtime_download_status,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -92,7 +93,7 @@ use tauri_plugin_log::{Target, TargetKind};
 
 // ── 测试专用导入（cargo fix 会移除非测试构建未用的项，这里统一补回）──
 #[cfg(test)]
-use settings::{DesktopSettings, settings_path, save_desktop_settings, from_yaml_value, legacy_desktop_block, configured_lane_port, configured_cloudflared_bin};
+use settings::{DesktopSettings, settings_path, from_yaml_value, legacy_desktop_block, configured_lane_port, configured_cloudflared_bin};
 #[cfg(test)]
 use network::proxy::{
     ProxyEnv, PROXY_MODE_OFF, PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL, PROXY_LOOPBACK_ENTRIES,
@@ -175,10 +176,19 @@ pub fn run() {
             select_remote_address,
             set_local_port,
             switch_profile_command,
-            migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
-            create_profile_flow_command,
+            migration_status,
+            task_status,
             migrate_profile,
+            get_dsh_source,
+            set_dsh_source,
+            list_profile_ports,
+            set_profile_port,
+            create_profile_flow_command,
             list_quarantine,
+            list_runtime_catalog,
+            download_runtime,
+            remove_runtime,
+            runtime_download_status,
             restore_quarantine,
             repair_plugin,
             run_doctor,
@@ -222,6 +232,7 @@ pub fn run() {
             children: Mutex::new(Default::default()),
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
+            running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
             fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
@@ -361,6 +372,9 @@ pub fn run() {
             tauri::async_runtime::spawn(crate::network::forwarder::start());
             state.notify_port.store(nport, Ordering::SeqCst);
             *state.notify_token.lock().unwrap() = ntoken.clone();
+            // desktop profile 不再自动补建（#95 拍板）：dsh CLI 将 desktop 保留给 Electron
+            // 官方桌面版（plugin add 被拒），spawn 实例只写模板不装插件——自动化三条路全堵死。
+            // 想要 desktop/任意 profile：设置里的「新建 Profile」手动建。
             if state.spawned_this_run.load(Ordering::SeqCst) {
                 // 本次由桌面壳拉起实例：立即导航（advanced，桌面 chrome）
                 let handle = app.handle().clone();

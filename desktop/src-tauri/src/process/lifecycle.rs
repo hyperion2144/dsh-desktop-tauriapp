@@ -232,12 +232,96 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
     std::env::join_paths(paths).unwrap_or_else(|_| std::ffi::OsString::from("/usr/bin:/bin"))
 }
 
+/// 内置模式的静态兑底 PATH（登录 shell 恢复失败时使用）。
+const FALLBACK_TOOL_PATH: &str =
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// 登录 shell 候选链：用户默认 shell 优先，常见绝对路径兑底（#/bin/zsh 硬编码不可靠）。
+#[cfg(unix)]
+fn login_shell_candidates() -> Vec<std::path::PathBuf> {
+    let mut list: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() {
+            list.push(std::path::PathBuf::from(s));
+        }
+    }
+    for p in ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"] {
+        let cand = std::path::PathBuf::from(p);
+        if !list.contains(&cand) {
+            list.push(cand);
+        }
+    }
+    list
+}
+
+/// 单个 shell 的 PATH 捕获：按 basename 区分参数（fish 的 PATH 是数组、
+/// sh 无 -i 交互模式）；多行输出按 ':' 拼（fish 逐行打印兼容）；
+/// 失败/空输出/无路径形状 → None。
+#[cfg(unix)]
+fn capture_path_with(shell: &std::path::Path) -> Option<String> {
+    let name = shell.file_name()?.to_string_lossy().to_string();
+    let args: Vec<&str> = if name == "fish" {
+        vec!["-l", "-c", "printf '%s\\n' $PATH"]
+    } else if name.contains("zsh") || name.contains("bash") {
+        vec!["-lic", "echo $PATH"]
+    } else {
+        vec!["-lc", "echo $PATH"]
+    };
+    let out = std::process::Command::new(shell)
+        .args(&args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let path = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(":")
+        .trim()
+        .to_string();
+    (path.contains('/')).then_some(path)
+}
+
+/// 登录 shell PATH 恢复（anywhere-labs 模式简版）：候选链逐个尝试，全部失败
+/// 返回 None 由调用方走静态兑底。Windows 走继承 PATH（CI 把关）。
+pub(crate) fn recover_login_path() -> Option<String> {
+    #[cfg(unix)]
+    {
+        login_shell_candidates()
+            .iter()
+            .filter(|s| s.exists())
+            .find_map(|s| capture_path_with(s))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// spawn `dsh web --host 127.0.0.1 --port <port>`（unix）；stdout/stderr 转发到日志，
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
 pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     // 来源解析（#85 拍板）：内置 → node + 启动器（runProfile 代码路径）；外部 → CLI
     log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
+    // bundle 补链（anywhere-labs heal 式）：内置树缺失的 profile bundle 从用户
+    // 外部 CLI 安装树 symlink 进 profile 池，让内置 dsh 能解析存量插件
+    crate::process::plugin::heal_profile_bundles(app, profile);
+    // #90 实测：非激活 profile 的池里没有桌面三插件 → --patch loader 条目解析失败 → 实例秒退
+    // 未初始化的 profile（无 package.json）跳过预挂池：先物化会让 fromDefaultProfile
+    // 初始化撞上非空目录失败（#90 实测闪退根因）；初始化完成后再挂（自动补建流程负责）
+    if crate::dsh_home()
+        .join("profiles")
+        .join(profile)
+        .join("package.json")
+        .is_file()
+    {
+        crate::process::plugin::materialize_desktop_plugin_for(app, profile);
+    }
     let mut patches: Vec<std::path::PathBuf> = Vec::new();
     if advanced {
         // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
@@ -261,12 +345,24 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
             (bin.clone(), crate::runtime::builtin::external_cli_args(profile, port, &patches))
         }
     };
+    let source_mode = match &source {
+        crate::runtime::builtin::DshSource::Builtin { .. } => "builtin",
+        crate::runtime::builtin::DshSource::External { .. } => "external",
+    };
     let mut cmd = Command::new(&bin);
     cmd.args(&launcher_args);
     if matches!(source, crate::runtime::builtin::DshSource::External { .. }) {
         // 外部 dsh 是 Node 脚本（shebang 依赖 node）：Finder 启动的 GUI PATH 缺 node，
-        // 按现有链路补齐运行时 PATH；内置模式 node 即 sidecar，无需 PATH 注入。
+        // 按现有链路补齐运行时 PATH；
         cmd.env("PATH", dsh_runtime_path(&bin));
+    } else {
+        // 内置模式（#90 实测）：Finder 启动的 App 只有系统 PATH，dsh 的插件子进程
+        // （git/gh/pnpm 等工具链检测）会全部落空。用用户登录 shell 恢复完整 PATH
+        // （anywhere-labs 模式简版）；恢复失败回退静态常见目录。
+        match recover_login_path() {
+            Some(p) => cmd.env("PATH", &p),
+            None => cmd.env("PATH", FALLBACK_TOOL_PATH),
+        };
     }
     let lane = lane_port_for_profile(profile);
     cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
@@ -322,8 +418,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         .spawn()
         .map_err(|e| SpawnError::Other(format!("spawn {} 失败：{e}", bin.display())))?;
     log::info!("已启动 dsh web（{}，PID {}）", bin.display(), child.id());
-    // 实例台账（#86）：登记 profile × 端口 × pid，供认领判定与停止自家实例使用
-    crate::runtime::instances::register_instance(profile, port, lane, child.id());
+    crate::runtime::instances::register_instance(profile, port, lane, child.id(), source_mode);
+    app.state::<crate::runtime::state::DshState>().set_running_source(profile, source_mode);
     if let Some(out) = child.stdout.take() {
         let profile = profile.to_string();
         let app = app.clone();
@@ -512,7 +608,8 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 /// 转义坑，所以直接用 node.exe 执行 bin.js；CREATE_NO_WINDOW 防止闪黑窗。
 #[cfg(windows)]
 pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-    use std::os::windows::process::CommandExt;
+    crate::process::plugin::heal_profile_bundles(app, profile);
+    crate::process::plugin::materialize_desktop_plugin_for(app, profile);
     use std::os::windows::process::CommandExt;
     // 来源解析（#85 拍板）：内置 → sidecar node + 启动器（runProfile）；外部 → 系统 node + bin.js CLI
     log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
@@ -545,6 +642,10 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
             (node, a)
         }
     };
+    let source_mode = match &source {
+        crate::runtime::builtin::DshSource::Builtin { .. } => "builtin",
+        crate::runtime::builtin::DshSource::External { .. } => "external",
+    };
     let mut cmd = Command::new(&node);
     let lane = lane_port_for_profile(profile);
     cmd.args(&launcher_args)
@@ -576,11 +677,12 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     log::info!(
         "已启动 dsh web（node {} {}，PID {}）",
         node.display(),
-        bin_js.display(),
+        launcher_args.first().map(|a| a.to_string_lossy().to_string()).unwrap_or_default(),
         child.id()
     );
     // 实例台账（#86）：同 unix 分支
-    crate::runtime::instances::register_instance(profile, port, lane, child.id());
+    crate::runtime::instances::register_instance(profile, port, lane, child.id(), source_mode);
+    app.state::<crate::runtime::state::DshState>().set_running_source(profile, source_mode);
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
         let profile = profile.to_string();

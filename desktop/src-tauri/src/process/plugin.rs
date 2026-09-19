@@ -145,15 +145,91 @@ pub(crate) fn materialize_pool_package(pool: &std::path::Path, link_name: &str, 
     }
 }
 
+/// 从外部 dsh CLI 的安装树反查安装根（node_modules 目录）。
+/// bin 通常是 symlink（/opt/homebrew/bin/dsh → lib/node_modules/@deepseek-ai/dsh/bin/dsh.js），
+/// realpath 向上找带 package.json 且 name=@deepseek-ai/dsh 的目录，其父即安装根。
+fn external_install_node_modules() -> Option<PathBuf> {
+    let bin = crate::runtime::builtin::find_external_bin()?;
+    let real = std::fs::canonicalize(&bin).ok()?;
+    let mut current = real.parent().map(|p| p.to_path_buf());
+    for _ in 0..6 {
+        let Some(dir) = current.as_ref() else { break };
+        let manifest = dir.join("package.json");
+        if let Ok(text) = std::fs::read_to_string(&manifest) {
+            if text.contains("\"@deepseek-ai/dsh\"") {
+                return dir.parent().map(|p| p.to_path_buf());
+            }
+        }
+        current = dir.parent().map(|p| p.to_path_buf());
+    }
+    None
+}
+
+/// 内置 dsh 缺失的 profile bundle 补链（anywhere-labs heal 思路适配）：
+/// profile manifest 的 dsh.profile.bundles 里，内置树没有的包，从用户外部
+/// CLI 安装树 symlink 进 profile node_modules，让内置 dsh 的 resolveBundleDir
+/// 能解析；加载后真不兼容的由保险丝隔离。幂等；无外部树时跳过。
+pub(crate) fn heal_profile_bundles(app: &tauri::AppHandle, profile: &str) {
+    let profile_dir = dsh_home().join("profiles").join(profile);
+    let manifest = profile_dir.join("package.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else { return };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(bundles) = value["dsh"]["profile"]["bundles"].as_array() else { return };
+    let Some(builtin_nm) = app.path().resource_dir().ok().map(|r| r.join("dsh").join("node_modules")) else { return };
+    let Some(external_nm) = external_install_node_modules() else {
+        log::info!("[heal] 无外部 dsh 安装树，跳过 bundle 补链");
+        return;
+    };
+    let pool = profile_dir.join("node_modules");
+    let mut healed = 0usize;
+    for bundle in bundles {
+        let Some(name) = bundle.as_str() else { continue };
+        let rel = if name.starts_with('@') {
+            let parts: Vec<&str> = name.splitn(3, '/').collect();
+            if parts.len() < 2 { continue };
+            PathBuf::from(parts[0]).join(parts[1])
+        } else {
+            PathBuf::from(name)
+        };
+        // 已能解析（内置树或 profile 池）→ 跳过
+        if builtin_nm.join(&rel).join("package.json").is_file() { continue }
+        if pool.join(&rel).join("package.json").is_file() { continue }
+        let src = external_nm.join(&rel);
+        if !src.join("package.json").is_file() {
+            log::warn!("[heal] bundle {name} 在外部安装树也不存在，交由保险丝处理");
+            continue;
+        }
+        if let Some(parent) = pool.join(&rel).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        #[cfg(unix)]
+        {
+            if std::os::unix::fs::symlink(&src, pool.join(&rel)).is_ok() {
+                healed += 1;
+                log::info!("[heal] bundle {name} → {}", src.display());
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            log::warn!("[heal] bundle {name} 非_unix 平台暂不补链，交由保险丝处理");
+        }
+    }
+    if healed > 0 {
+        log::info!("[heal] 已补链 {healed} 个 profile bundle（外部安装树 → profile 池）");
+    }
+}
+
 /// 把三个内置插件包挂进选中 profile 的模块池：桌面插件 + 手机访问（dsh-mobile-access）+ 移动布局
 /// （移动布局：上游 v2.3.0 起包名 dsh-web-mobile）。幂等。
 pub(crate) fn materialize_desktop_plugin(app: &tauri::AppHandle) {
-    let profile = configured_profile();
-    let pool = dsh_home().join("profiles").join(&profile).join("node_modules");
+    materialize_desktop_plugin_for(app, &configured_profile());
+}
+
+/// 按 spawn 的目标 profile 挂池（#90 实测：非激活 profile 的实例也需要
+/// 桌面三插件可解析，否则 --patch loader 条目找不到包 → 实例秒退）。幂等。
+pub(crate) fn materialize_desktop_plugin_for(app: &tauri::AppHandle, profile: &str) {
+    let pool = dsh_home().join("profiles").join(profile).join("node_modules");
     let _ = std::fs::create_dir_all(&pool);
-    // 迁移清理：旧版本把插件挂到共享池 profiles/node_modules，
-    // 现改为 profile 专属池。删除旧位置残留，避免歧义。
-    cleanup_legacy_shared_pool();
     if let Some(dir) = desktop_plugin_dir(app) {
         materialize_pool_package(&pool, "dsh-desktop-tauriapp", &dir);
     } else {

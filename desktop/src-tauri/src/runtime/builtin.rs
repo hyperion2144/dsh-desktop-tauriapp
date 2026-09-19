@@ -15,6 +15,8 @@ use tauri::Manager;
 
 /// 启动器脚本（编译期嵌入；内容与 dsh 版本解耦，直接覆盖写）。
 pub(crate) const LAUNCHER_JS: &str = include_str!("builtin/launcher.mjs");
+/// 模块解析钩子（anywhere-labs 式，编译期嵌入；与启动器同目录写出）。
+pub(crate) const RESOLVER_HOOKS_JS: &str = include_str!("builtin/resolver-hooks.mjs");
 
 /// dsh 来源两态（#85）。
 #[derive(Debug, Clone, PartialEq)]
@@ -44,20 +46,23 @@ pub(crate) fn configured_dsh_mode() -> DshMode {
     }
 }
 
-/// 内置 dsh 包 lib 目录：resources/dsh 是 npm 安装根（package.json + node_modules），
-/// dsh 本体在 node_modules/@deepseek-ai/dsh/lib；launcher 依赖向上查找正好落在同根。
-fn builtin_dsh_lib(app: &tauri::AppHandle) -> Option<PathBuf> {
-    let root = app.path().resource_dir().ok()?.join("dsh");
-    let lib = root
-        .join("node_modules")
-        .join("@deepseek-ai")
-        .join("dsh")
-        .join("lib");
-    if lib.join("package.json").is_file() {
-        Some(lib)
+/// 从指定 dsh 安装根（npm 安装树）解析 dsh 包 lib 目录。
+fn dsh_lib_from_root(root: &std::path::Path) -> Option<PathBuf> {
+    let pkg = root.join("node_modules").join("@deepseek-ai").join("dsh");
+    // npm 包的 package.json 在包根（lib/ 只有产物）
+    if pkg.join("package.json").is_file() {
+        Some(pkg.join("lib"))
     } else {
         None
     }
+}
+
+/// 内置 dsh 包 lib 目录：resources/dsh 是 npm 安装根，dsh 本体在
+/// node_modules/@deepseek-ai/dsh（package.json 在包根，#90 实测教训）；
+/// launcher 依赖向上查找正好落在同根。
+fn builtin_dsh_lib(app: &tauri::AppHandle) -> Option<PathBuf> {
+    let root = app.path().resource_dir().ok()?.join("dsh");
+    dsh_lib_from_root(&root)
 }
 
 /// node 可执行文件定位：1) DSH_NODE_BIN env 2) 应用可执行文件旁 sidecar（dsh-node）3) 系统 node（开发）。
@@ -103,6 +108,9 @@ pub(crate) fn ensure_launcher(app: &tauri::AppHandle) -> Result<PathBuf, String>
     std::fs::create_dir_all(&dir).map_err(|e| format!("runtime 目录创建失败：{e}"))?;
     let path = dir.join("dsh-launcher.mjs");
     std::fs::write(&path, LAUNCHER_JS).map_err(|e| format!("启动器写出失败：{e}"))?;
+    // 解析钩子与启动器同目录（launcher 用 import.meta.url 相对引用它）
+    let hooks = dir.join("dsh-resolver-hooks.mjs");
+    std::fs::write(&hooks, RESOLVER_HOOKS_JS).map_err(|e| format!("解析钩子写出失败：{e}"))?;
     Ok(path)
 }
 
@@ -118,8 +126,20 @@ pub(crate) fn find_external_bin() -> Option<PathBuf> {
     }
 }
 
-/// 尝试内置来源：resources/dsh 存在 + node sidecar 可用 + 启动器写出成功。
+/// 尝试内置来源：用户选中的已下载运行时（#95）优先，否则 resources/dsh；
+/// node sidecar 可用 + 启动器写出成功。
 fn try_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
+    // #95：选中的已下载运行时优先（node 仍是内置 sidecar，dsh 树可换）
+    let selected = crate::settings::load_desktop_settings().dsh_runtime;
+    if let Some(ver) = selected.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        let dir = crate::runtime::registry::runtime_dir(app, ver);
+        if let Some(dsh_lib) = dsh_lib_from_root(&dir) {
+            let node = find_builtin_node().ok_or_else(|| "内置 node sidecar 未找到".to_string())?;
+            let launcher = ensure_launcher(app)?;
+            log::info!("[source] 使用已下载运行时 {ver}");
+            return Ok(DshSource::Builtin { node, dsh_lib, launcher });
+        }
+    }
     let dsh_lib = builtin_dsh_lib(app)
         .ok_or_else(|| "resources/dsh 不存在（内置运行时未打包）".to_string())?;
     let node = find_builtin_node().ok_or_else(|| "内置 node sidecar 未找到".to_string())?;
@@ -133,6 +153,11 @@ pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String
         match try_builtin(app) {
             Ok(s) => return Ok(s),
             Err(e) => {
+                crate::network::notify::show_notification(
+                    app,
+                    "内置运行时不可用，已回退外部 dsh",
+                    &format!("原因：{e}。可在设置中切换来源或检查安装包完整性。"),
+                );
                 log::warn!("[source] 内置运行时不可用（{e}），回退外部 dsh");
             }
         }
@@ -244,5 +269,23 @@ mod tests {
         // 无 env、无设置 → 内置默认（消费端传入空串模拟）；
         // 这里只测枚举语义，env/settings 组合由集成验收覆盖（并行测试禁改 env）。
         assert_ne!(DshMode::Builtin, DshMode::External);
+    }
+
+    #[test]
+    fn dsh_lib_from_root_layout() {
+        let dir = std::env::temp_dir().join(format!("dsh-lib-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(dsh_lib_from_root(&dir), None, "空目录不应解析出 dsh lib");
+        let pkg = dir.join("node_modules/@deepseek-ai/dsh");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("package.json"), "{}").unwrap();
+        std::fs::create_dir_all(pkg.join("lib")).unwrap();
+        std::fs::write(pkg.join("lib/bin.js"), "// stub").unwrap();
+        assert_eq!(
+            dsh_lib_from_root(&dir),
+            Some(pkg.join("lib")),
+            "package.json 在包根（非 lib/）时应解析成功（#90 实测教训）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

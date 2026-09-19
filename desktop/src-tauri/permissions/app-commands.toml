@@ -162,6 +162,36 @@ commands = { allow = ["switch_profile_command"] }
 identifier = "allow-migrate-profile"
 description = "桌面设置面板：migrate_profile（#88 profile 迁移）"
 commands = { allow = ["migrate_profile"] }
+
+[[permission]]
+identifier = "allow-migration-status"
+description = "桌面设置面板：migration_status（#90 迁移进度条）"
+commands = { allow = ["migration_status"] }
+
+[[permission]]
+identifier = "allow-task-status"
+description = "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）"
+commands = { allow = ["task_status"] }
+
+[[permission]]
+identifier = "allow-list-runtime-catalog"
+description = "桌面设置面板：运行时版本目录/已装列表（#95）"
+commands = { allow = ["list_runtime_catalog"] }
+
+[[permission]]
+identifier = "allow-download-runtime"
+description = "桌面设置面板：下载并安装 dsh 运行时（#95）"
+commands = { allow = ["download_runtime"] }
+
+[[permission]]
+identifier = "allow-remove-runtime"
+description = "桌面设置面板：删除已下载的 dsh 运行时（#95）"
+commands = { allow = ["remove_runtime"] }
+
+[[permission]]
+identifier = "allow-runtime-download-status"
+description = "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）"
+commands = { allow = ["runtime_download_status"] }
 # ── 下载管理器（#72）：右侧边栏下载 tab / blob 拦截 / 桌面设置并发项 ──
 
 [[permission]]

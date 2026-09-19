@@ -20,6 +20,9 @@ pub(crate) struct InstanceRecord {
     /// spawn 时刻（epoch 秒；仅供排查）。
     #[serde(default)]
     pub(crate) spawned_at: u64,
+    /// dsh 来源（"builtin"/"external"，spawn 时记录；#90 运行态展示用）。
+    #[serde(default)]
+    pub(crate) source: String,
 }
 
 /// 台账文件路径（`$DSH_HOME/dsh-desktop-tauriapp/instances.json`）。
@@ -61,7 +64,7 @@ pub(crate) fn register_instance_into(records: &mut Vec<InstanceRecord>, rec: Ins
 }
 
 /// 登记实例到默认台账路径。
-pub(crate) fn register_instance(profile: &str, port: u16, lane_port: u16, pid: u32) {
+pub(crate) fn register_instance(profile: &str, port: u16, lane_port: u16, pid: u32, source: &str) {
     let mut records = load_instances();
     register_instance_into(
         &mut records,
@@ -70,6 +73,7 @@ pub(crate) fn register_instance(profile: &str, port: u16, lane_port: u16, pid: u
             port,
             lane_port,
             pid,
+            source: source.to_string(),
             spawned_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -176,6 +180,7 @@ mod tests {
             port,
             lane_port: port + 10,
             pid: 100,
+            source: "external".into(),
             spawned_at: 0,
         }
     }

@@ -39,5 +39,9 @@ anyhow = "1"
 # 启动保险丝（#53）：stderr 失败检测正则 + AI explain 的 OpenAI 兼容调用（#56：必须关默认 features，两平台不编译 OpenSSL）
 regex = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "blocking", "native-tls", "stream"] }
+# 运行时下载/切换（#95）：dsh 运行时包为 .tgz（npm tarball 同构）
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tar = "0.4"
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

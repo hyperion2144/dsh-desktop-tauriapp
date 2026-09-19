@@ -5,9 +5,11 @@
 ## 项目简介
 
 把 DeepSeek Harness Web GUI（dsh）封装成 Tauri 2 桌面应用（macOS + Windows）：
-双击启动 → 探活/拉起本地 dsh web（默认端口 3080，可在设置中改）→ 主窗口加载 Web GUI
-→ 托盘常驻 → 退出回收子进程。仓库同时是 dsh 插件包（根 package.json 的 dsh.client 声明
-浏览器侧 client），桌面壳把插件经 --patch 注入 dsh web profile（不写 profile bundles）。
+双击启动 → 探活/拉起本地 dsh web（每 profile 独立端口：web=3080、desktop=3081、
+其余自动分配；可在设置中改）→ 主窗口加载 Web GUI → 托盘常驻 → 退出回收子进程。
+#85 起支持内置运行时（默认）：Node+dsh 依赖树随包分发，经内部 runProfile API 代码
+路径启动（不走 CLI，不分版本）；也可切换外部 dsh CLI（DSH_BIN → PATH → npm 全局）。
+仓库同时是 dsh 插件包（根 package.json 的 dsh.client 声明
 
 ## 常用命令
 
@@ -90,8 +92,10 @@
    若 dsh 配置出现注释需改行级合并。
 2. spawn 参数顺序：--patch 必须排在 --no-open / --host / --port 之前（dsh CLI
    passThrough 会把靠后的 --patch 透传给 web-app 报 unknown option）。
-3. 单实例约束：同一 profile 的 dsh web 同时只能一个（task-board ledger 全局锁）；
-   已有外部实例时应走「复用/兼容」路径，调试勿并行拉第二个。
+3. 单实例约束（#82/#93 修正）：同一 profile 的 dsh web 同时只能一个——同 HOME
+   同 profile 双实例会互污共享状态，绝对禁止；但「task-board ledger 全局锁」的
+   旧说法不准确（实为进程内锁），不同 profile 实例可并存（多窗口，#89）。
+   已有外部实例时 web profile 走「复用/兼容」路径，其它 profile 端口被占则提示不代拉。
 4. 守护器判活：健康=TCP 连接成功即可（勿改回 HTTP 判死——会因 EOF/慢响应误重启，
    曾引发无限自愈循环）；复用外部/远程只提示不代拉；自愈 3 次封顶。
 5. 远程页面 IPC：Tauri 2.11 对 remote origin 强制 ACL，应用自命令也需在
