@@ -13,4 +13,5 @@
 - 安装包体积预计 +80~150MB（Node + dsh 依赖树）；mac 签名公证与 Windows Defender 误报需在 CI 处理。
 - 多开隔离已拍板（#93）：方案 B——直接用默认 DSH_HOME，不做独立 HOME/派发；多窗口 = 同 HOME 多 profile 实例不同端口，数据共享是设计本意；唯一主动解决项是 lane 反代目标跟随焦点窗口（#94）；硬约束：同 HOME 同 profile 双实例绝对禁止、quarantine 按 profile 分桶；方案 A（含壳设置搬迁前置）留 map 雾区。
 - 打包参数已拍板（#92）：同版桌面出「内置 latest / 内置 alpha」两套安装包（每包一份运行时，设置无通道概念，CI 产物 `-latest`/`-alpha` 后缀）；完整能力含 LibreOfficeKit（每份依赖树 549MB 级，远超最初预估的 +80~150MB）；Node 24 LTS；本期不签名（与 CI 现状一致，xattr 指引入 README）；异步解压失败回退外部 dsh。
+- 启动方式已拍板（#85）：内置 dsh 一律经内部 runProfile API 代码路径启动，不走 CLI、不分版本——desktop 名被 dsh 0.1.6+ CLI 保留给官方 Electron 应用，内部 API 无此检查（已端到端实证）；只有外部 dsh 走 CLI（alpha 外部 + desktop 名会被拒，属上游行为）。desktop 首启经 fromDefaultProfile:"web" 从出厂模板初始化（desktop 非出厂模板，直接 boot 会报 does not exist）。
 - 存量用户升级后 dsh 版本可能从外部版跳到内置版，插件兼容问题由 #53 启动保险丝兜底。
