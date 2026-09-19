@@ -253,6 +253,8 @@ pub fn run() {
             if let Err(e) = main_window {
                 log::error!("[main] 主窗口创建失败：{e}");
             }
+            // #87：在首次端口分配（会落盘创建 settings.yaml）之前判定全新安装
+            let fresh_install = !settings::settings_path().exists();
             let port = app_port();
             let profile = configured_profile();
             let state = app.state::<DshState>();
@@ -296,6 +298,14 @@ pub fn run() {
                             *state.child.lock().unwrap() = Some(child);
                             state.spawned_this_run.store(true, Ordering::SeqCst);
                             state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+                            // #87：全新安装默认 desktop profile——通知说明 + 指引如何回 web
+                            if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
+                                show_notification(
+                                    app.handle(),
+                                    "全新安装 · 默认使用 desktop profile",
+                                    "启动端口 3081；托盘菜单「切换 Profile」可回到 web@3080",
+                                );
+                            }
                         }
                         Err(SpawnError::NotFound(e)) => {
                             log::error!("启动 dsh 失败：{e}");

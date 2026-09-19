@@ -289,12 +289,30 @@ pub fn lane_port_for_profile(profile: &str) -> u16 {
     }
 }
 
-/// 激活 profile（settings.yaml desktop.active_profile，非法值回退 web）。
+/// 全新安装的默认 profile（#87 拍板：叫 desktop）。
+/// 注意：dsh 0.1.6+ 的 CLI 把 `desktop` 保留给官方 Electron 应用（拒绝 --profile desktop），
+/// 0.1.5-rc.2（latest）无此限制；alpha 安装包变体的兼容归 #85 评估直接入口。
+pub(crate) const FRESH_DEFAULT_PROFILE: &str = "desktop";
+
+/// 未设置 active_profile 时的默认值（纯函数，便于单测）：
+/// 全新安装（settings.yaml 不存在）→ desktop；存量（文件存在但未设置）→ web，不静默搬家。
+pub(crate) fn default_profile_when_unset(settings_file_exists: bool) -> String {
+    if settings_file_exists {
+        "web".to_string()
+    } else {
+        FRESH_DEFAULT_PROFILE.to_string()
+    }
+}
+
+/// 激活 profile（settings.yaml active_profile；未设置时：全新安装→desktop、存量→web）。
 pub fn configured_profile() -> String {
-    load_desktop_settings()
+    if let Some(p) = load_desktop_settings()
         .active_profile
         .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
-        .unwrap_or_else(|| "web".to_string())
+    {
+        return p;
+    }
+    default_profile_when_unset(settings_path().exists())
 }
 
 /// 手机访问 lane 端口：DSH_MOBILE_LANE_PORT 环境变量 > settings.yaml lane_port > 3091。
@@ -438,7 +456,15 @@ mod tests {
     assert_eq!(default_port_for_profile("abc"), default_port_for_profile("abc"));
     assert_eq!(default_port_for_profile("abc"), default_port_for_profile("abc"));
     // 不同名不要求不同值（冲突由 assign_port_avoiding 兜住）
-
   }
+
+  #[test]
+  fn fresh_install_defaults_to_desktop_profile() {
+    // #87：全新安装（无 settings.yaml）默认 desktop；存量（文件在但未设置）保持 web
+    assert_eq!(default_profile_when_unset(false), "desktop");
+    assert_eq!(default_profile_when_unset(true), "web");
+    assert_eq!(FRESH_DEFAULT_PROFILE, "desktop");
+  }
+
 
 }
