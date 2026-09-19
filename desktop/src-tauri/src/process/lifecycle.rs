@@ -236,45 +236,40 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
 pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-    let bin = find_dsh_bin().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 dsh 命令。请执行 `npm i -g @deepseek-ai/dsh` 或设置 DSH_BIN 环境变量。"
-                .to_string(),
-        )
-    })?;
-    let mut cmd = Command::new(&bin);
-    // 统一用 `dsh --profile web ...`（等价于 `dsh web`）。桌面插件经 --patch 注入
-    //（包名行，实体在共享模块池）；profile 由调用方传入（#86 per-profile 实例）。
+    // 来源解析（#85 拍板）：内置 → node + 启动器（runProfile 代码路径）；外部 → CLI
     log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
-    let mut launcher_args: Vec<std::ffi::OsString> =
-        vec!["--profile".into(), profile.into()];
-    // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
-    // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
-    // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
-    // 兼容模式不注入，行为等同纯 dsh web（用户实测需求）
+    let mut patches: Vec<std::path::PathBuf> = Vec::new();
     if advanced {
-        launcher_args.push("--patch".into());
-        launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+        // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
+        // 兼容模式不注入，行为等同纯 dsh（用户实测需求）
+        patches.push(crate::desktop_plugin_patch_path(app));
     }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
-            launcher_args.push("--patch".into());
-            launcher_args.push(patch.into());
+            patches.push(patch.into());
         }
     }
-    // --no-open：dsh 升级后默认打开系统浏览器，桌面壳自行导航故关闭
-    launcher_args.extend([
-        "--no-open".into(),
-        "--host".into(),
-        "127.0.0.1".into(),
-        "--port".into(),
-        port.to_string().into(),
-    ]);
+    let source = crate::runtime::builtin::resolve_source(app).map_err(SpawnError::Other)?;
+    let (bin, launcher_args) = match &source {
+        crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, launcher } => {
+            log::info!("[spawn] 内置模式：node + runProfile（不经 CLI）");
+            let init_from_default = !crate::profiles::profile_exists(profile);
+            (node.clone(), crate::runtime::builtin::launcher_args(launcher, dsh_lib, profile, port, &patches, init_from_default))
+        }
+        crate::runtime::builtin::DshSource::External { bin } => {
+            log::info!("[spawn] 外部模式：CLI（--patch 必须早于 --no-open，passThrough 顺序）");
+            (bin.clone(), crate::runtime::builtin::external_cli_args(profile, port, &patches))
+        }
+    };
+    let mut cmd = Command::new(&bin);
+    cmd.args(&launcher_args);
+    if matches!(source, crate::runtime::builtin::DshSource::External { .. }) {
+        // 外部 dsh 是 Node 脚本（shebang 依赖 node）：Finder 启动的 GUI PATH 缺 node，
+        // 按现有链路补齐运行时 PATH；内置模式 node 即 sidecar，无需 PATH 注入。
+        cmd.env("PATH", dsh_runtime_path(&bin));
+    }
     let lane = lane_port_for_profile(profile);
-    cmd.args(&launcher_args)
-        .env("PATH", dsh_runtime_path(&bin))
-        .env("DSH_MOBILE_LANE_PORT", lane.to_string())
+    cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
     let cloudflared = configured_cloudflared_bin();
@@ -515,45 +510,40 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 #[cfg(windows)]
 pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
     use std::os::windows::process::CommandExt;
-    let node = find_node().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 node.exe。请安装 Node.js 或设置 DSH_NODE 环境变量。".to_string(),
-        )
-    })?;
-    let bin_js = find_dsh_bin_js().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 @deepseek-ai/dsh。请执行 `npm i -g @deepseek-ai/dsh`，或设置 DSH_BIN 指向 bin.js。"
-                .to_string(),
-        )
-    })?;
-    let mut cmd = Command::new(&node);
-    let lane = lane_port_for_profile(profile);
-    let mut launcher_args: Vec<std::ffi::OsString> =
-        vec![
-            bin_js.clone().into(),
-            "--profile".into(),
-            profile.into(),
-        ];
-    // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
-    // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
-    // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    launcher_args.push("--patch".into());
-    launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
-    // 仅当设置 DSH_DESKTOP_EXTRA_PATCH 调试环境变量时叠加该 `--patch` overlay。
+    use std::os::windows::process::CommandExt;
+    // 来源解析（#85 拍板）：内置 → sidecar node + 启动器（runProfile）；外部 → 系统 node + bin.js CLI
+    log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
+    let mut patches: Vec<std::path::PathBuf> = Vec::new();
+    if advanced {
+        // 历史上 windows 分支无条件注 --patch；#85 统一为与 unix 一致的 advanced 语义
+        patches.push(crate::desktop_plugin_patch_path(app));
+    }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
-            launcher_args.push("--patch".into());
-            launcher_args.push(patch.into());
+            patches.push(patch.into());
         }
     }
-    // --no-open：dsh 升级后默认打开系统浏览器，桌面壳自行导航故关闭
-    launcher_args.extend([
-        "--no-open".into(),
-        "--host".into(),
-        "127.0.0.1".into(),
-        "--port".into(),
-        port.to_string().into(),
-    ]);
+    let source = crate::runtime::builtin::resolve_source(app).map_err(SpawnError::Other)?;
+    let (node, launcher_args) = match &source {
+        crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, launcher } => {
+            log::info!("[spawn] 内置模式：node + runProfile（不经 CLI）");
+            let init_from_default = !crate::profiles::profile_exists(profile);
+            (node.clone(), crate::runtime::builtin::launcher_args(launcher, dsh_lib, profile, port, &patches, init_from_default))
+        }
+        crate::runtime::builtin::DshSource::External { bin } => {
+            let node = find_node().ok_or_else(|| {
+                SpawnError::NotFound(
+                    "未找到 node.exe。请安装 Node.js 或设置 DSH_NODE 环境变量。".to_string(),
+                )
+            })?;
+            log::info!("[spawn] 外部模式：node + bin.js CLI（--patch 必须早于 --no-open）");
+            let mut a = vec![bin.clone().into_os_string()];
+            a.extend(crate::runtime::builtin::external_cli_args(profile, port, &patches));
+            (node, a)
+        }
+    };
+    let mut cmd = Command::new(&node);
+    let lane = lane_port_for_profile(profile);
     cmd.args(&launcher_args)
         .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")

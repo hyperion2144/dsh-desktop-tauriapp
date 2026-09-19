@@ -22,6 +22,12 @@ pub(crate) struct ProfileInfo {
     pub(crate) selectable: bool,
 }
 
+/// profile 是否已初始化（有 package.json）：desktop 等非出厂模板首启时
+/// 启动器需追加 --init-from-default（从 web 模板初始化，#85）。
+pub(crate) fn profile_exists(name: &str) -> bool {
+    dsh_home().join("profiles").join(name).join("package.json").is_file()
+}
+
 pub(crate) fn scan_profiles() -> Vec<ProfileInfo> {
     let active = load_desktop_settings().active_profile.unwrap_or_else(|| "web".into());
     let mut list = Vec::new();

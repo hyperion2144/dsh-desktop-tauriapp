@@ -56,6 +56,9 @@ pub struct DesktopSettings {
     /// 每 profile lane（手机访问反代）端口覆盖（#86）：web 缺省 3091、desktop 缺省 3092，
     /// 其余从 3093 起自动分配。
     pub profile_lane_ports: Option<std::collections::BTreeMap<String, u16>>,
+    /// dsh 来源（#85 拍板）：builtin=内置运行时（默认，内部 runProfile 代码路径启动）/
+    /// external=外部 CLI（DSH_BIN → PATH → npm 全局）。DSH_MODE env 可覆盖。
+    pub dsh_mode: Option<String>,
 }
 
 pub fn settings_path() -> PathBuf {
@@ -387,6 +390,7 @@ mod tests {
       download_concurrency: Some(5),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
+       dsh_mode: Some("builtin".into()),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
