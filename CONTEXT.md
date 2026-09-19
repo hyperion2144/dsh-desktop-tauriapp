@@ -33,3 +33,11 @@ _Avoid_: 一次性 token（实际可反复使用）、dsh 登录密码
 **配对 Token（Pairing Token）**:
 lane 生成的 10 分钟 TTL 一次性配对凭证，手机扫码/贴码换取 lane 会话 cookie；与 process token 是两套独立凭证，互不替代。
 _Avoid_: dsh token、启动 token（指 process token 时）
+
+**实例（Instance）**:
+同一 DSH_HOME 下某 profile 在独立端口上的 dsh web 运行进程；桌面壳一个窗口承载一个实例，同 profile 至多一窗。多窗口 = 多实例，共享 HOME 是设计本意。
+_Avoid_: 多开 dsh（暗示多 HOME/多环境）、独立环境（实例不隔离数据）
+
+**反代目标（Lane Target）**:
+手机访问 lane 当前转发到的那个实例；跟随焦点窗口，窗口收进托盘/失焦时保持最后绑定。
+_Avoid_: 反代端口本身（那是 lane_port）、固定绑定某 profile
