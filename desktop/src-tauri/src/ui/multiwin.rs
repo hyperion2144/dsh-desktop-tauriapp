@@ -95,7 +95,10 @@ fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
         // 清 per-profile token 残留（旧实例的 token 对新实例无效）
         app.state::<DshState>().web_tokens.lock().unwrap().remove(&profile);
         match spawn_dsh(&app, &profile, port, true) {
-            Ok(child) => app.state::<DshState>().set_child(&profile, child),
+            Ok(child) => {
+                app.state::<DshState>().set_child(&profile, child);
+                crate::ui::tray::refresh_tray_mode(&app);
+            }
             Err(e) => {
                 let msg = match &e {
                     crate::runtime::error::SpawnError::NotFound(s)
@@ -127,20 +130,49 @@ async fn wait_ready_and_attach(
 ) {
     let host_port = format!("127.0.0.1:{port}");
     let mut rounds = 0u32;
+    let mut attach_retries = 0u8; // 次实例轻量保险丝的重试预算（1 次）
     loop {
         if app.state::<DshState>().quitting.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        let exited = {
+        // #89 第二批：次实例轻量保险丝——pre-ready 退出且非零 → 隔离不兼容插件 + 重试一次
+        let exit_status = {
             let state = app.state::<DshState>();
             let mut children = state.children.lock().unwrap();
             children
                 .get_mut(&profile)
                 .and_then(|c| c.try_wait().ok())
                 .flatten()
-                .is_some()
         };
-        if exited {
+        if let Some(status) = exit_status {
+            let stderr = app.state::<DshState>().stderr_snapshot_for(&profile);
+            if attach_retries < 1 && !status.success() {
+                let settings = crate::settings::load_desktop_settings();
+                let inject = crate::desktop_plugin_patch_path(&app);
+                let outcome = crate::process::quarantine::run_cycle(
+                    &crate::dsh_home(),
+                    &profile,
+                    Some(&inject),
+                    &stderr,
+                    &settings,
+                );
+                if !outcome.disabled.is_empty() {
+                    attach_retries += 1;
+                    let names: Vec<String> = outcome.disabled.iter().map(|e| e.id.clone()).collect();
+                    show_notification(
+                        &app,
+                        &format!("{profile} 启动失败 · 已隔离插件"),
+                        &format!("已禁用 {}，重试一次", names.join("、")),
+                    );
+                    let _ = crate::process::lifecycle::stop_port_owner(port).await;
+                    app.state::<DshState>().web_tokens.lock().unwrap().remove(&profile);
+                    match spawn_dsh(&app, &profile, port, true) {
+                        Ok(child) => app.state::<DshState>().set_child(&profile, child),
+                        Err(_) => {}
+                    }
+                    continue;
+                }
+            }
             let tail = app.state::<DshState>().stderr_tail_for(&profile, 10).join(" ⏎ ");
             show_notification(
                 &app,
@@ -153,6 +185,7 @@ async fn wait_ready_and_attach(
             }
             return;
         }
+        // 未退出：继续接入流程（token/端口检查在下方）
         let token = app.state::<DshState>().web_token_for(&profile);
         let Some(token) = token else {
             tokio::time::sleep(Duration::from_millis(400)).await;
@@ -193,6 +226,46 @@ async fn wait_ready_and_attach(
             let _ = w.set_focus();
         }
         log::info!("[multiwin:{profile}] 窗口已接入（{host_port}）");
+        // #89 第二批：就绪后进入运行期监督（次实例无保险丝重试，进程退出即通知+关窗）
+        supervise_secondary(app, profile, label, port).await;
+        return;
+    }
+}
+
+/// 运行期监督：轮询子进程退出 → stderr 尾部通知 + 关窗清理（与接入前同语义）。
+async fn supervise_secondary(
+    app: AppHandle,
+    profile: String,
+    label: String,
+    port: u16,
+) {
+    loop {
+        if app.state::<DshState>().quitting.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        let exited = {
+            let state = app.state::<DshState>();
+            let mut children = state.children.lock().unwrap();
+            children
+                .get_mut(&profile)
+                .and_then(|c| c.try_wait().ok())
+                .flatten()
+                .is_some()
+        };
+        if !exited {
+            continue;
+        }
+        let tail = app.state::<DshState>().stderr_tail_for(&profile, 10).join(" ⏎ ");
+        show_notification(
+            &app,
+            &format!("{profile} 实例已退出"),
+            &if tail.is_empty() { "进程退出，详情见主窗口日志".to_string() } else { tail },
+        );
+        close_profile_instance(&app, &profile, false);
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.close();
+        }
         return;
     }
 }
@@ -216,6 +289,7 @@ pub(crate) fn close_profile_instance(app: &AppHandle, profile: &str, stop_proces
         let _ = crate::process::lifecycle::stop_port_owner(port).await;
         log::info!("[multiwin:{profile}] 实例已停止，端口 {port} 释放");
     });
+    crate::ui::tray::refresh_tray_mode(&app);
 }
 
 /// 是否还有可见的 profile 次窗口（主窗隐藏判定用）。
