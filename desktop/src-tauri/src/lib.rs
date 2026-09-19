@@ -303,6 +303,10 @@ pub fn run() {
                             *state.child.lock().unwrap() = Some(child);
                             state.spawned_this_run.store(true, Ordering::SeqCst);
                             state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+                            // #94：主实例上线即默认转发目标
+                            crate::network::forwarder::set_focused_lane(
+                                crate::settings::lane_port_for_profile(&profile)
+                            );
                             // #87：全新安装默认 desktop profile——通知说明 + 指引如何回 web
                             if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
                                 show_notification(
@@ -350,6 +354,8 @@ pub fn run() {
 // 先起通知桥，把端口/token 交给导航任务并保存到 state（重启 dsh 时复用）；
 // 导航完成后再注入监听脚本（0.3.0 在导航前注入，冷启动时脚本随加载页销毁）。
             let (nport, ntoken) = start_notify_server(app.handle().clone());
+            // #94：lane 转发器（手机稳定接入点 → 焦点实例）
+            tauri::async_runtime::spawn(crate::network::forwarder::start());
             state.notify_port.store(nport, Ordering::SeqCst);
             *state.notify_token.lock().unwrap() = ntoken.clone();
             if state.spawned_this_run.load(Ordering::SeqCst) {
@@ -515,6 +521,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // #94：焦点窗口决定 lane 转发目标（主窗=激活 profile，次窗=对应 profile）
+            if let WindowEvent::Focused(true) = event {
+                let label = window.label();
+                let profile = if label == "main" {
+                    crate::settings::configured_profile()
+                } else {
+                    label.strip_prefix("profile-").unwrap_or("").to_string()
+                };
+                if !profile.is_empty() {
+                    let lane = crate::settings::lane_port_for_profile(&profile);
+                    crate::network::forwarder::set_focused_lane(lane);
+                }
+            }
             match window.label() {
                 "pet" => match event {
                     WindowEvent::CloseRequested { api, .. } => {

@@ -190,7 +190,7 @@ pub fn configured_port() -> u16 {
 /// 端口分配基数：web=3080（不变）、desktop=3081、其余 profile 在其名字散列落点冲突时向后探测（#86）。
 pub(crate) const PORT_BASE_OTHER: u16 = 3082;
 /// lane 端口分配基数：web=3091、desktop=3092、其余从 3093 起分配。
-pub(crate) const LANE_BASE_OTHER: u16 = 3093;
+pub(crate) const LANE_BASE_OTHER: u16 = 3094;
 
 /// FNV-1a 64：给 profile 名算稳定散列，跨进程为其它 profile 选出一致的端口起点。
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -211,11 +211,12 @@ pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
     }
 }
 
-/// profile 的默认 lane 端口公式（纯函数；#86）。
+/// profile 的默认 lane 端口公式（纯函数；#94）：实例 lane 整体 +1（3092 起），
+/// 腾出 3091 给壳自有 TCP 转发器作为手机稳定接入点（焦点窗口跟随）。
 pub(crate) fn default_lane_port_for_profile(profile: &str) -> u16 {
     match profile {
-        "web" => 3091,
-        "desktop" => 3092,
+        "web" => 3092,
+        "desktop" => 3093,
         other => LANE_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
     }
 }
@@ -262,7 +263,7 @@ pub fn port_for_profile(profile: &str) -> u16 {
     }
 }
 
-/// 取 profile 的 lane 端口（#86）：语义同 port_for_profile，基数换成 lane。
+/// 取 profile 的 lane 端口（#86/#94）：语义同 port_for_profile，基数换成 lane。
 pub fn lane_port_for_profile(profile: &str) -> u16 {
     if let Ok(v) = std::env::var("DSH_MOBILE_LANE_PORT") {
         if let Ok(p) = v.parse() {
@@ -318,7 +319,9 @@ pub fn configured_profile() -> String {
     default_profile_when_unset(settings_path().exists())
 }
 
-/// 手机访问 lane 端口：DSH_MOBILE_LANE_PORT 环境变量 > settings.yaml lane_port > 3091。
+/// 手机访问转发器端口（#94）：DSH_MOBILE_LANE_PORT env > settings lane_port > 3091。
+/// 这是手机的稳定接入点（壳 TCP 转发器监听此处，转发到焦点实例 lane）；
+/// 实例自身 lane 端口见 lane_port_for_profile（3092 起）。
 pub fn configured_lane_port() -> u16 {
     std::env::var("DSH_MOBILE_LANE_PORT")
         .ok()
@@ -441,8 +444,8 @@ mod tests {
 
   #[test]
   fn default_lane_formula_fixed_profiles() {
-    assert_eq!(default_lane_port_for_profile("web"), 3091);
-    assert_eq!(default_lane_port_for_profile("desktop"), 3092);
+     assert_eq!(default_lane_port_for_profile("web"), 3092);
+     assert_eq!(default_lane_port_for_profile("desktop"), 3093);
     let p = default_lane_port_for_profile("research");
     assert!((LANE_BASE_OTHER..LANE_BASE_OTHER + 512).contains(&p));
   }
