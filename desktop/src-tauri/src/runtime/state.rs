@@ -84,6 +84,10 @@ pub(crate) struct DshState {
     pub(crate) running_sources: Mutex<std::collections::BTreeMap<String, String>>,
     /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
     pub(crate) fuse_retries: AtomicU8,
+    /// 启动时跳过完整性检查（confirm_startup_profile 调后置 true，防循环）。
+    pub(crate) skip_startup_check: AtomicBool,
+    /// 启动时用户选择的 profile（dsh 启动后前端通过 nsSave 持久化到 settings.yaml）。
+    pub(crate) pending_active_profile: Mutex<Option<String>>,
     /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
     pub(crate) fuse_summary: Mutex<Option<serde_json::Value>>,
     /// 下载管理器（#72）：任务表/调度/句柄，内部可变。
@@ -232,6 +236,8 @@ mod tests {
             web_tokens: Mutex::new(Default::default()),
              running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
+            skip_startup_check: AtomicBool::new(false),
+            pending_active_profile: Mutex::new(None),
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
         };
@@ -281,6 +287,8 @@ mod tests {
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
+            skip_startup_check: AtomicBool::new(false),
+            pending_active_profile: Mutex::new(None),
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
         };

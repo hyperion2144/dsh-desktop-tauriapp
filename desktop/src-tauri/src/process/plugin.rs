@@ -125,9 +125,12 @@ pub(crate) fn materialize_pool_package(pool: &std::path::Path, link_name: &str, 
             return;
         }
     }
-    if link.exists() || link.is_symlink() {
+    // 安全移除旧挂载：先试 remove_dir/remove_file（只删链接不穿透），失败再用 remove_dir_all（实体复制体）
+    if std::fs::remove_dir(&link).is_ok() || std::fs::remove_file(&link).is_ok() {
+        // junction/symlink 已删
+    } else if link.exists() {
+        // 旧复制体（实体目录）→ remove_dir_all 安全删除
         let _ = std::fs::remove_dir_all(&link);
-        let _ = std::fs::remove_file(&link);
     }
     #[cfg(unix)]
     {
@@ -138,9 +141,21 @@ pub(crate) fn materialize_pool_package(pool: &std::path::Path, link_name: &str, 
     }
     #[cfg(windows)]
     {
-        match copy_dir_all(&dir, &link) {
-            Ok(()) => log::info!("共享模块池复制 {link_name} -> {}", link.display()),
-            Err(e) => log::error!("共享模块池复制 {link_name} 失败：{e}"),
+        // Windows: 优先 junction（不需管理员权限），失败则试 symlink_dir（需开发者模式）
+        let link_str = link.to_string_lossy();
+        let target_str = target.to_string_lossy();
+        let out = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J", &link_str, &target_str])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => log::info!("共享模块池 junction {link_name} -> {}", target.display()),
+            _ => {
+                // junction 失败，试 symlink_dir（Windows 开发者模式）
+                match std::os::windows::fs::symlink_dir(&target, &link) {
+                    Ok(()) => log::info!("共享模块池 symlink {link_name} -> {}", target.display()),
+                    Err(e) => log::error!("共享模块池链接 {link_name} 失败（junction+symlink 均失败）：{e}"),
+                }
+            }
         }
     }
 }
@@ -248,6 +263,22 @@ pub(crate) fn materialize_desktop_plugin_for(app: &tauri::AppHandle, profile: &s
         materialize_pool_package(&pool, "dsh-web-mobile", &dir);
     } else {
         log::warn!("未定位到 dsh-web-mobile 插件包，跳过共享模块池挂载");
+    }
+}
+
+/// 退出时清理所有 profile 下的桌面插件 junction/symlink（不删复制体）。
+pub(crate) fn cleanup_desktop_plugin_links() {
+    let profiles_dir = dsh_home().join("profiles");
+    let Ok(entries) = std::fs::read_dir(&profiles_dir) else { return };
+    for entry in entries.flatten() {
+        let nm = entry.path().join("node_modules");
+        for name in ["dsh-desktop-tauriapp", "dsh-mobile-access", "dsh-web-mobile"] {
+            let link = nm.join(name);
+            // junction/symlink 用 remove_dir 只删链接不穿透；实体目录 remove_dir 会失败（非空）→ 跳过
+            if std::fs::remove_dir(&link).is_ok() || std::fs::remove_file(&link).is_ok() {
+                log::info!("[exit] 清理插件链接 {}", link.display());
+            }
+        }
     }
 }
 

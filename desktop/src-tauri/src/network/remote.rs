@@ -98,7 +98,7 @@ pub(crate) fn select_remote(app: &AppHandle, addr: Option<String>) {
         log::info!("[tray] 切换 dsh 服务地址 -> 本地");
     }
     let mode = app.state::<DshState>().mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(app, mode);
+    restart_dsh_in_mode(app, mode, None);
 }
 
 /// 新增远程地址流程：弹窗输入完整 URL（或旧格式 host[:port]）→ 校验 → 存入列表并选中。
@@ -168,7 +168,7 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
             show_notification(&handle, "端口已保存", &format!("{port} 将在本地模式生效"));
         } else {
             let mode = handle.state::<DshState>().mode.load(Ordering::SeqCst);
-            restart_dsh_in_mode(&handle, mode);
+            restart_dsh_in_mode(&handle, mode, None);
         }
         refresh_tray_mode(&handle);
     });

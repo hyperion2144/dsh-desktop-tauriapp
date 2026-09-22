@@ -157,7 +157,22 @@ identifier = "allow-switch-profile-command"
 description = "桌面设置面板：switch_profile_command"
 commands = { allow = ["switch_profile_command"] }
 
+[[permission]]
+identifier = "allow-confirm-startup-profile"
+description = "启动时用户选择 profile（存量安装 + active_profile 未设）"
+commands = { allow = ["confirm_startup_profile"] }
 
+
+[[permission]]
+identifier = "allow-check-startup-needed"
+description = "启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复"
+commands = { allow = ["check_startup_needed"] }
+
+
+[[permission]]
+identifier = "allow-get-pending-active-profile"
+description = "dsh 启动后取回启动时选择的 profile，前端通过 nsSave 持久化"
+commands = { allow = ["get_pending_active_profile"] }
 [[permission]]
 identifier = "allow-migrate-profile"
 description = "桌面设置面板：migrate_profile（#88 profile 迁移）"

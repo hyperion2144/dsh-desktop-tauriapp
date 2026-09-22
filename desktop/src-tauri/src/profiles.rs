@@ -58,6 +58,177 @@ pub(crate) fn valid_profile_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// profile 完整性检查结果。
+pub(crate) struct ProfileHealth {
+    pub dir_exists: bool,
+    pub missing_files: Vec<&'static str>,
+    pub node_modules_exists: bool,
+}
+
+/// profile 完整性检查：检查目录、结构文件（可解析）、node_modules。
+/// 不检查 node_modules/@deepseek-ai/dsh-web-app —— 共享包在父级 node_modules，Node 向上解析。
+pub(crate) fn profile_health_check(name: &str) -> ProfileHealth {
+    let dir = dsh_home().join("profiles").join(name);
+    if !dir.exists() {
+        return ProfileHealth { dir_exists: false, missing_files: vec![], node_modules_exists: false };
+    }
+    let mut missing = vec![];
+    // package.json：存在且可解析为 JSON
+    let pj = dir.join("package.json");
+    if !pj.is_file() || std::fs::read_to_string(&pj).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).is_none() {
+        missing.push("package.json");
+    }
+    // pnpm-workspace.yaml：存在且可解析为 YAML
+    let ws = dir.join("pnpm-workspace.yaml");
+    if !ws.is_file() || std::fs::read_to_string(&ws).ok().and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok()).is_none() {
+        missing.push("pnpm-workspace.yaml");
+    }
+    // cordis.yml：存在且可解析为 YAML
+    let cy = dir.join("cordis.yml");
+    if !cy.is_file() || std::fs::read_to_string(&cy).ok().and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok()).is_none() {
+        missing.push("cordis.yml");
+    }
+    // cordis.patch.yml：存在且可解析为 YAML
+    let cp = dir.join("cordis.patch.yml");
+    if !cp.is_file() || std::fs::read_to_string(&cp).ok().and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok()).is_none() {
+        missing.push("cordis.patch.yml");
+    }
+    ProfileHealth {
+        dir_exists: true,
+        missing_files: missing,
+        node_modules_exists: dir.join("node_modules").is_dir(),
+    }
+}
+
+/// 写 profile 模板文件（从 pnpm_direct_add :342-370 提取）。
+fn write_profile_templates(dir: &std::path::Path, profile: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 profile 目录失败：{e}"))?;
+    if !dir.join("package.json").is_file() {
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::json!({
+                "name": profile,
+                "private": true,
+                "dependencies": {},
+                "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"] } },
+                "scripts": {
+                    "postinstall": "rm -rf node_modules/@deepseek-ai/dsh-tools",
+                    "postuninstall": "rm -rf node_modules/@deepseek-ai/dsh-tools"
+                }
+            })
+            .to_string(),
+        )
+        .map_err(|e| format!("写 package.json 失败：{e}"))?;
+    }
+    if !dir.join("pnpm-workspace.yaml").is_file() {
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\nallowBuilds:\n  node-pty: true\n  protobufjs: true\n  git-hosted: true\n  cloudflared: true\n  sharp: true\n  ssh2: true\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': true\n  koffi: true\n",
+        )
+        .map_err(|e| format!("写 pnpm-workspace.yaml 失败：{e}"))?;
+    }
+    if !dir.join("cordis.yml").is_file() {
+        std::fs::write(
+            dir.join("cordis.yml"),
+            "# dsh profile root — an empty entry list. The tree is composed as patches:\n# each bundle in package.json's dsh.profile.bundles, then cordis.patch.yml, then any\n# --patch overlays. Edit cordis.patch.yml, not this file.\n[]\n",
+        )
+        .map_err(|e| format!("写 cordis.yml 失败：{e}"))?;
+    }
+    if !dir.join("cordis.patch.yml").is_file() {
+        std::fs::write(dir.join("cordis.patch.yml"), "[]\n")
+            .map_err(|e| format!("写 cordis.patch.yml 失败：{e}"))?;
+    }
+    Ok(())
+}
+
+/// 在 profile 目录跑 pnpm install（从 pnpm_direct_add :390-421 提取）。
+fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), String> {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    let dir = crate::dsh_home().join("profiles").join(profile);
+    let node = crate::runtime::builtin::find_builtin_node().ok_or("内置 node 不可用")?;
+    let pnpm = app
+        .path()
+        .resource_dir()
+        .ok()
+        .map(|r| r.join("dsh").join("node_modules").join("pnpm").join("bin").join("pnpm.cjs"))
+        .ok_or("resource_dir 不可用")?;
+    if !pnpm.is_file() {
+        return Err("内置 pnpm 不存在".into());
+    }
+    let node_dir = node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let mut paths = vec![];
+    if let Some(shim_dir) = ensure_node_shim_dir(app) {
+        paths.push(shim_dir);
+    }
+    paths.push(node_dir);
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    // pnpm postinstall 脚本可能需要 pwsh
+    paths.push(std::path::PathBuf::from(r"C:\Program Files\PowerShell\7"));
+    let joined = std::env::join_paths(&paths).map_err(|e| e.to_string())?;
+    let mut child = Command::new(&node)
+        .arg(&pnpm)
+        .env("CI", "true")
+        .arg("install")
+        .current_dir(&dir)
+        .env("PATH", &joined)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("pnpm 执行失败：{e}"))?;
+    let stderr_handle = child.stderr.take();
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut h) = stderr_handle {
+            let _ = h.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let stdout_handle = child.stdout.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut h) = stdout_handle {
+            let _ = h.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let status = child.wait().map_err(|e| format!("pnpm wait 失败：{e}"))?;
+    let stderr_tail = err_thread.join().unwrap_or_default();
+    let stdout_tail = out_thread.join().unwrap_or_default();
+    if !status.success() {
+        let err = if stderr_tail.trim().is_empty() { stdout_tail } else { stderr_tail };
+        let tail = err.lines().rev().take(20).collect::<Vec<_>>().join("\n");
+        return Err(format!("pnpm install 失败：{tail}"));
+    }
+    Ok(())
+}
+
+/// 修复 profile：按缺失项分别处理。
+/// 目录不存在 → 建目录 + 写模板 + pnpm install
+/// 文件缺失 → 写对应模板
+/// node_modules 缺失 → pnpm install
+pub(crate) fn repair_profile(app: &tauri::AppHandle, name: &str) -> Result<String, String> {
+    let dir = dsh_home().join("profiles").join(name);
+    let health = profile_health_check(name);
+    if !health.dir_exists {
+        log::info!("[profile] {name} 目录不存在，创建");
+        write_profile_templates(&dir, name)?;
+        pnpm_install_profile(app, name)?;
+        return Ok(format!("{name} profile 已创建"));
+    }
+    if !health.missing_files.is_empty() {
+        log::info!("[profile] {name} 缺失文件：{:?}，修复", health.missing_files);
+        write_profile_templates(&dir, name)?;
+    }
+    if !health.node_modules_exists {
+        log::info!("[profile] {name} node_modules 不存在，pnpm install");
+        pnpm_install_profile(app, name)?;
+    }
+    Ok(format!("{name} profile 已修复"))
+}
+
 /// 切换 profile：写 settings 后走统一重启流程（spawn 时按新 profile 拉起）。
 pub(crate) fn switch_profile(app: &AppHandle, name: &str) {
     if !valid_profile_name(name) {
@@ -72,7 +243,7 @@ pub(crate) fn switch_profile(app: &AppHandle, name: &str) {
     // #90：持久化由 client→插件→dsh settings 服务承担
     log::info!("[tray] 切换 profile -> {name}");
     let mode = app.state::<DshState>().mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(app, mode);
+    restart_dsh_in_mode(app, mode, None);
 }
 
 /// 执行 `dsh plugin --profile <name> add <pkg>`（Windows 走 node<bin.js>）。
@@ -457,7 +628,7 @@ pub(crate) fn dsh_version() -> Option<String> {
     }
 }
 
-/// 新建 profile 流程：弹窗输入名称 → plugin add base + web-app。
+/// 新建 profile 流程：弹窗输入名称 → 写模板 + pnpm install（不装 dsh-base/dsh-web-app，共享包从父级 node_modules 解析）。
 pub(crate) fn create_profile_flow(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -470,41 +641,26 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
             show_notification(&handle, "新建 Profile 失败", &msg);
             return;
         }
-        let prof_dir = dsh_home().join("profiles").join(&name);
-        if prof_dir.exists() {
-            // 就绪判定用插件树（web-app 落地）：残损半成品（目录在但文件不全，
-            // 如静默失败遗留）直接清掉重建，不拦「已存在」（#95 实测 smoke2）
-            let ready = prof_dir
-                .join("node_modules")
-                .join("@deepseek-ai")
-                .join("dsh-web-app")
-                .is_dir();
-            if ready {
-                let msg = format!("{name} 已存在");
-                crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
-                show_notification(&handle, "新建 Profile 失败", &msg);
-                return;
-            }
-            log::warn!("[profile] {name} 为残损半成品（无插件树），清理后重建");
-            let _ = std::fs::remove_dir_all(&prof_dir);
+        // 完整性检查：已存在且完整 → 拦截；不完整 → 修复；不存在 → 创建
+        let health = profile_health_check(&name);
+        if health.dir_exists && health.missing_files.is_empty() && health.node_modules_exists {
+            let msg = format!("{name} 已存在");
+            crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
+            show_notification(&handle, "新建 Profile 失败", &msg);
+            return;
         }
         let name_for_cmd = name.clone();
         let h = handle.clone();
-        task_begin("create_profile", &format!("新建 profile {name}"), 2);
-        task_stage("校验名称");
+        task_begin("create_profile", &format!("新建 profile {name}"), 1);
         let failed = tauri::async_runtime::spawn_blocking(move || {
-            for (i, pkg) in ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"].iter().enumerate() {
-                // 统一入口：CLI 优先（#95）；任务阶段同步到页面任务卡
-                task_stage(&format!("安装发行插件（{}/2）：{}", i + 1, pkg));
-                let (ok, stderr_tail) = install_profile_plugin(&h, &name_for_cmd, pkg);
-                if !ok {
-                    return Some(format!("{pkg} 安装失败：{stderr_tail}"));
-                }
+            task_stage("写模板文件 + pnpm install");
+            match repair_profile(&h, &name_for_cmd) {
+                Ok(_) => None,
+                Err(e) => Some(e),
             }
-            None
         })
         .await
-        .unwrap_or(Some("安装任务异常".into()));
+        .unwrap_or(Some("创建任务异常".into()));
         match failed {
             None => {
                 let msg = format!("{name} 已创建（未自动切换，可在 PROFILE 窗口菜单打开）");
@@ -516,7 +672,7 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
             Some(detail) => {
                 log::error!("[tray] 新建 profile 失败：{detail}");
                 task_finish(Err(detail.clone()));
-                let msg = format!("{detail}\n\n若为保留名/网络问题请改名或重试；也可手动执行 dsh plugin --profile {name} add 查看详情");
+                let msg = format!("{detail}");
                 crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
                 show_notification(&handle, "新建 Profile 失败", &detail);
             }
@@ -579,6 +735,12 @@ fn copy_dir_filtered(
             .strip_prefix(root)
             .map(|p| p.to_string_lossy().replace('\\', "/"))
             .unwrap_or_else(|_| name.clone());
+        if rel == "node_modules" {
+            continue;
+        }
+        if rel == ".dsh-module-fallback" {
+            continue;
+        }
         if migration_skips(&rel, &name, ft.is_dir()) {
             stats.skipped += 1;
             continue;
@@ -592,21 +754,20 @@ fn copy_dir_filtered(
             }
             #[cfg(windows)]
             {
-                let resolved = if target.is_absolute() {
-                    target.clone()
-                } else {
-                    cur.join(&target)
-                };
-                match resolved.canonicalize() {
-                    Ok(p) if p.starts_with(root.canonicalize().unwrap_or_else(|_| root.to_path_buf())) => {
-                        if p.is_dir() {
-                            copy_dir_filtered(root, &p, &dst_cur.join(&name), stats, progress)?;
-                        } else {
-                            std::fs::copy(&p, dst_cur.join(&name))?;
-                            stats.files += 1;
-                        }
+                // 重建 symlink，不复制文件内容（同 Unix 逻辑）
+                let link_dst = dst_cur.join(&name);
+                if target.is_dir() || std::fs::metadata(&target).map(|m| m.is_dir()).unwrap_or(false) {
+                    if std::os::windows::fs::symlink_dir(&target, &link_dst).is_ok() {
+                        stats.links += 1;
+                    } else {
+                        stats.skipped += 1;
                     }
-                    _ => stats.skipped += 1,
+                } else {
+                    if std::os::windows::fs::symlink_file(&target, &link_dst).is_ok() {
+                        stats.links += 1;
+                    } else {
+                        stats.skipped += 1;
+                    }
                 }
             }
             continue;
@@ -708,8 +869,12 @@ fn count_copyable_files(root: &std::path::Path, cur: &std::path::Path) -> u64 {
         if rel == "node_modules" {
             continue;
         }
+        if rel == ".dsh-module-fallback" {
+            continue;
+        }
         if ft.is_symlink() {
-            n += 1; // 链接按 1 计
+            // symlink 不计入 total——创建链接是瞬时的，不调 progress()
+            continue;
         } else if ft.is_dir() {
             n += count_copyable_files(root, &entry.path());
         } else {
@@ -785,7 +950,6 @@ async fn migrate_profile_inner(
         let mut stats = CopyStats::default();
         let progress = || { MIG_COPIED.fetch_add(1, Ordering::Relaxed); };
         let result = copy_dir_filtered(&root, &root, &dst, &mut stats, &progress);
-        MIG_RUNNING.store(false, Ordering::Relaxed);
         task_stage("复制完成，重建依赖（pnpm install）");
         result.map(|_| stats)
     })
@@ -828,6 +992,11 @@ async fn migrate_profile_inner(
         path_parts.push(shim_dir);
     }
     path_parts.push(node_dir.clone());
+    // postinstall 脚本可能需要 pwsh——确保在 PATH 中
+    let pwsh_dir = std::path::PathBuf::from(r"C:\Program Files\PowerShell\7");
+    if pwsh_dir.join("pwsh.exe").exists() {
+        path_parts.push(pwsh_dir);
+    }
     if let Some(existing) = std::env::var_os("PATH") {
         path_parts.push(std::path::PathBuf::from(existing));
     }
@@ -846,7 +1015,12 @@ async fn migrate_profile_inner(
             .output();
         match out {
             Ok(o) if o.status.success() => None,
-            Ok(o) => Some(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // pnpm 把 ERR_PNPM_* 输出到 stdout，不是 stderr
+                Some(if stderr.is_empty() { stdout } else { stderr })
+            }
             Err(e) => Some(format!("pnpm 执行失败：{e}")),
         }
     })

@@ -167,7 +167,7 @@ pub(crate) fn restart_dsh_service(app: tauri::AppHandle) -> Result<(), String> {
         return Err("已在重启中".to_string());
     }
     let mode = state.mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(&app, mode);
+     restart_dsh_in_mode(&app, mode, None);
     Ok(())
 }
 
@@ -763,6 +763,60 @@ pub(crate) fn switch_profile_command(app: tauri::AppHandle, name: String) -> Res
     Ok(())
 }
 
+/// 启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复。
+#[tauri::command]
+pub(crate) fn check_startup_needed(app: tauri::AppHandle) -> serde_json::Value {
+    let state = app.state::<crate::runtime::state::DshState>();
+    if state.skip_startup_check.load(std::sync::atomic::Ordering::SeqCst) {
+        return serde_json::json!({ "action": "none" });
+    }
+    let settings = crate::settings::load_desktop_settings();
+    let fresh_install = !crate::settings::settings_path().exists();
+    // 存量安装 + active_profile 未设
+    if !fresh_install && settings.active_profile.as_ref().map_or(true, |s| s.is_empty()) {
+        let profiles: Vec<String> = crate::profiles::scan_profiles().into_iter().map(|p| p.name).collect();
+        return serde_json::json!({ "action": "profile-selection", "profiles": profiles });
+    }
+    // 当前 profile 完整性检查
+    let profile = crate::settings::configured_profile();
+    let health = crate::profiles::profile_health_check(&profile);
+    if !health.dir_exists || !health.missing_files.is_empty() || !health.node_modules_exists {
+        return serde_json::json!({ "action": "profile-incomplete", "profile": &profile, "details": { "dir_exists": health.dir_exists, "missing_files": health.missing_files, "node_modules_exists": health.node_modules_exists } });
+    }
+    serde_json::json!({ "action": "none" })
+}
+
+/// 启动时用户选择 profile 或确认修复：
+/// - 存量安装 + active_profile 未设 → 用户选 profile
+/// - profile 不完整 → 用户选是否修复
+/// repair=true 先修复，然后用指定 profile 直接启动 dsh（不写 settings.yaml）。
+#[tauri::command]
+pub(crate) async fn confirm_startup_profile(app: tauri::AppHandle, name: String, repair: bool) -> Result<(), String> {
+    if !crate::profiles::valid_profile_name(&name) {
+        return Err("profile 名不合法".into());
+    }
+    let state = app.state::<crate::runtime::state::DshState>();
+    state.skip_startup_check.store(true, std::sync::atomic::Ordering::SeqCst);
+    *state.pending_active_profile.lock().unwrap() = Some(name.clone());
+    if repair {
+        log::info!("[startup] 修复 profile {name}…");
+        crate::profiles::repair_profile(&app, &name)
+            .map_err(|e| format!("修复 {name} profile 失败：{e}"))?;
+        log::info!("[startup] profile {name} 修复完成");
+    }
+    // 直接用指定 profile 启动 dsh（不调 switch_profile，不写 settings.yaml）
+    let mode = state.mode.load(std::sync::atomic::Ordering::SeqCst);
+    crate::ui::tray::restart_dsh_in_mode(&app, mode, Some(&name));
+    Ok(())
+}
+
+/// dsh 启动后前端调用：取回启动时选择的 profile，通过 nsSave 持久化到 settings.yaml。
+#[tauri::command]
+pub(crate) fn get_pending_active_profile(app: tauri::AppHandle) -> Option<String> {
+    let state = app.state::<crate::runtime::state::DshState>();
+    let profile = state.pending_active_profile.lock().unwrap().take();
+    profile
+}
 /// 迁移 Profile（#88）：全量复制 A→B；源为激活 profile 时先停自家实例，
 /// 目标已存在需 overwrite=true（旧目标备份为 .bak-<ts>）。
 #[tauri::command]
@@ -858,8 +912,8 @@ pub(crate) fn list_profile_ports() -> Vec<serde_json::Value> {
     crate::profiles::scan_profiles()
         .into_iter()
         .map(|p| {
-            let port = crate::settings::port_for_profile(&p.name);
-            let lane_port = crate::settings::lane_port_for_profile(&p.name);
+            let port = crate::settings::port_for_profile_config(&p.name);
+            let lane_port = crate::settings::lane_port_for_profile_config(&p.name);
             let running = crate::process::lifecycle::port_open(port);
             serde_json::json!({ "profile": p.name, "port": port, "lane_port": lane_port, "running": running })
         })

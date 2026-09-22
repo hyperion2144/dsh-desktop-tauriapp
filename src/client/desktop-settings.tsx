@@ -42,6 +42,7 @@ function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promi
   return Promise.reject(new Error('no tauri ipc'))
 }
 
+
 interface ProxySettings {
   proxy_mode: string
   proxy_url: string
@@ -259,6 +260,16 @@ function PfBtn({
   )
 }
 
+
+// 全局 toast：挂 document.body，不依赖设置面板是否打开。
+function showToast(text: string, ok: boolean): void {
+  const el = document.createElement('div')
+  el.style.cssText = `position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:999999;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:500;max-width:480px;box-shadow:0 4px 12px rgba(0,0,0,.4);cursor:pointer;backdrop-filter:blur(8px);${ok ? 'background:rgba(34,197,94,.15);border:1px solid rgba(34,197,94,.6);color:#4ade80' : 'background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.6);color:#f87171'}`
+  el.textContent = text
+  el.addEventListener('click', () => el.remove())
+  document.body.appendChild(el)
+  if (ok) window.setTimeout(() => el.remove(), 5000)
+}
 // ── 主组件 ──────────────────────────────────────────
 function DesktopSettingsPanel(): React.ReactElement {
   const [proxy, setProxy] = useState<ProxySettings>({
@@ -277,6 +288,13 @@ function DesktopSettingsPanel(): React.ReactElement {
   })
   const [msg, setMsg] = useState<BannerMsg | null>(null)
   const [busy, setBusy] = useState(false)
+  // 成功 toast 4 秒自动消失；错误 toast 手动点击关闭
+  useEffect(() => {
+    if (msg && msg.ok) {
+      const t = window.setTimeout(() => setMsg(null), 4000)
+      return () => window.clearTimeout(t)
+    }
+  }, [msg])
 
   // dsh 来源（内置 / 外部）
   const [sourceState, setSourceState] = useState<DshSourceState | null>(null)
@@ -501,8 +519,10 @@ function DesktopSettingsPanel(): React.ReactElement {
           setMigrationProgress({ copied: st.copied, total: st.total })
           window.setTimeout(tick, 300)
         } else {
-          setMigrationRunning(false)
-          setMigrationProgress(null)
+          // 不主动 setMigrationRunning(false)——MIG_RUNNING 在 task_begin 前短暂为 false
+          // （需确认覆盖重试窗口），误杀会导致进度条消失（#95 实测）。
+          // 继续轮询等 .finally() 清理。
+          window.setTimeout(tick, 300)
         }
       } catch {
         /* 单次失败不终止轮询，等下一次 tick */
@@ -666,32 +686,36 @@ function DesktopSettingsPanel(): React.ReactElement {
       setMsg({ ok: false, text: '没有可选的目标 profile（请先新建一个）' })
       return
     }
-    // 递归入口：覆盖确认后的重试必须恢复 running/进度——首次 reject 的 finally 会清状态，
-    // 否则第二次真迁移（1-2 分钟）期间无任何反馈（#95 实测）
-    const run = (overwrite: boolean): Promise<void> => {
+    // 扁平化结构（同 handleDownloadRuntime 模式）：不用 .finally()、不用递归，
+    // 每条路径显式管理 migrationRunning。“需确认覆盖”重试不洗 running 状态。
+    const start = (overwrite: boolean): void => {
       setMigrationRunning(true)
       setMigrationProgress({ copied: 0, total: 0 })
-      return invoke<string>('migrate_profile', {
+      invoke<string>('migrate_profile', {
         source: migrationSource,
         dest: migrationDest,
         overwrite,
       })
         .then((s) => {
-          setMsg({ ok: true, text: s })
+          setMigrationRunning(false)
+          setMigrationProgress(null)
+          showToast(s, true)
         })
         .catch((e) => {
           const m = String(e)
           if (!overwrite && m.includes('需确认覆盖')) {
-            return run(true)
+            // 覆盖确认重试：不洗 running，直接发第二次 invoke
+            console.error('[migrate] 需确认覆盖，重试 overwrite=true')
+            start(true)
+            return
           }
-          setMsg({ ok: false, text: `迁移失败：${m}` })
-        })
-        .finally(() => {
           setMigrationRunning(false)
           setMigrationProgress(null)
+          console.error('[migrate] 失败：', m)
+          showToast(`迁移失败：${m}`, false)
         })
     }
-    void run(false)
+    start(false)
   }
 
   const handleDownloadRuntime = (version: string): void => {
@@ -700,11 +724,13 @@ function DesktopSettingsPanel(): React.ReactElement {
       .then(() => {
         setRuntimeDownloading((prev) => ({ ...prev, [version]: 'downloaded' }))
         void refreshRuntimes()
+        showToast(`dsh ${version} 下载完成`, true)
       })
       .catch((err) => {
         // #95 评论：失败原因必须落到 UI，不能只打 console
         const reason = String(err).replace(/^下载失败：?/i, '')
         setRuntimeDownloading((prev) => ({ ...prev, [version]: { failed: reason || '未知错误' } }))
+        showToast(`dsh ${version} 下载失败：${reason || '未知错误'}`, false)
       })
   }
 
@@ -1330,7 +1356,29 @@ function DesktopSettingsPanel(): React.ReactElement {
       </div>
 
       {msg && (
-        <div style={msg.ok ? SUCCESS_NOTE_STYLE : DANGER_MSG_STYLE}>{msg.text}</div>
+        <div
+          style={{
+            position: 'fixed',
+            top: 12,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 99999,
+            padding: '10px 20px',
+            borderRadius: 8,
+            fontSize: 13,
+            fontWeight: 500,
+            maxWidth: 480,
+            boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+            cursor: 'pointer',
+            background: msg.ok ? 'rgba(34,197,94,.15)' : 'rgba(239,68,68,.15)',
+            border: `1px solid ${msg.ok ? 'rgba(34,197,94,.6)' : 'rgba(239,68,68,.6)'}`,
+            color: msg.ok ? '#4ade80' : '#f87171',
+            backdropFilter: 'blur(8px)',
+          }}
+          onClick={() => setMsg(null)}
+        >
+          {msg.text}
+        </div>
       )}
 
       <div style={NOTE_STYLE}>
@@ -1362,4 +1410,105 @@ export function registerDesktopSettings(ctx: ClientContext): void {
       DesktopSettingsPanel,
     ),
   )
+
+  // dsh 启动后：取回启动时选择的 profile，通过 nsSave 持久化到 settings.yaml
+  void invoke<string | null>('get_pending_active_profile').then((profile) => {
+    if (profile && nsRpc) {
+      void nsSave({ active_profile: profile }).catch(() => {})
+    }
+  }).catch(() => {})
+
+  // 启动检查：前端加载后调 check_startup_needed，根据返回显示弹窗
+  void invoke<{ action: string; profiles?: string[]; profile?: string; details?: { dir_exists: boolean; missing_files: string[]; node_modules_exists: boolean } }>('check_startup_needed').then((res) => {
+    if (!res || res.action === 'none') return
+    if (res.action === 'profile-selection') {
+      const profiles = res.profiles ?? []
+      const el = document.createElement('div')
+      el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
+      const card = document.createElement('div')
+      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:320px;max-width:400px'
+      const title = document.createElement('div')
+      title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:16px;color:var(--dsw-alias-label-primary,#e7eaf0)'
+      title.textContent = '选择要启动的 Profile'
+      card.appendChild(title)
+      const list = document.createElement('div')
+      list.style.cssText = 'display:flex;flex-direction:column;gap:8px'
+      for (const p of profiles) {
+        const btn = document.createElement('button')
+        btn.style.cssText = 'padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer;text-align:left'
+        btn.textContent = p
+        btn.onmouseenter = () => btn.style.background = 'var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.07))'
+        btn.onmouseleave = () => btn.style.background = 'transparent'
+        btn.onclick = () => {
+          el.remove()
+          showToast(`正在启动 ${p} profile…`, true)
+          void invoke('confirm_startup_profile', { name: p, repair: false }).catch((e) => showToast(`启动失败：${String(e)}`, false))
+        }
+        list.appendChild(btn)
+      }
+      const input = document.createElement('input')
+      input.style.cssText = 'margin-top:12px;padding:8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:var(--dsw-alias-bg-base,#151517);color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;width:100%;box-sizing:border-box'
+      input.placeholder = '或输入新 profile 名称'
+      const startBtn = document.createElement('button')
+      startBtn.style.cssText = 'margin-top:8px;padding:8px 14px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer;width:100%'
+      startBtn.textContent = '新建并启动'
+      startBtn.onclick = () => {
+        const name = input.value.trim()
+        if (!name) return
+        el.remove()
+        showToast(`正在创建并启动 ${name} profile…`, true)
+        void invoke('confirm_startup_profile', { name, repair: true }).catch((e) => showToast(`创建失败：${String(e)}`, false))
+      }
+      card.appendChild(list)
+      card.appendChild(input)
+      card.appendChild(startBtn)
+      el.appendChild(card)
+      document.body.appendChild(el)
+      return
+    }
+    if (res.action === 'profile-incomplete') {
+      const profile = res.profile ?? ''
+      if (!profile) return
+      const details = res.details
+      const missingDesc = details ? [
+        ...details.missing_files,
+        ...(details.node_modules_exists ? [] : ['node_modules']),
+        ...(details.dir_exists ? [] : ['profile 目录']),
+      ].join(', ') : ''
+      const el = document.createElement('div')
+      el.style.cssText = 'position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6)'
+      const card = document.createElement('div')
+      card.style.cssText = 'background:var(--dsw-alias-bg-base,#16181d);border:1px solid var(--dsw-alias-border-l,#ffffff1f);border-radius:12px;padding:24px;min-width:340px;max-width:420px;text-align:center'
+      const title = document.createElement('div')
+      title.style.cssText = 'font-size:15px;font-weight:600;margin-bottom:8px;color:var(--dsw-alias-label-primary,#e7eaf0)'
+      title.textContent = `Profile「${profile}」不完整`
+      const desc = document.createElement('div')
+      desc.style.cssText = 'font-size:12px;color:var(--dsw-alias-label-secondary,#9aa4b2);margin-bottom:20px'
+      desc.textContent = `缺失：${missingDesc}。是否修复？`
+      const btns = document.createElement('div')
+      btns.style.cssText = 'display:flex;gap:10px'
+      const noBtn = document.createElement('button')
+      noBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:1px solid var(--dsw-alias-border-l,#ffffff1f);background:transparent;color:var(--dsw-alias-label-primary,#e7eaf0);font-size:13px;cursor:pointer'
+      noBtn.textContent = '直接启动'
+      noBtn.onclick = () => {
+        el.remove()
+        void invoke('confirm_startup_profile', { name: profile, repair: false }).catch((e) => showToast(`启动失败：${String(e)}`, false))
+      }
+      const yesBtn = document.createElement('button')
+      yesBtn.style.cssText = 'flex:1;padding:10px;border-radius:8px;border:none;background:var(--dsw-alias-brand-primary-new-color,#4176e6);color:#fff;font-size:13px;cursor:pointer'
+      yesBtn.textContent = '修复并启动'
+      yesBtn.onclick = () => {
+        el.remove()
+        showToast(`正在修复 ${profile} profile…`, true)
+        void invoke('confirm_startup_profile', { name: profile, repair: true }).catch((e) => showToast(`修复失败：${String(e)}`, false))
+      }
+      btns.appendChild(noBtn)
+      btns.appendChild(yesBtn)
+      card.appendChild(title)
+      card.appendChild(desc)
+      card.appendChild(btns)
+      el.appendChild(card)
+      document.body.appendChild(el)
+    }
+  }).catch(() => {})
 }

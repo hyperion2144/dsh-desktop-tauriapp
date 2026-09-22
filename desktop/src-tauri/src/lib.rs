@@ -74,6 +74,9 @@ use commands::{
     get_quarantine_settings, save_quarantine_settings, list_ai_providers,
     get_desktop_settings_data, add_remote_address, remove_remote_address,
     select_remote_address, set_local_port, switch_profile_command,
+    confirm_startup_profile,
+    check_startup_needed,
+    get_pending_active_profile,
     migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
     create_profile_flow_command, migration_status, task_status, list_runtime_catalog, download_runtime,
     remove_runtime, runtime_download_status,
@@ -176,6 +179,9 @@ pub fn run() {
             select_remote_address,
             set_local_port,
             switch_profile_command,
+            confirm_startup_profile,
+            check_startup_needed,
+            get_pending_active_profile,
             migration_status,
             task_status,
             migrate_profile,
@@ -234,6 +240,8 @@ pub fn run() {
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
+            skip_startup_check: AtomicBool::new(false),
+            pending_active_profile: Mutex::new(None),
             fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
         })
@@ -276,6 +284,21 @@ pub fn run() {
             let fresh_install = !settings::settings_path().exists();
             let port = app_port();
             let profile = configured_profile();
+            // 托盘 + 桌宠在任何路径都需要，提前到 profile 选择之前
+            build_tray(app)?;
+            setup_pet(app.handle());
+            // 存量安装 + active_profile 未设 / profile 不完整 → 注入脚本到加载页处理
+            let needs_profile_selection = !fresh_install
+                && load_desktop_settings().active_profile.as_ref().map_or(true, |s| s.is_empty());
+            let health = profiles::profile_health_check(&profile);
+            let profile_incomplete = !health.dir_exists || !health.missing_files.is_empty() || !health.node_modules_exists;
+            if needs_profile_selection || profile_incomplete {
+                log::info!("[startup] 需要用户选择 profile 或修复，注入脚本到加载页");
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.eval(include_str!("../inject_startup_check.js"));
+                }
+                return Ok(());
+            }
             let state = app.state::<DshState>();
             // 记录内嵌加载页 URL（重启/切换模式时回到该页，像重启应用一样）
             if let Some(w) = app.get_webview_window("main") {
@@ -529,12 +552,10 @@ pub fn run() {
                         }
                         log::warn!("[watchdog] dsh 不可达（{verbose}），自动重启（第 {epoch_failures} 次）");
                         show_notification(&handle, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
-                        restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst));
+                        restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst), None);
                     }
                 });
             }
-            build_tray(app)?;
-            setup_pet(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -660,6 +681,8 @@ pub fn run() {
                         crate::runtime::instances::remove_instance(&configured_profile());
                     }
                 }
+                // 退出时清理所有 profile 下的桌面插件 junction/symlink
+                crate::process::plugin::cleanup_desktop_plugin_links();
             }
             _ => {}
         });

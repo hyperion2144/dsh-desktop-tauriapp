@@ -184,7 +184,8 @@ pub fn navigate_to_loading(app: &AppHandle) {
 /// 重启/切换接入模式（都先回到启动加载页，再停旧实例、按目标模式拉起、重新进入）。
 /// target_mode = MODE_ADVANCED / MODE_COMPAT。
 /// 通知服务器在 setup 阶段就已启动并常驻，重启时复用同一端口/token。
-pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
+pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: Option<&str>) {
+    let profile_override = profile_override.map(|s| s.to_string());
     let state = app.state::<DshState>();
     if state.restarting.swap(true, Ordering::SeqCst) {
         log::warn!("已在重启/切换中，忽略重复触发");
@@ -200,7 +201,7 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         navigate_to_loading(&handle);
         log::logger().flush();
 
-        let profile = configured_profile();
+        let profile = profile_override.clone().unwrap_or_else(configured_profile);
         let port = port_for_profile(&profile);
         // 1) 停掉占用端口的现有 dsh（含自家子进程与外部实例，纯代码）
         if let Some(mut child) = handle.state::<DshState>().child.lock().unwrap().take() {
@@ -282,12 +283,12 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
 /// 托盘「重启 dsh 服务」：在当前模式下重启。
 pub fn restart_dsh(app: &AppHandle) {
     let mode = app.state::<DshState>().mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(app, mode);
+    restart_dsh_in_mode(app, mode, None);
 }
 
 /// 托盘「切换模式」：兼容 <-> 高级（切换后重启对应的 dsh web）。
 pub fn toggle_desktop_mode(app: &AppHandle) {
     let cur = app.state::<DshState>().mode.load(Ordering::SeqCst);
     let next = if cur == MODE_ADVANCED { MODE_COMPAT } else { MODE_ADVANCED };
-    restart_dsh_in_mode(app, next);
+    restart_dsh_in_mode(app, next, None);
 }

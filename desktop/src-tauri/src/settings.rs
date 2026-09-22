@@ -183,7 +183,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
     match profile {
         "web" => 3080,
-        "desk" => 3081,
+        "desktop" => 3081,
         other => PORT_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
     }
 }
@@ -193,7 +193,7 @@ pub(crate) fn default_port_for_profile(profile: &str) -> u16 {
 pub(crate) fn default_lane_port_for_profile(profile: &str) -> u16 {
     match profile {
         "web" => 3092,
-        "desk" => 3093,
+        "desktop" => 3093,
         other => LANE_BASE_OTHER + (fnv1a(other.as_bytes()) % 512) as u16,
     }
 }
@@ -211,11 +211,11 @@ pub(crate) fn assign_port_avoiding(base: u16, taken: &[u16]) -> u16 {
 /// DSH_DESKTOP_PORT env（遗留全局覆盖，供脚本/测试）> profile_ports[profile]
 /// > web 的 legacy settings.port > 默认公式（desktop=3081，其余散列落点+避让并持久化）。
 pub fn port_for_profile(profile: &str) -> u16 {
-    if let Ok(v) = std::env::var("DSH_DESKTOP_PORT") {
-        if let Ok(p) = v.parse() {
-            return p;
-        }
-    }
+    port_for_profile_config(profile)
+}
+
+/// 仅读 settings + 默认值，不读 env 覆盖——供 list_profile_ports 展示用。
+pub fn port_for_profile_config(profile: &str) -> u16 {
     let mut settings = load_desktop_settings();
     if let Some(p) = settings.profile_ports.as_ref().and_then(|m| m.get(profile).copied()) {
         return p;
@@ -237,17 +237,17 @@ pub fn port_for_profile(profile: &str) -> u16 {
             // 确定性散列保证跨启动稳定，显式改端口由 client→插件→settings 服务持久化
             log::info!("[ports] profile {profile} 分配启动端口 {p}");
             p
+        }
     }
-}
 }
 
 /// 取 profile 的 lane 端口（#86/#94）：语义同 port_for_profile，基数换成 lane。
 pub fn lane_port_for_profile(profile: &str) -> u16 {
-    if let Ok(v) = std::env::var("DSH_MOBILE_LANE_PORT") {
-        if let Ok(p) = v.parse() {
-            return p;
-        }
-    }
+    lane_port_for_profile_config(profile)
+}
+
+/// 仅读 settings + 默认值，不读 env 覆盖——供 list_profile_ports 展示用。
+pub fn lane_port_for_profile_config(profile: &str) -> u16 {
     let mut settings = load_desktop_settings();
     if let Some(p) = settings.profile_lane_ports.as_ref().and_then(|m| m.get(profile).copied()) {
         return p;
@@ -271,9 +271,8 @@ pub fn lane_port_for_profile(profile: &str) -> u16 {
     }
 }
 
-/// 全新安装的默认 profile（#87 原名 desktop，#95 改名 desk：dsh CLI 把 `desktop` 保留给
-/// 官方 Electron 应用——plugin add 被拒、生态处处绕行，非保留名一马平川）。
-pub(crate) const FRESH_DEFAULT_PROFILE: &str = "desk";
+/// 全新安装的默认 profile（desktop）。
+pub(crate) const FRESH_DEFAULT_PROFILE: &str = "desktop";
 
 /// 未设置 active_profile 时的默认值（纯函数，便于单测）：
 /// 全新安装（settings.yaml 不存在）→ desktop；存量（文件存在但未设置）→ web，不静默搬家。
@@ -285,15 +284,13 @@ pub(crate) fn default_profile_when_unset(settings_file_exists: bool) -> String {
     }
 }
 
-/// 激活 profile（settings.yaml active_profile；未设置时：全新安装→desk、存量→web）。
-/// #95 改名兼容：旧值 desktop 自动映射 desk（settings.yaml 单写者归 dsh settings 服务，
-/// 读侧映射避免碰写路径）。
+/// 激活 profile（settings.yaml active_profile；未设置时：全新安装→desktop、存量→web）。
 pub fn configured_profile() -> String {
     if let Some(p) = load_desktop_settings()
         .active_profile
         .filter(|s| !s.is_empty() && !s.contains(['/', '\\', '\0']))
     {
-        return if p == "desktop" { "desk".to_string() } else { p };
+        return p;
     }
     default_profile_when_unset(settings_path().exists())
 }
@@ -370,7 +367,7 @@ mod tests {
       ai_base_url: None,
       ai_key_env: None,
       download_concurrency: Some(5),
-      profile_ports: Some([("web".into(), 3080), ("desk".into(), 3081)].into_iter().collect()),
+      profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
        dsh_mode: Some("builtin".into()),
       dsh_runtime: None,
@@ -380,7 +377,7 @@ mod tests {
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
     assert_eq!(back.download_concurrency, Some(5));
-    assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desk")).copied(), Some(3081));
+    assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desktop")).copied(), Some(3081));
     assert_eq!(back.profile_lane_ports.as_ref().and_then(|m| m.get("web")).copied(), Some(3091));
     assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
     assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
@@ -416,7 +413,7 @@ mod tests {
   #[test]
   fn default_port_formula_fixed_profiles() {
     assert_eq!(default_port_for_profile("web"), 3080);
-    assert_eq!(default_port_for_profile("desk"), 3081);
+    assert_eq!(default_port_for_profile("desktop"), 3081);
     // 其余 profile 落在 [3082, 3594)，不与固定端口重叠
     for name in ["research", "work-2", "x"] {
       let p = default_port_for_profile(name);
@@ -427,7 +424,7 @@ mod tests {
   #[test]
   fn default_lane_formula_fixed_profiles() {
      assert_eq!(default_lane_port_for_profile("web"), 3092);
-     assert_eq!(default_lane_port_for_profile("desk"), 3093);
+     assert_eq!(default_lane_port_for_profile("desktop"), 3093);
     let p = default_lane_port_for_profile("research");
     assert!((LANE_BASE_OTHER..LANE_BASE_OTHER + 512).contains(&p));
   }
@@ -450,9 +447,9 @@ mod tests {
   #[test]
   fn fresh_install_defaults_to_desktop_profile() {
     // #87：全新安装（无 settings.yaml）默认 desktop；存量（文件在但未设置）保持 web
-    assert_eq!(default_profile_when_unset(false), "desk");
+    assert_eq!(default_profile_when_unset(false), "desktop");
     assert_eq!(default_profile_when_unset(true), "web");
-    assert_eq!(FRESH_DEFAULT_PROFILE, "desk");
+    assert_eq!(FRESH_DEFAULT_PROFILE, "desktop");
   }
 
 

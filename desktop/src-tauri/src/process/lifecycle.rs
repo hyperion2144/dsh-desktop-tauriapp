@@ -648,6 +648,7 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     };
     let mut cmd = Command::new(&node);
     let lane = lane_port_for_profile(profile);
+    cmd.arg("--use-env-proxy"); // Node.js fetch 代理：必须命令行参数（NODE_OPTIONS 不允许此 flag）
     cmd.args(&launcher_args)
         .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
@@ -658,8 +659,6 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     }
     // 代理继承：同 unix 分支，按设置注入代理环境变量；off/检测失败不注入
     inject_proxy_env(&mut cmd);
-    // Node.js fetch 走代理：--use-env-proxy 让 Node.js 读取 HTTP_PROXY/HTTPS_PROXY 等环境变量
-    cmd.env("NODE_OPTIONS", "--use-env-proxy");
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(crate::dsh_home());
     // 启动保险丝（#58）：同 unix 分支，建 stderr 累积缓冲。
