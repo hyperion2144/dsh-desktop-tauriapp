@@ -98,7 +98,19 @@ pub(crate) fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<
 /// 导航，Strict cookie 不随行（WebKit 拒发），Lax 顶层导航始终携带；dsh 侧
 /// 只按名字取值验签，不关心存储属性。成功返回 true。
 pub(crate) fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: &str, value: &str) -> bool {
-    let Some(w) = app.get_webview_window("main") else { return false };
+    seed_session_cookie_for(app, "main", host, port, name, value)
+}
+
+/// 同上，但目标窗口按 label（#89 多窗口：每个 profile 一个窗口）。
+pub(crate) fn seed_session_cookie_for(
+    app: &AppHandle,
+    label: &str,
+    host: &str,
+    port: u16,
+    name: &str,
+    value: &str,
+) -> bool {
+    let Some(w) = app.get_webview_window(label) else { return false };
     let mut cookie = cookie::Cookie::new(name.to_string(), value.to_string());
     cookie.set_domain(host.to_string());
     cookie.set_path("/");
@@ -113,7 +125,7 @@ pub(crate) fn seed_session_cookie(app: &AppHandle, host: &str, port: u16, name: 
             false
         }
         Ok(()) => {
-            log::info!("[token] 会话 cookie 已原生种入 webview（{host}:{port}）");
+            log::info!("[token] 会话 cookie 已原生种入 webview（{label} · {host}:{port}）");
             true
         }
     }

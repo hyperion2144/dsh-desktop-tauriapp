@@ -18,10 +18,11 @@ use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::clear_web_token;
 use crate::ui::pet::toggle_pet;
 use crate::{
-    show_main, set_status, show_notification, app_port,
+    show_main, set_status, show_notification,
     stop_port_owner, wait_ready_and_navigate,
     STATUS_RESTARTING,
 };
+use crate::settings::{configured_profile, port_for_profile};
 
 /// 按当前接入模式构建托盘菜单（含「切换模式」项，标签显示当前模式）。
 pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -33,12 +34,27 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     };
     let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
     let pet = MenuItem::with_id(app, "pet", "显示/隐藏桌宠", true, None::<&str>)?;
-    // 设置能力（服务地址/Profile/端口/代理）已迁移至 dsh web 设置面板的「桌面设置」Tab，
-    // 托盘只保留操作类入口（#61 实测反馈）。
+    // PROFILE 窗口分组（#89 定稿 A）：运行中点击聚焦、未运行点击开新窗（每 profile 至多一窗）
+    let mut sub = tauri::menu::SubmenuBuilder::with_id(app, "profile-windows", "PROFILE 窗口");
+    for info in crate::profiles::scan_profiles() {
+        let port = port_for_profile(&info.name);
+        let running = crate::process::lifecycle::port_open(port);
+        let id = format!("open-profile-{}", info.name);
+        let text = if running {
+            format!("● {} · {}（点击聚焦）", info.name, port)
+        } else {
+            format!("在新窗口打开 {}", info.name)
+        };
+        sub = sub.text(&id, &text);
+    }
+    let profile_sub = sub
+        .text("new-profile", "新建 Profile…")
+        .text("migrate-profile", "迁移 Profile…")
+        .build()?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(app, &[&show, &pet, &restart, &toggle, &quit])?)
+    Ok(Menu::with_items(app, &[&show, &pet, &profile_sub, &restart, &toggle, &quit])?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -76,6 +92,12 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "show" => show_main(app),
             "pet" => toggle_pet(app),
             "restart" => restart_dsh(app),
+            id if id.starts_with("open-profile-") => {
+                let name = id.strip_prefix("open-profile-").unwrap_or("").to_string();
+                crate::ui::multiwin::open_profile_window(app, &name);
+            }
+            "new-profile" => crate::profiles::create_profile_flow(app),
+            "migrate-profile" => crate::profiles::migrate_profile_flow(app),
             "toggle-mode" => toggle_desktop_mode(app),
             "quit" => {
                 app.state::<DshState>().quitting.store(true, Ordering::SeqCst);
@@ -102,10 +124,8 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// 按接入模式应用主窗口标题栏形态（首次启动、启动页选择、托盘切换都会调用，
 /// 不只在 setup 里生效）。
-/// - 高级：macOS Overlay（保留红绿灯 + 自绘拖拽区）；Windows/Linux 隐藏原生标题栏（自绘 caption 行）；
-/// - 兼容：macOS Visible（系统原生标题栏）；Windows/Linux 恢复原生标题栏。
-pub fn apply_titlebar(app: &AppHandle, advanced: bool) {
-    let Some(w) = app.get_webview_window("main") else { return };
+/// 按接入模式套用窗口标题栏（通用版：主窗/次窗共用）。
+pub fn apply_titlebar_for(window: &tauri::WebviewWindow, advanced: bool) {
     #[cfg(target_os = "macos")]
     {
         let style = if advanced {
@@ -113,16 +133,20 @@ pub fn apply_titlebar(app: &AppHandle, advanced: bool) {
         } else {
             tauri::TitleBarStyle::Visible
         };
-        if let Err(e) = w.set_title_bar_style(style) {
-            log::warn!("切换主窗口标题栏样式失败：{e}");
+        if let Err(e) = window.set_title_bar_style(style) {
+            log::warn!("切换窗口标题栏样式失败：{e}");
         }
     }
     #[cfg(not(target_os = "macos"))]
-    if let Err(e) = w.set_decorations(!advanced) {
-        log::warn!("切换主窗口标题栏失败：{e}");
+    if let Err(e) = window.set_decorations(!advanced) {
+        log::warn!("切换窗口标题栏失败：{e}");
     }
 }
 
+pub fn apply_titlebar(app: &AppHandle, advanced: bool) {
+    let Some(w) = app.get_webview_window("main") else { return };
+    apply_titlebar_for(&w, advanced);
+}
 /// 回到内嵌启动加载页（重启/切换模式时，像重启应用一样先回到加载界面）。
 pub fn navigate_to_loading(app: &AppHandle) {
     let Some(w) = app.get_webview_window("main") else { return };
@@ -160,7 +184,8 @@ pub fn navigate_to_loading(app: &AppHandle) {
 /// 重启/切换接入模式（都先回到启动加载页，再停旧实例、按目标模式拉起、重新进入）。
 /// target_mode = MODE_ADVANCED / MODE_COMPAT。
 /// 通知服务器在 setup 阶段就已启动并常驻，重启时复用同一端口/token。
-pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
+pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: Option<&str>) {
+    let profile_override = profile_override.map(|s| s.to_string());
     let state = app.state::<DshState>();
     if state.restarting.swap(true, Ordering::SeqCst) {
         log::warn!("已在重启/切换中，忽略重复触发");
@@ -176,7 +201,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         navigate_to_loading(&handle);
         log::logger().flush();
 
-        let port = app_port();
+        let profile = profile_override.clone().unwrap_or_else(configured_profile);
+        let port = port_for_profile(&profile);
         // 1) 停掉占用端口的现有 dsh（含自家子进程与外部实例，纯代码）
         if let Some(mut child) = handle.state::<DshState>().child.lock().unwrap().take() {
             let pid = child.id();
@@ -186,6 +212,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
             let _ = child.wait();
             log::info!("[restart] 旧 dsh 已退出");
         }
+        // 实例台账（#86）：旧实例已停，摘除记录（新 spawn 会重新登记）
+        crate::runtime::instances::remove_instance(&profile);
         let freed = stop_port_owner(port).await;
         if !freed {
             log::error!("[restart] 端口 {port} 未能停用/释放，重启中止");
@@ -205,7 +233,7 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
         // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
         clear_web_token(&handle);
         let advanced = target_mode == MODE_ADVANCED;
-        match spawn_dsh(&handle, port, advanced) {
+        match spawn_dsh(&handle, &profile, port, advanced) {
             Ok(child) => {
                 log::logger().flush();
                 log::info!("[restart] 新 dsh 子进程已启动（PID {}）", child.id());
@@ -255,12 +283,12 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8) {
 /// 托盘「重启 dsh 服务」：在当前模式下重启。
 pub fn restart_dsh(app: &AppHandle) {
     let mode = app.state::<DshState>().mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(app, mode);
+    restart_dsh_in_mode(app, mode, None);
 }
 
 /// 托盘「切换模式」：兼容 <-> 高级（切换后重启对应的 dsh web）。
 pub fn toggle_desktop_mode(app: &AppHandle) {
     let cur = app.state::<DshState>().mode.load(Ordering::SeqCst);
     let next = if cur == MODE_ADVANCED { MODE_COMPAT } else { MODE_ADVANCED };
-    restart_dsh_in_mode(app, next);
+    restart_dsh_in_mode(app, next, None);
 }

@@ -60,7 +60,7 @@ use ui::window::{show_main, show_error};
 use navigation::wait_ready_and_navigate;
 
 // ── 设置/插件/平台/command 导入 ──
-use settings::{load_desktop_settings, configured_port, app_port, dsh_home};
+use settings::{load_desktop_settings, configured_port, app_port, dsh_home, configured_profile};
 use process::plugin::{desktop_plugin_patch_path, materialize_desktop_plugin, strip_web_profile_plugin_bundle};
 use process::probing::{probe_local, probe_remote};
 use platform::{open_external, open_external_impl};
@@ -72,8 +72,14 @@ use commands::{
     list_quarantine, restore_quarantine, repair_plugin,
     run_doctor, explain_failure, get_fuse_summary,
     get_quarantine_settings, save_quarantine_settings, list_ai_providers,
-    get_desktop_settings_data, add_remote_address, remove_remote_address,
+    save_desktop_settings, get_desktop_settings_data, add_remote_address, remove_remote_address,
     select_remote_address, set_local_port, switch_profile_command,
+    confirm_startup_profile,
+    check_startup_needed,
+    get_pending_active_profile,
+    migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
+    create_profile_flow_command, migration_status, task_status, list_runtime_catalog, download_runtime,
+    remove_runtime, runtime_download_status,
 };
 use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
@@ -90,7 +96,7 @@ use tauri_plugin_log::{Target, TargetKind};
 
 // ── 测试专用导入（cargo fix 会移除非测试构建未用的项，这里统一补回）──
 #[cfg(test)]
-use settings::{DesktopSettings, settings_path, save_desktop_settings, from_yaml_value, legacy_desktop_block, configured_profile, configured_lane_port, configured_cloudflared_bin};
+use settings::{DesktopSettings, settings_path, from_yaml_value, legacy_desktop_block, configured_lane_port, configured_cloudflared_bin};
 #[cfg(test)]
 use network::proxy::{
     ProxyEnv, PROXY_MODE_OFF, PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL, PROXY_LOOPBACK_ENTRIES,
@@ -167,13 +173,29 @@ pub fn run() {
             save_proxy_settings,
             test_proxy_connectivity,
             list_ai_providers,
+            save_desktop_settings,
             get_desktop_settings_data,
             add_remote_address,
             remove_remote_address,
             select_remote_address,
             set_local_port,
             switch_profile_command,
+            confirm_startup_profile,
+            check_startup_needed,
+            get_pending_active_profile,
+            migration_status,
+            task_status,
+            migrate_profile,
+            get_dsh_source,
+            set_dsh_source,
+            list_profile_ports,
+            set_profile_port,
+            create_profile_flow_command,
             list_quarantine,
+            list_runtime_catalog,
+            download_runtime,
+            remove_runtime,
+            runtime_download_status,
             restore_quarantine,
             repair_plugin,
             run_doctor,
@@ -213,8 +235,14 @@ pub fn run() {
             notify_token: Mutex::new(String::new()),
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
-            stderr_buf: Mutex::new(None),
+             stderr_bufs: Mutex::new(Default::default()),
+            children: Mutex::new(Default::default()),
+            windows: Mutex::new(Default::default()),
+            web_tokens: Mutex::new(Default::default()),
+            running_sources: Mutex::new(Default::default()),
             fuse_retries: AtomicU8::new(0),
+            skip_startup_check: AtomicBool::new(false),
+            pending_active_profile: Mutex::new(None),
             fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
         })
@@ -253,7 +281,25 @@ pub fn run() {
             if let Err(e) = main_window {
                 log::error!("[main] 主窗口创建失败：{e}");
             }
+            // #87：在首次端口分配（会落盘创建 settings.yaml）之前判定全新安装
+            let fresh_install = !settings::settings_path().exists();
             let port = app_port();
+            let profile = configured_profile();
+            // 托盘 + 桌宠在任何路径都需要，提前到 profile 选择之前
+            build_tray(app)?;
+            setup_pet(app.handle());
+            // 存量安装 + active_profile 未设 / profile 不完整 → 注入脚本到加载页处理
+            let needs_profile_selection = !fresh_install
+                && load_desktop_settings().active_profile.as_ref().map_or(true, |s| s.is_empty());
+            let health = profiles::profile_health_check(&profile);
+            let profile_incomplete = !health.dir_exists || !health.missing_files.is_empty() || !health.node_modules_exists;
+            if needs_profile_selection || profile_incomplete {
+                log::info!("[startup] 需要用户选择 profile 或修复，注入脚本到加载页");
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.eval(include_str!("../inject_startup_check.js"));
+                }
+                return Ok(());
+            }
             let state = app.state::<DshState>();
             // 记录内嵌加载页 URL（重启/切换模式时回到该页，像重启应用一样）
             if let Some(w) = app.get_webview_window("main") {
@@ -270,45 +316,89 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 request_notification_permission(&handle);
             });
-            if port_open(port) {
-                log::info!("127.0.0.1:{port} 已有服务在监听，直接复用现有实例");
-                // 外部实例复用会禁用桌面 chrome：在加载页弹「兼容/高级」模式选择
-                state.mode_prompt_needed.store(true, Ordering::SeqCst);
-                set_status(app.handle(), STATUS_EXTERNAL, "复用外部实例");
-            } else {
-                // 即将由本应用拉起 dsh：先确保 web profile 已挂载桌面 chrome 插件
-                //（参考项目机制：检测缺失则用官方 `dsh plugin --profile web add` 装上）。
-                // 桌面插件改为 --patch 注入：先挂共享模块池（解析实体），再迁移旧 bundle 注册
-                log::info!("桌面插件 --patch 注入准备：挂共享模块池 + 迁移旧 bundle 注册");
-                set_status(app.handle(), STATUS_STARTING, "启动中");
-                materialize_desktop_plugin(app.handle());
-                strip_web_profile_plugin_bundle();
-                // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
-                clear_web_token(app.handle());
-                match spawn_dsh(app.handle(), port, true) {
-                    Ok(child) => {
-                        log::info!("dsh 子进程已启动（PID {}）", child.id());
-                        *state.child.lock().unwrap() = Some(child);
-                        state.spawned_this_run.store(true, Ordering::SeqCst);
-                        state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+            // 认领判定（#86）：端口有监听不再盲目复用——台账确认是本 profile 的实例、
+            // 或落在 web 的 legacy 端口（外部 dsh 兼容）才复用；陌生占用者明确报错不代拉。
+            let claim = crate::runtime::instances::decide_claim(
+                &profile,
+                port,
+                port_open(port),
+                &crate::runtime::instances::load_instances(),
+                configured_port(),
+            );
+            use crate::runtime::instances::ClaimDecision;
+            match claim {
+                ClaimDecision::Free => {
+                    // 即将由本应用拉起 dsh：先挂共享模块池并迁移旧 bundle 注册（--patch 注入）
+                    log::info!("桌面插件 --patch 注入准备：挂共享模块池 + 迁移旧 bundle 注册");
+                    set_status(app.handle(), STATUS_STARTING, "启动中");
+                    materialize_desktop_plugin(app.handle());
+                    strip_web_profile_plugin_bundle();
+                    // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
+                    clear_web_token(app.handle());
+                    match spawn_dsh(app.handle(), &profile, port, true) {
+                        Ok(child) => {
+                            log::info!("dsh 子进程已启动（PID {}）", child.id());
+                            *state.child.lock().unwrap() = Some(child);
+                            state.spawned_this_run.store(true, Ordering::SeqCst);
+                            state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
+                            // #94：主实例上线即默认转发目标
+                            crate::network::forwarder::set_focused_lane(
+                                crate::settings::lane_port_for_profile(&profile)
+                            );
+                            // #87：全新安装默认 desktop profile——通知说明 + 指引如何回 web
+                            if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
+                                show_notification(
+                                    app.handle(),
+                                    "全新安装 · 默认使用 desktop profile",
+                                    "启动端口 3081；托盘菜单「切换 Profile」可回到 web@3080",
+                                );
+                            }
+                        }
+                        Err(SpawnError::NotFound(e)) => {
+                            log::error!("启动 dsh 失败：{e}");
+                            state.spawn_failed.store(true, Ordering::SeqCst);
+                            show_error(app.handle(), "not-found");
+                        }
+                        Err(SpawnError::Other(e)) => {
+                            log::error!("启动 dsh 失败：{e}");
+                            state.spawn_failed.store(true, Ordering::SeqCst);
+                            show_error(app.handle(), "spawn-failed");
+                        }
                     }
-                    Err(SpawnError::NotFound(e)) => {
-                        log::error!("启动 dsh 失败：{e}");
-                        state.spawn_failed.store(true, Ordering::SeqCst);
-                        show_error(app.handle(), "not-found");
-                    }
-                    Err(SpawnError::Other(e)) => {
-                        log::error!("启动 dsh 失败：{e}");
-                        state.spawn_failed.store(true, Ordering::SeqCst);
-                        show_error(app.handle(), "spawn-failed");
-                    }
+                }
+                ClaimDecision::Ours => {
+                    // 上次壳拉起的实例仍存活（如壳崩溃后重启）：按复用流程接入
+                    log::info!("127.0.0.1:{port} 是 profile {profile} 的在跑实例，直接复用");
+                    state.mode_prompt_needed.store(true, Ordering::SeqCst);
+                    set_status(app.handle(), STATUS_EXTERNAL, "复用本 profile 实例");
+                }
+                ClaimDecision::ForeignWeb => {
+                    log::info!("127.0.0.1:{port} 已有外部服务在监听（web legacy 端口），直接复用现有实例");
+                    // 外部实例复用会禁用桌面 chrome：在加载页弹「兼容/高级」模式选择
+                    state.mode_prompt_needed.store(true, Ordering::SeqCst);
+                    set_status(app.handle(), STATUS_EXTERNAL, "复用外部实例");
+                }
+                ClaimDecision::ForeignUnknown => {
+                    // 端口被别的 profile / 陌生程序占用：绝不盲目复用，也不代杀
+                    let detail = format!(
+                        "端口 {port} 被其他实例或程序占用（profile={profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试"
+                    );
+                    log::error!("{detail}");
+                    state.spawn_failed.store(true, Ordering::SeqCst);
+                    show_notification(app.handle(), "DeepSeek Harness Desktop · 启动受阻", &detail);
+                    show_error(app.handle(), "spawn-failed");
                 }
             }
 // 先起通知桥，把端口/token 交给导航任务并保存到 state（重启 dsh 时复用）；
 // 导航完成后再注入监听脚本（0.3.0 在导航前注入，冷启动时脚本随加载页销毁）。
             let (nport, ntoken) = start_notify_server(app.handle().clone());
+            // #94：lane 转发器（手机稳定接入点 → 焦点实例）
+            tauri::async_runtime::spawn(crate::network::forwarder::start());
             state.notify_port.store(nport, Ordering::SeqCst);
             *state.notify_token.lock().unwrap() = ntoken.clone();
+            // desktop profile 不再自动补建（#95 拍板）：dsh CLI 将 desktop 保留给 Electron
+            // 官方桌面版（plugin add 被拒），spawn 实例只写模板不装插件——自动化三条路全堵死。
+            // 想要 desktop/任意 profile：设置里的「新建 Profile」手动建。
             if state.spawned_this_run.load(Ordering::SeqCst) {
                 // 本次由桌面壳拉起实例：立即导航（advanced，桌面 chrome）
                 let handle = app.handle().clone();
@@ -419,7 +509,7 @@ pub fn run() {
                         let settings = load_desktop_settings();
                         let (up, verbose) = match settings.remote_addr.as_deref() {
                             Some(addr) => probe_remote(addr),
-                            None => probe_local(configured_port()),
+                            None => probe_local(app_port()),
                         };
                         let cur = state.status.load(Ordering::SeqCst);
                         if up {
@@ -463,15 +553,26 @@ pub fn run() {
                         }
                         log::warn!("[watchdog] dsh 不可达（{verbose}），自动重启（第 {epoch_failures} 次）");
                         show_notification(&handle, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
-                        restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst));
+                        restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst), None);
                     }
                 });
             }
-            build_tray(app)?;
-            setup_pet(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
+            // #94：焦点窗口决定 lane 转发目标（主窗=激活 profile，次窗=对应 profile）
+            if let WindowEvent::Focused(true) = event {
+                let label = window.label();
+                let profile = if label == "main" {
+                    crate::settings::configured_profile()
+                } else {
+                    label.strip_prefix("profile-").unwrap_or("").to_string()
+                };
+                if !profile.is_empty() {
+                    let lane = crate::settings::lane_port_for_profile(&profile);
+                    crate::network::forwarder::set_focused_lane(lane);
+                }
+            }
             match window.label() {
                 "pet" => match event {
                     WindowEvent::CloseRequested { api, .. } => {
@@ -506,6 +607,16 @@ pub fn run() {
                     }
                     _ => {}
                 },
+                label if label.starts_with("profile-") => {
+                    // #89 次窗口：关闭 = 停该实例并摘台账（放行关闭）
+                    if let WindowEvent::CloseRequested { .. } = event {
+                        let profile = label.strip_prefix("profile-").unwrap_or("").to_string();
+                        let app = window.app_handle().clone();
+                        tauri::async_runtime::spawn(async move {
+                            crate::ui::multiwin::close_profile_instance(&app, &profile, true);
+                        });
+                    }
+                }
                 "main" => {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         let state = window.state::<DshState>();
@@ -552,8 +663,27 @@ pub fn run() {
                         let _ = child.kill();
                         let _ = child.wait();
                         log::info!("dsh 子进程已退出");
+                        // #89 多窗口：回收非激活 profile 的次实例
+                        {
+                            let state = app.state::<DshState>();
+                            let mut children = state.children.lock().unwrap();
+                            let profiles: Vec<String> = children.keys().cloned().collect();
+                            for profile in profiles {
+                                if let Some(mut child) = children.remove(&profile) {
+                                    let pid = child.id();
+                                    log::info!("[exit] 停止 {profile} 实例（PID {pid}）");
+                                    let _ = child.kill();
+                                    let _ = child.wait();
+                                    crate::runtime::instances::remove_instance(&profile);
+                                }
+                            }
+                        }
+                        // 实例台账（#86）：自家实例已停，摘除记录
+                        crate::runtime::instances::remove_instance(&configured_profile());
                     }
                 }
+                // 退出时清理所有 profile 下的桌面插件 junction/symlink
+                crate::process::plugin::cleanup_desktop_plugin_links();
             }
             _ => {}
         });

@@ -4,7 +4,7 @@
 
 use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
-use crate::settings::{load_desktop_settings, save_desktop_settings, configured_port};
+use crate::settings::{load_desktop_settings, configured_port};
 use crate::network::web_token::store_web_token;
 use crate::network::notify::show_notification;
 use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode};
@@ -86,7 +86,7 @@ pub(crate) fn extract_token_from_url(input: &str) -> Option<String> {
 pub(crate) fn select_remote(app: &AppHandle, addr: Option<String>) {
     let mut settings = load_desktop_settings();
     settings.remote_addr = addr;
-    save_desktop_settings(&settings);
+    // #90 架构约束：Rust 不写 settings.yaml——持久化由 client→插件→dsh settings 服务承担
     if let Some(a) = settings.remote_addr.as_deref() {
         let host = remote_host_port(a).split(':').next().unwrap_or(a).to_string();
         let mut list = INTERNAL_HOSTS.lock().unwrap();
@@ -98,7 +98,7 @@ pub(crate) fn select_remote(app: &AppHandle, addr: Option<String>) {
         log::info!("[tray] 切换 dsh 服务地址 -> 本地");
     }
     let mode = app.state::<DshState>().mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(app, mode);
+    restart_dsh_in_mode(app, mode, None);
 }
 
 /// 新增远程地址流程：弹窗输入完整 URL（或旧格式 host[:port]）→ 校验 → 存入列表并选中。
@@ -121,7 +121,7 @@ pub(crate) fn add_remote_flow(app: &AppHandle) {
         if !settings.remote_list.contains(&addr) {
             settings.remote_list.push(addr.clone());
         }
-        save_desktop_settings(&settings);
+        // #90：持久化由 client→插件→dsh settings 服务承担
         log::info!("[tray] 新增远程 dsh 地址：{}（未切换，请在菜单中手动选择）", remote_display(&addr));
         refresh_tray_mode(&handle);
     });
@@ -134,7 +134,7 @@ pub(crate) fn remove_remote_flow(app: &AppHandle, addr: &str) {
     if settings.remote_addr.as_deref() == Some(addr) {
         settings.remote_addr = None;
     }
-    save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     log::info!("[tray] 删除远程 dsh 地址：{}", remote_display(addr));
     refresh_tray_mode(app);
 }
@@ -157,13 +157,18 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
         }
         let mut settings = load_desktop_settings();
         settings.port = Some(port);
-        save_desktop_settings(&settings);
+        // #86：web 端口同时写入 per-profile 覆盖表（settings.port 保留作 legacy 回退/展示）
+        settings
+            .profile_ports
+            .get_or_insert_with(Default::default)
+            .insert("web".to_string(), port);
+        // #90：持久化由 client→插件→dsh settings 服务承担
         log::info!("[tray] 本地端口 -> {port}");
         if settings.remote_addr.is_some() {
             show_notification(&handle, "端口已保存", &format!("{port} 将在本地模式生效"));
         } else {
             let mode = handle.state::<DshState>().mode.load(Ordering::SeqCst);
-            restart_dsh_in_mode(&handle, mode);
+            restart_dsh_in_mode(&handle, mode, None);
         }
         refresh_tray_mode(&handle);
     });

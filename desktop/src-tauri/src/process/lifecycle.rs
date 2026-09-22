@@ -18,9 +18,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::runtime::error::SpawnError;
-use crate::settings::{
-    configured_cloudflared_bin, configured_lane_port, configured_profile,
-};
+use crate::settings::{configured_cloudflared_bin, lane_port_for_profile};
 use crate::network::proxy::inject_proxy_env;
 use crate::network::web_token::{parse_web_token_line, store_web_token};
 
@@ -116,8 +114,8 @@ pub(crate) fn kill_process_force(pid: u32) {
 pub trait DshLifecycle {
     /// 定位 dsh 可执行文件。
     fn find_binary() -> Option<PathBuf>;
-    /// spawn dsh web 子进程。
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError>;
+    /// spawn dsh web 子进程（profile 显式传入：#86 起端口与实例按 profile 隔离）。
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError>;
     /// 优雅终止进程（SIGTERM / TerminateProcess）。
     fn kill(pid: u32);
     /// 强制终止进程（SIGKILL / TerminateProcess 再调一次）。
@@ -234,50 +232,140 @@ pub(crate) fn dsh_runtime_path(bin: &std::path::Path) -> std::ffi::OsString {
     std::env::join_paths(paths).unwrap_or_else(|_| std::ffi::OsString::from("/usr/bin:/bin"))
 }
 
+/// 内置模式的静态兑底 PATH（登录 shell 恢复失败时使用）。
+const FALLBACK_TOOL_PATH: &str =
+    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// 登录 shell 候选链：用户默认 shell 优先，常见绝对路径兑底（#/bin/zsh 硬编码不可靠）。
+#[cfg(unix)]
+fn login_shell_candidates() -> Vec<std::path::PathBuf> {
+    let mut list: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(s) = std::env::var("SHELL") {
+        if !s.is_empty() {
+            list.push(std::path::PathBuf::from(s));
+        }
+    }
+    for p in ["/bin/zsh", "/usr/bin/zsh", "/bin/bash", "/usr/bin/bash", "/bin/sh"] {
+        let cand = std::path::PathBuf::from(p);
+        if !list.contains(&cand) {
+            list.push(cand);
+        }
+    }
+    list
+}
+
+/// 单个 shell 的 PATH 捕获：按 basename 区分参数（fish 的 PATH 是数组、
+/// sh 无 -i 交互模式）；多行输出按 ':' 拼（fish 逐行打印兼容）；
+/// 失败/空输出/无路径形状 → None。
+#[cfg(unix)]
+fn capture_path_with(shell: &std::path::Path) -> Option<String> {
+    let name = shell.file_name()?.to_string_lossy().to_string();
+    let args: Vec<&str> = if name == "fish" {
+        vec!["-l", "-c", "printf '%s\\n' $PATH"]
+    } else if name.contains("zsh") || name.contains("bash") {
+        vec!["-lic", "echo $PATH"]
+    } else {
+        vec!["-lc", "echo $PATH"]
+    };
+    let out = std::process::Command::new(shell)
+        .args(&args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let path = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(":")
+        .trim()
+        .to_string();
+    (path.contains('/')).then_some(path)
+}
+
+/// 登录 shell PATH 恢复（anywhere-labs 模式简版）：候选链逐个尝试，全部失败
+/// 返回 None 由调用方走静态兑底。Windows 走继承 PATH（CI 把关）。
+pub(crate) fn recover_login_path() -> Option<String> {
+    #[cfg(unix)]
+    {
+        login_shell_candidates()
+            .iter()
+            .filter(|s| s.exists())
+            .find_map(|s| capture_path_with(s))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// spawn `dsh web --host 127.0.0.1 --port <port>`（unix）；stdout/stderr 转发到日志，
 /// 并实时 emit 到启动加载页的「本地服务输出」控制台（`dsh-console` 事件）。
 #[cfg(unix)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-    let bin = find_dsh_bin().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 dsh 命令。请执行 `npm i -g @deepseek-ai/dsh` 或设置 DSH_BIN 环境变量。"
-                .to_string(),
-        )
-    })?;
-    let mut cmd = Command::new(&bin);
-    // 统一用 `dsh --profile web ...`（等价于 `dsh web`）。桌面插件经 --patch 注入
-    //（包名行，实体在共享模块池），不禁用 stock ui-layout；仅当设置
-    // DSH_DESKTOP_EXTRA_PATCH 调试环境变量时再叠加一个调试 overlay。
-    let profile = configured_profile();
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+    // 来源解析（#85 拍板）：内置 → node + 启动器（runProfile 代码路径）；外部 → CLI
     log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
-    let mut launcher_args: Vec<std::ffi::OsString> =
-        vec!["--profile".into(), profile.into()];
-    // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
-    // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
-    // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
-    // 兼容模式不注入，行为等同纯 dsh web（用户实测需求）
+    // bundle 补链（anywhere-labs heal 式）：内置树缺失的 profile bundle 从用户
+    // 外部 CLI 安装树 symlink 进 profile 池，让内置 dsh 能解析存量插件
+    crate::process::plugin::heal_profile_bundles(app, profile);
+    // #90 实测：非激活 profile 的池里没有桌面三插件 → --patch loader 条目解析失败 → 实例秒退
+    // 未初始化的 profile（无 package.json）跳过预挂池：先物化会让 fromDefaultProfile
+    // 初始化撞上非空目录失败（#90 实测闪退根因）；初始化完成后再挂（自动补建流程负责）
+    if crate::dsh_home()
+        .join("profiles")
+        .join(profile)
+        .join("package.json")
+        .is_file()
+    {
+        crate::process::plugin::materialize_desktop_plugin_for(app, profile);
+    }
+    let mut patches: Vec<std::path::PathBuf> = Vec::new();
     if advanced {
-        launcher_args.push("--patch".into());
-        launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
+        // --patch 仅在高级模式注入（桌面 chrome / mobile-access / mobile-nav）；
+        // 兼容模式不注入，行为等同纯 dsh（用户实测需求）
+        patches.push(crate::desktop_plugin_patch_path(app));
     }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
-            launcher_args.push("--patch".into());
-            launcher_args.push(patch.into());
+            patches.push(patch.into());
         }
     }
-    // --no-open：dsh 升级后默认打开系统浏览器，桌面壳自行导航故关闭
-    launcher_args.extend([
-        "--no-open".into(),
-        "--host".into(),
-        "127.0.0.1".into(),
-        "--port".into(),
-        port.to_string().into(),
-    ]);
-    cmd.args(&launcher_args)
-        .env("PATH", dsh_runtime_path(&bin))
-        .env("DSH_MOBILE_LANE_PORT", configured_lane_port().to_string())
+    let source = crate::runtime::builtin::resolve_source(app).map_err(SpawnError::Other)?;
+    let (bin, launcher_args) = match &source {
+        crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, launcher } => {
+            log::info!("[spawn] 内置模式：node + runProfile（不经 CLI）");
+            let init_from_default = !crate::profiles::profile_exists(profile);
+            (node.clone(), crate::runtime::builtin::launcher_args(launcher, dsh_lib, profile, port, &patches, init_from_default))
+        }
+        crate::runtime::builtin::DshSource::External { bin } => {
+            log::info!("[spawn] 外部模式：CLI（--patch 必须早于 --no-open，passThrough 顺序）");
+            (bin.clone(), crate::runtime::builtin::external_cli_args(profile, port, &patches))
+        }
+    };
+    let source_mode = match &source {
+        crate::runtime::builtin::DshSource::Builtin { .. } => "builtin",
+        crate::runtime::builtin::DshSource::External { .. } => "external",
+    };
+    let mut cmd = Command::new(&bin);
+    cmd.args(&launcher_args);
+    if matches!(source, crate::runtime::builtin::DshSource::External { .. }) {
+        // 外部 dsh 是 Node 脚本（shebang 依赖 node）：Finder 启动的 GUI PATH 缺 node，
+        // 按现有链路补齐运行时 PATH；
+        cmd.env("PATH", dsh_runtime_path(&bin));
+    } else {
+        // 内置模式（#90 实测）：Finder 启动的 App 只有系统 PATH，dsh 的插件子进程
+        // （git/gh/pnpm 等工具链检测）会全部落空。用用户登录 shell 恢复完整 PATH
+        // （anywhere-labs 模式简版）；恢复失败回退静态常见目录。
+        match recover_login_path() {
+            Some(p) => cmd.env("PATH", &p),
+            None => cmd.env("PATH", FALLBACK_TOOL_PATH),
+        };
+    }
+    let lane = lane_port_for_profile(profile);
+    cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
     let cloudflared = configured_cloudflared_bin();
@@ -296,11 +384,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
         std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
     );
-    *app
-        .state::<crate::runtime::state::DshState>()
-        .stderr_buf
-        .lock()
-        .unwrap() = Some(stderr_buf.clone());
+    app.state::<crate::runtime::state::DshState>()
+        .set_stderr_buf(profile, stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped());
     {
@@ -333,7 +418,10 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
         .spawn()
         .map_err(|e| SpawnError::Other(format!("spawn {} 失败：{e}", bin.display())))?;
     log::info!("已启动 dsh web（{}，PID {}）", bin.display(), child.id());
+    crate::runtime::instances::register_instance(profile, port, lane, child.id(), source_mode);
+    app.state::<crate::runtime::state::DshState>().set_running_source(profile, source_mode);
     if let Some(out) = child.stdout.take() {
+        let profile = profile.to_string();
         let app = app.clone();
         thread::spawn(move || {
             // split(b'\n') + from_utf8_lossy：`.lines().map_while(Result::ok)` 遇到
@@ -347,6 +435,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
+                    app.state::<crate::runtime::state::DshState>()
+                        .set_web_token(&profile, token.clone());
                     store_web_token(&app, token);
                 }
                 log::info!("[dsh] {line}");
@@ -382,8 +472,8 @@ impl DshLifecycle for NativeLifecycle {
         find_dsh_bin()
     }
 
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-        spawn_dsh(app, port, advanced)
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+        spawn_dsh(app, profile, port, advanced)
     }
 
     fn kill(pid: u32) {
@@ -517,48 +607,50 @@ pub(crate) fn find_dsh_bin_js() -> Option<PathBuf> {
 /// npm 全局安装的 dsh 在 Windows 是 dsh.cmd shim，直接 CreateProcess 有引号
 /// 转义坑，所以直接用 node.exe 执行 bin.js；CREATE_NO_WINDOW 防止闪黑窗。
 #[cfg(windows)]
-pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+    crate::process::plugin::heal_profile_bundles(app, profile);
+    crate::process::plugin::materialize_desktop_plugin_for(app, profile);
     use std::os::windows::process::CommandExt;
-    let node = find_node().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 node.exe。请安装 Node.js 或设置 DSH_NODE 环境变量。".to_string(),
-        )
-    })?;
-    let bin_js = find_dsh_bin_js().ok_or_else(|| {
-        SpawnError::NotFound(
-            "未找到 @deepseek-ai/dsh。请执行 `npm i -g @deepseek-ai/dsh`，或设置 DSH_BIN 指向 bin.js。"
-                .to_string(),
-        )
-    })?;
-    let mut cmd = Command::new(&node);
-    let mut launcher_args: Vec<std::ffi::OsString> =
-        vec![
-            bin_js.clone().into(),
-            "--profile".into(),
-            configured_profile().into(),
-        ];
-    // 桌面插件经 --patch 注入（包名行，实体在共享模块池，不写 profile bundles）。
-    // 注意顺序：--patch 必须早于 --no-open/--host —— dsh CLI 用 passThrough 解析，
-    // 靠后的 --patch 会被透传给 web-app 而报 unknown option '--patch'。
-    launcher_args.push("--patch".into());
-    launcher_args.push(crate::desktop_plugin_patch_path(app).into_os_string());
-    // 仅当设置 DSH_DESKTOP_EXTRA_PATCH 调试环境变量时叠加该 `--patch` overlay。
+    // 来源解析（#85 拍板）：内置 → sidecar node + 启动器（runProfile）；外部 → 系统 node + bin.js CLI
+    log::info!("[spawn] 启动 dsh（profile={profile}, port={port}）");
+    let mut patches: Vec<std::path::PathBuf> = Vec::new();
+    if advanced {
+        // 历史上 windows 分支无条件注 --patch；#85 统一为与 unix 一致的 advanced 语义
+        patches.push(crate::desktop_plugin_patch_path(app));
+    }
     if let Ok(patch) = std::env::var("DSH_DESKTOP_EXTRA_PATCH") {
         if !patch.trim().is_empty() {
-            launcher_args.push("--patch".into());
-            launcher_args.push(patch.into());
+            patches.push(patch.into());
         }
     }
-    // --no-open：dsh 升级后默认打开系统浏览器，桌面壳自行导航故关闭
-    launcher_args.extend([
-        "--no-open".into(),
-        "--host".into(),
-        "127.0.0.1".into(),
-        "--port".into(),
-        port.to_string().into(),
-    ]);
+    let source = crate::runtime::builtin::resolve_source(app).map_err(SpawnError::Other)?;
+    let (node, launcher_args) = match &source {
+        crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, launcher } => {
+            log::info!("[spawn] 内置模式：node + runProfile（不经 CLI）");
+            let init_from_default = !crate::profiles::profile_exists(profile);
+            (node.clone(), crate::runtime::builtin::launcher_args(launcher, dsh_lib, profile, port, &patches, init_from_default))
+        }
+        crate::runtime::builtin::DshSource::External { bin } => {
+            let node = find_node().ok_or_else(|| {
+                SpawnError::NotFound(
+                    "未找到 node.exe。请安装 Node.js 或设置 DSH_NODE 环境变量。".to_string(),
+                )
+            })?;
+            log::info!("[spawn] 外部模式：node + bin.js CLI（--patch 必须早于 --no-open）");
+            let mut a = vec![bin.clone().into_os_string()];
+            a.extend(crate::runtime::builtin::external_cli_args(profile, port, &patches));
+            (node, a)
+        }
+    };
+    let source_mode = match &source {
+        crate::runtime::builtin::DshSource::Builtin { .. } => "builtin",
+        crate::runtime::builtin::DshSource::External { .. } => "external",
+    };
+    let mut cmd = Command::new(&node);
+    let lane = lane_port_for_profile(profile);
+    cmd.arg("--use-env-proxy"); // Node.js fetch 代理：必须命令行参数（NODE_OPTIONS 不允许此 flag）
     cmd.args(&launcher_args)
-        .env("DSH_MOBILE_LANE_PORT", configured_lane_port().to_string())
+        .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
     let cloudflared = configured_cloudflared_bin();
@@ -567,19 +659,14 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     }
     // 代理继承：同 unix 分支，按设置注入代理环境变量；off/检测失败不注入
     inject_proxy_env(&mut cmd);
-    // Node.js fetch 走代理：--use-env-proxy 让 Node.js 读取 HTTP_PROXY/HTTPS_PROXY 等环境变量
-    cmd.env("NODE_OPTIONS", "--use-env-proxy");
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(crate::dsh_home());
     // 启动保险丝（#58）：同 unix 分支，建 stderr 累积缓冲。
     let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
         std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
     );
-    *app
-        .state::<crate::runtime::state::DshState>()
-        .stderr_buf
-        .lock()
-        .unwrap() = Some(stderr_buf.clone());
+    app.state::<crate::runtime::state::DshState>()
+        .set_stderr_buf(profile, stderr_buf.clone());
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
@@ -589,11 +676,15 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
     log::info!(
         "已启动 dsh web（node {} {}，PID {}）",
         node.display(),
-        bin_js.display(),
+        launcher_args.first().map(|a| a.to_string_lossy().to_string()).unwrap_or_default(),
         child.id()
     );
+    // 实例台账（#86）：同 unix 分支
+    crate::runtime::instances::register_instance(profile, port, lane, child.id(), source_mode);
+    app.state::<crate::runtime::state::DshState>().set_running_source(profile, source_mode);
     if let Some(out) = child.stdout.take() {
         let app = app.clone();
+        let profile = profile.to_string();
         thread::spawn(move || {
             // split(b'\n') + from_utf8_lossy：非法 UTF-8 字节不断流（同 unix 分支）
             for raw in BufReader::new(out).split(b'\n') {
@@ -605,6 +696,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, port: u16, advanced: bool) -> Re
                 // dsh 新版在 stdout 打印带 process token 的启动 URL：解析后存入
                 // state 供就绪导航拼接（无该行的老版 dsh 走不带 token 的回退路径）。
                 if let Some(token) = parse_web_token_line(&line) {
+                    app.state::<crate::runtime::state::DshState>()
+                        .set_web_token(&profile, token.clone());
                     store_web_token(&app, token);
                 }
                 log::info!("[dsh] {line}");
@@ -640,8 +733,8 @@ impl DshLifecycle for JsLifecycle {
         find_dsh_bin_js()
     }
 
-    fn spawn(app: &AppHandle, port: u16, advanced: bool) -> Result<Child, SpawnError> {
-        spawn_dsh(app, port, advanced)
+    fn spawn(app: &AppHandle, profile: &str, port: u16, advanced: bool) -> Result<Child, SpawnError> {
+        spawn_dsh(app, profile, port, advanced)
     }
 
     fn kill(pid: u32) {

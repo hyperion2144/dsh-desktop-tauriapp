@@ -90,4 +90,30 @@ else
   echo "=== [D-移动lane] 跳过：$LANE 无服务（需桌面壳拉起 dsh 后运行）==="
 fi
 
+# ── E 内置启动路径冒烟（#85/#89）：launcher + staged 运行时直调 runProfile ──
+LAUNCHER="src-tauri/src/runtime/builtin/launcher.mjs"
+DSH_LIB="src-tauri/resources/dsh/node_modules/@deepseek-ai/dsh/lib"
+SMOKE_PORT=13451
+if [ -f "$LAUNCHER" ] && [ -f "$DSH_LIB/bin.js" ]; then
+  SMOKE_HOME=$(mktemp -d /tmp/dsh-builtin-smoke-XXXXXX)
+  DSH_HOME=$SMOKE_HOME node "$LAUNCHER" "$DSH_LIB" desktop $SMOKE_PORT --init-from-default \
+    >"/tmp/dsh-builtin-smoke.log" 2>&1 &
+  SMOKE_PID=$!
+  sleep 12
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:$SMOKE_PORT/" 2>/dev/null || echo 000)
+  kill $SMOKE_PID 2>/dev/null || true
+  sleep 1; pkill -f "port $SMOKE_PORT" 2>/dev/null || true
+  if [ "$CODE" = "401" ] || [ "$CODE" = "200" ]; then
+    echo "内置启动路径冒烟 OK：HTTP $CODE（desktop profile 经 runProfile 建成）✓"
+  else
+    echo "FAIL: 内置启动路径 HTTP=$CODE —— 日志见 /tmp/dsh-builtin-smoke.log"
+    head -8 "/tmp/dsh-builtin-smoke.log"
+    rm -rf "$SMOKE_HOME"
+    exit 1
+  fi
+  rm -rf "$SMOKE_HOME"
+else
+  echo "=== [E-内置冒烟] 跳过：无 staged 运行时（先跑 prepare-builtin-runtime.mjs）==="
+fi
+
 echo "验收完成 ✓"

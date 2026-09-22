@@ -133,6 +133,10 @@ description = "桌面设置面板：get_desktop_settings_data"
 commands = { allow = ["get_desktop_settings_data"] }
 
 [[permission]]
+identifier = "allow-save-desktop-settings"
+description = "壳设置保存（#95 v0.1.7：私有 JSON，Rust 单写者，替代 dsh settings RPC）"
+commands = { allow = ["save_desktop_settings"] }
+[[permission]]
 identifier = "allow-add-remote-address"
 description = "桌面设置面板：add_remote_address"
 commands = { allow = ["add_remote_address"] }
@@ -157,12 +161,87 @@ identifier = "allow-switch-profile-command"
 description = "桌面设置面板：switch_profile_command"
 commands = { allow = ["switch_profile_command"] }
 
+[[permission]]
+identifier = "allow-confirm-startup-profile"
+description = "启动时用户选择 profile（存量安装 + active_profile 未设）"
+commands = { allow = ["confirm_startup_profile"] }
+
+
+[[permission]]
+identifier = "allow-check-startup-needed"
+description = "启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复"
+commands = { allow = ["check_startup_needed"] }
+
+
+[[permission]]
+identifier = "allow-get-pending-active-profile"
+description = "dsh 启动后取回启动时选择的 profile，前端通过 nsSave 持久化"
+commands = { allow = ["get_pending_active_profile"] }
+[[permission]]
+identifier = "allow-migrate-profile"
+description = "桌面设置面板：migrate_profile（#88 profile 迁移）"
+commands = { allow = ["migrate_profile"] }
+
+[[permission]]
+identifier = "allow-migration-status"
+description = "桌面设置面板：migration_status（#90 迁移进度条）"
+commands = { allow = ["migration_status"] }
+
+[[permission]]
+identifier = "allow-task-status"
+description = "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）"
+commands = { allow = ["task_status"] }
+
+[[permission]]
+identifier = "allow-list-runtime-catalog"
+description = "桌面设置面板：运行时版本目录/已装列表（#95）"
+commands = { allow = ["list_runtime_catalog"] }
+
+[[permission]]
+identifier = "allow-download-runtime"
+description = "桌面设置面板：下载并安装 dsh 运行时（#95）"
+commands = { allow = ["download_runtime"] }
+
+[[permission]]
+identifier = "allow-remove-runtime"
+description = "桌面设置面板：删除已下载的 dsh 运行时（#95）"
+commands = { allow = ["remove_runtime"] }
+
+[[permission]]
+identifier = "allow-runtime-download-status"
+description = "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）"
+commands = { allow = ["runtime_download_status"] }
 # ── 下载管理器（#72）：右侧边栏下载 tab / blob 拦截 / 桌面设置并发项 ──
 
 [[permission]]
 identifier = "allow-list-downloads"
 description = "下载管理器：读取任务列表快照"
 commands = { allow = ["list_downloads"] }
+
+[[permission]]
+identifier = "allow-get-dsh-source"
+description = "桌面设置面板：get_dsh_source（#90）"
+commands = { allow = ["get_dsh_source"] }
+
+[[permission]]
+identifier = "allow-set-dsh-source"
+description = "桌面设置面板：set_dsh_source（#90）"
+commands = { allow = ["set_dsh_source"] }
+
+[[permission]]
+identifier = "allow-list-profile-ports"
+description = "桌面设置面板：list_profile_ports（#90）"
+commands = { allow = ["list_profile_ports"] }
+
+[[permission]]
+identifier = "allow-set-profile-port"
+description = "桌面设置面板：set_profile_port（#90）"
+commands = { allow = ["set_profile_port"] }
+
+[[permission]]
+identifier = "allow-create-profile-flow-command"
+description = "桌面设置面板：create_profile_flow_command（#90）"
+commands = { allow = ["create_profile_flow_command"] }
 
 [[permission]]
 identifier = "allow-pause-download"

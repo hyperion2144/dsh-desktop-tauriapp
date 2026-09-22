@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
-use crate::settings::{load_desktop_settings, save_desktop_settings, configured_port};
+use crate::settings::{load_desktop_settings, configured_port};
 use crate::network::proxy::{normalize_proxy_url, split_authority, PROXY_MODE_OFF, PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL};
 use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::{store_web_token, clear_web_token};
@@ -16,7 +16,7 @@ use crate::network::remote::{normalize_remote_url, extract_token_from_url};
 use crate::process::plugin::desktop_platform_tag;
 use crate::settings::dsh_home;
 use crate::runtime::error::SpawnError;
-use crate::settings::app_port;
+use crate::settings::port_for_profile;
 use crate::ui::window::{show_error, current_monitor_for_window};
 use crate::process::lifecycle::stop_port_owner;
 use crate::navigation::wait_ready_and_navigate;
@@ -167,7 +167,7 @@ pub(crate) fn restart_dsh_service(app: tauri::AppHandle) -> Result<(), String> {
         return Err("已在重启中".to_string());
     }
     let mode = state.mode.load(Ordering::SeqCst);
-    restart_dsh_in_mode(&app, mode);
+     restart_dsh_in_mode(&app, mode, None);
     Ok(())
 }
 
@@ -222,7 +222,7 @@ pub(crate) fn save_proxy_settings(
     settings.no_proxy = non_empty(no_proxy);
     settings.proxy_user = non_empty(proxy_user);
     settings.proxy_pass = non_empty(proxy_pass);
-    save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     Ok(())
 }
 
@@ -277,11 +277,18 @@ pub(crate) async fn prompt_input(
     *app.state::<DshState>().pending_input.lock().unwrap() = Some(tx);
     let js = input_modal_js(flow, title, placeholder, initial);
     if let Some(w) = app.get_webview_window("main") {
+        // 托盘触发时主窗口可能在后台：先置前聚焦，否则弹窗注入了也看不见（#90 实测）
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
         if w.eval(&js).is_err() {
             log::warn!("[modal] 在主窗口注入输入弹窗失败：{flow}");
             app.state::<DshState>().pending_input.lock().unwrap().take();
             return None;
         }
+        log::info!("[modal] 已注入输入弹窗：{flow}");
+    } else {
+        log::warn!("[modal] 主窗口不存在，无法注入输入弹窗：{flow}");
     }
     match tokio::time::timeout(Duration::from_secs(180), rx.recv()).await {
         Ok(Some((f, v))) if f == flow && !v.trim().is_empty() => Some(v.trim().to_string()),
@@ -348,6 +355,55 @@ pub(crate) fn input_modal_js(flow: &str, title: &str, placeholder: &str, initial
     )
 }
 
+/// 结果弹窗 JS：标题 + 多行消息 + 关闭按钮（不依赖系统通知，#90 实测通知会被吞）。
+fn result_modal_js(title: &str, message: &str) -> String {
+    let (title, message) = (
+        serde_json::to_string(title).unwrap_or_default(),
+        serde_json::to_string(message).unwrap_or_default(),
+    );
+    format!(
+        r#"(function(){{
+  var key = 'dshDesktopResultModal';
+  var old = document.getElementById(key);
+  if (old) old.remove();
+  var overlay = document.createElement('div');
+  overlay.id = key;
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;';
+  var card = document.createElement('div');
+  card.style.cssText = 'background:var(--dsw-alias-bg-layer-1,#1e1e1e);border:1px solid var(--dsw-alias-border-l2,#444);border-radius:12px;padding:18px 20px;min-width:340px;max-width:80vw;box-shadow:0 12px 40px rgba(0,0,0,0.4);color:var(--dsw-alias-label-primary,#eee);';
+  var titleEl = document.createElement('div');
+  titleEl.textContent = {title};
+  titleEl.style.cssText = 'font-size:14px;font-weight:600;margin-bottom:10px;';
+  var msg = document.createElement('div');
+  msg.textContent = {message};
+  msg.style.cssText = 'font-size:13px;line-height:1.6;white-space:pre-wrap;max-height:50vh;overflow:auto;';
+  var row = document.createElement('div');
+  row.style.cssText = 'display:flex;justify-content:flex-end;margin-top:14px;';
+  var ok = document.createElement('button');
+  ok.textContent = '知道了';
+  ok.style.cssText = 'padding:6px 14px;border-radius:8px;border:none;background:var(--dsw-alias-state-accent-primary,#3b82f6);color:#fff;font-size:13px;cursor:default;';
+  ok.addEventListener('click', function(){{ overlay.remove(); }});
+  row.appendChild(ok);
+  card.appendChild(titleEl); card.appendChild(msg); card.appendChild(row);
+  overlay.appendChild(card);
+  document.body.appendChild(overlay);
+}})();"#
+    )
+}
+
+/// 把结果弹窗注入主窗口（托盘流程的可见反馈；系统通知可能未授权被吞）。
+pub(crate) fn show_page_message(app: &tauri::AppHandle, title: &str, message: &str) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+        let js = result_modal_js(title, message);
+        if let Err(e) = w.eval(&js) {
+            log::warn!("[modal] 注入结果弹窗失败：{e}");
+        }
+    }
+}
+
 /// 用户在启动页选择接入模式（仅复用外部 dsh web 实例时出现）。
 /// - `compat`：复用外部实例、标准布局、系统原生标题栏（不启用桌面 chrome）；
 /// - `advanced`：停用占用端口的现有 dsh（含外部进程），以桌面实例重启并注入局部拖拽 chrome。
@@ -361,7 +417,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
             state.mode.store(MODE_COMPAT, Ordering::SeqCst);
             apply_titlebar(&app, false);
             refresh_tray_mode(&app);
-            let port = app_port();
+            let port = port_for_profile(&configured_profile());
             let nport = state.notify_port.load(Ordering::SeqCst);
             let ntoken = state.notify_token.lock().unwrap().clone();
             let handle = app.clone();
@@ -397,7 +453,8 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
             log::info!("[mode] 用户选择高级模式：停用外部实例并以桌面 overlay 实例重启");
             let handle = app.clone();
             tauri::async_runtime::spawn(async move {
-                let port = app_port();
+                let profile = configured_profile();
+                let port = port_for_profile(&profile);
                 // 1) 停用占用端口的现有 dsh（纯代码，跨平台：netstat2 查 PID + SIGTERM/SIGKILL）
                 log::info!("[mode] 停用端口 {port} 上的现有 dsh 进程");
                 let freed = stop_port_owner(port).await;
@@ -409,7 +466,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                 log::info!("[mode] 端口 {port} 已释放，用桌面 overlay 实例重启");
                 // 3) 以桌面 overlay 实例拉起（先清旧 token：新实例 token 必然不同）
                 clear_web_token(&handle);
-                match spawn_dsh(&handle, port, true) {
+                match spawn_dsh(&handle, &profile, port, true) {
                     Ok(child) => {
                         *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                         handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
@@ -482,7 +539,7 @@ pub(crate) fn restore_quarantine(profile: Option<String>, ids: Option<Vec<String
 
 /// 修复：重装包 + 收尾（台账摘除/托管区块重写）。阻塞操作放 spawn_blocking。
 #[tauri::command]
-pub(crate) async fn repair_plugin(profile: Option<String>, id: String) -> serde_json::Value {
+pub(crate) async fn repair_plugin(app: tauri::AppHandle, profile: Option<String>, id: String) -> serde_json::Value {
     let profile = profile.unwrap_or_else(active_profile);
     let res = tauri::async_runtime::spawn_blocking(move || {
         let entries = quarantine::ledger::list_entries(&dsh_home(), &profile);
@@ -492,7 +549,7 @@ pub(crate) async fn repair_plugin(profile: Option<String>, id: String) -> serde_
         if !quarantine::repair::is_repairable(&e.reason, &e.name) {
             return Err(format!("{} 不可修复（非包解析/导出不匹配类失败）", id));
         }
-        quarantine::repair::repair(&profile, &e.name)
+        quarantine::repair::repair(&app, &profile, &e.name)
             .map(|_| {
                 quarantine::repair::finish_repair(&dsh_home(), &profile, &id);
             })
@@ -638,6 +695,27 @@ pub(crate) fn list_ai_providers() -> serde_json::Value {
     serde_json::json!({ "providers": providers })
 }
 
+
+/// 壳设置保存（#95 v0.1.7：搬出 dsh settings.yaml，Rust 单写者）。
+/// client 的 nsSave 通道：invoke('save_desktop_settings', {patch}) → 读改写私有 JSON。
+#[tauri::command]
+pub(crate) fn save_desktop_settings(patch: serde_json::Value) -> Result<(), String> {
+    let mut current = load_desktop_settings();
+    if let Some(obj) = patch.as_object() {
+        let merged = serde_json::to_value(&current)
+            .map_err(|e| format!("序列化当前设置失败：{e}"))?;
+        if let Some(mut m) = Some(merged) {
+            if let Some(mobj) = m.as_object_mut() {
+                for (k, v) in obj {
+                    mobj.insert(k.clone(), v.clone());
+                }
+            }
+            current = serde_json::from_value(m)
+                .map_err(|e| format!("合并后的设置不合法：{e}"))?;
+        }
+    }
+    crate::settings::save_desktop_settings(&current)
+}
 /// 桌面设置面板：一次性读取服务地址/端口/Profile 数据。
 #[tauri::command]
 pub(crate) fn get_desktop_settings_data() -> serde_json::Value {
@@ -664,7 +742,7 @@ pub(crate) fn add_remote_address(url: String) -> Result<String, String> {
     if !settings.remote_list.contains(&addr) {
         settings.remote_list.push(addr.clone());
     }
-    save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     Ok(addr)
 }
 
@@ -676,7 +754,7 @@ pub(crate) fn remove_remote_address(addr: String) -> Result<(), String> {
     if settings.remote_addr.as_deref() == Some(addr.as_str()) {
         settings.remote_addr = None;
     }
-    save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     Ok(())
 }
 
@@ -695,7 +773,7 @@ pub(crate) fn set_local_port(port: u16) -> Result<(), String> {
     }
     let mut settings = load_desktop_settings();
     settings.port = Some(port);
-    save_desktop_settings(&settings);
+    // #90：持久化由 client→插件→dsh settings 服务承担
     Ok(())
 }
 
@@ -704,6 +782,194 @@ pub(crate) fn set_local_port(port: u16) -> Result<(), String> {
 pub(crate) fn switch_profile_command(app: tauri::AppHandle, name: String) -> Result<(), String> {
     crate::profiles::switch_profile(&app, &name);
     Ok(())
+}
+
+/// 启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复。
+#[tauri::command]
+pub(crate) fn check_startup_needed(app: tauri::AppHandle) -> serde_json::Value {
+    let state = app.state::<crate::runtime::state::DshState>();
+    if state.skip_startup_check.load(std::sync::atomic::Ordering::SeqCst) {
+        return serde_json::json!({ "action": "none" });
+    }
+    let settings = crate::settings::load_desktop_settings();
+    let fresh_install = !crate::settings::settings_path().exists();
+    // 存量安装 + active_profile 未设
+    if !fresh_install && settings.active_profile.as_ref().map_or(true, |s| s.is_empty()) {
+        let profiles: Vec<String> = crate::profiles::scan_profiles().into_iter().map(|p| p.name).collect();
+        return serde_json::json!({ "action": "profile-selection", "profiles": profiles });
+    }
+    // 当前 profile 完整性检查
+    let profile = crate::settings::configured_profile();
+    let health = crate::profiles::profile_health_check(&profile);
+    if !health.dir_exists || !health.missing_files.is_empty() || !health.node_modules_exists {
+        return serde_json::json!({ "action": "profile-incomplete", "profile": &profile, "details": { "dir_exists": health.dir_exists, "missing_files": health.missing_files, "node_modules_exists": health.node_modules_exists } });
+    }
+    serde_json::json!({ "action": "none" })
+}
+
+/// 启动时用户选择 profile 或确认修复：
+/// - 存量安装 + active_profile 未设 → 用户选 profile
+/// - profile 不完整 → 用户选是否修复
+/// repair=true 先修复，然后用指定 profile 直接启动 dsh（不写 settings.yaml）。
+#[tauri::command]
+pub(crate) async fn confirm_startup_profile(app: tauri::AppHandle, name: String, repair: bool) -> Result<(), String> {
+    if !crate::profiles::valid_profile_name(&name) {
+        return Err("profile 名不合法".into());
+    }
+    let state = app.state::<crate::runtime::state::DshState>();
+    state.skip_startup_check.store(true, std::sync::atomic::Ordering::SeqCst);
+    *state.pending_active_profile.lock().unwrap() = Some(name.clone());
+    if repair {
+        log::info!("[startup] 修复 profile {name}…");
+        crate::profiles::repair_profile(&app, &name)
+            .map_err(|e| format!("修复 {name} profile 失败：{e}"))?;
+        log::info!("[startup] profile {name} 修复完成");
+    }
+    // 直接用指定 profile 启动 dsh（不调 switch_profile，不写 settings.yaml）
+    let mode = state.mode.load(std::sync::atomic::Ordering::SeqCst);
+    crate::ui::tray::restart_dsh_in_mode(&app, mode, Some(&name));
+    Ok(())
+}
+
+/// dsh 启动后前端调用：取回启动时选择的 profile，通过 nsSave 持久化到 settings.yaml。
+#[tauri::command]
+pub(crate) fn get_pending_active_profile(app: tauri::AppHandle) -> Option<String> {
+    let state = app.state::<crate::runtime::state::DshState>();
+    let profile = state.pending_active_profile.lock().unwrap().take();
+    profile
+}
+/// 迁移 Profile（#88）：全量复制 A→B；源为激活 profile 时先停自家实例，
+/// 目标已存在需 overwrite=true（旧目标备份为 .bak-<ts>）。
+#[tauri::command]
+pub(crate) async fn migrate_profile(
+    app: tauri::AppHandle,
+    source: String,
+    dest: String,
+    overwrite: bool,
+) -> Result<String, String> {
+    crate::profiles::migrate_profile(&app, source, dest, overwrite).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_dsh_source(app: tauri::AppHandle) -> serde_json::Value {
+    // PR #95 评论：来源检测含文件 IO + 子进程探测（dsh --version 数秒级）+ TCP 探测，
+    // 同步执行会卡主线程冻结 WebView——必须丢进阻塞线程池
+    tauri::async_runtime::spawn_blocking(move || get_dsh_source_blocking(app))
+        .await
+        .unwrap_or_default()
+}
+
+/// get_dsh_source 的阻塞实现：读内置树 package.json / spawn dsh --version / TCP 探活，
+/// 只允许经 spawn_blocking 在阻塞线程池运行，禁止直接在主线程调用。
+fn get_dsh_source_blocking(app: tauri::AppHandle) -> serde_json::Value {
+    use crate::runtime::builtin::DshMode;
+    let mode = crate::runtime::builtin::configured_dsh_mode();
+    let mode_str = match mode {
+        DshMode::Builtin => "builtin",
+        DshMode::External => "external",
+    };
+    let builtin = crate::runtime::builtin::builtin_lib_info(&app)
+        .map(|(lib, version)| serde_json::json!({ "lib": lib.display().to_string(), "dsh_version": version }))
+        .unwrap_or(serde_json::Value::Null);
+    let external = crate::runtime::builtin::find_external_bin()
+        .map(|bin| {
+            let version = crate::profiles::dsh_version().unwrap_or_default();
+            serde_json::json!({ "path": bin.display().to_string(), "dsh_version": version })
+        })
+        .unwrap_or(serde_json::Value::Null);
+    // 运行态（#90 用户反馈）：设置 Tab 显示实际在跑的来源，而非仅设置值
+    let active = crate::settings::configured_profile();
+    let state = app.state::<crate::runtime::state::DshState>();
+    let active_port = crate::settings::port_for_profile(&active);
+    let shell_spawned = state.running_source_for(&active);
+    let running = if state.child.lock().unwrap().is_some() {
+        serde_json::json!({
+            "profile": active,
+            "mode": shell_spawned.clone().unwrap_or_else(|| "external".into()),
+            // #95 显示修复：运行版本与选中运行时一致（选中树有效优先），而非恒为内置兑底树
+            "version": if shell_spawned.as_deref() == Some("builtin") {
+                crate::runtime::registry::selected_runtime_version(&app)
+                    .or_else(|| crate::runtime::registry::builtin_version(&app))
+            } else {
+                crate::profiles::dsh_version()
+            },
+            "origin": "shell",
+            "port": active_port,
+        })
+    } else if crate::process::lifecycle::port_open(active_port) {
+        // 复用路径（ForeignWeb）：端口上有 dsh 但非本壳本次 spawn——如实标记为外部复用
+        serde_json::json!({
+            "profile": active,
+            "mode": "external",
+            "origin": "reused",
+            "port": active_port,
+        })
+    } else {
+        serde_json::Value::Null
+    };
+    serde_json::json!({
+        "mode": mode_str,
+        "builtin": builtin,
+        "external": external,
+        "running": running,
+    })
+}
+
+/// 设置 dsh 来源（#85 拍板两态；重启后生效）。
+#[tauri::command]
+pub(crate) fn set_dsh_source(mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "builtin" | "external") {
+        return Err(format!("未知 dsh 来源：{mode}"));
+    }
+    let mut settings = crate::settings::load_desktop_settings();
+    settings.dsh_mode = Some(mode);
+    // #90：持久化由 client→插件→dsh settings 服务承担
+    Ok(())
+}
+
+/// 每 profile 端口表（#90）：profile × 启动端口 × lane 端口 × 运行状态。
+#[tauri::command]
+pub(crate) fn list_profile_ports() -> Vec<serde_json::Value> {
+    crate::profiles::scan_profiles()
+        .into_iter()
+        .map(|p| {
+            let port = crate::settings::port_for_profile_config(&p.name);
+            let lane_port = crate::settings::lane_port_for_profile_config(&p.name);
+            let running = crate::process::lifecycle::port_open(port);
+            serde_json::json!({ "profile": p.name, "port": port, "lane_port": lane_port, "running": running })
+        })
+        .collect()
+}
+
+/// 设置某 profile 的启动端口（占用时拒绝；web 双写 legacy settings.port）。
+#[tauri::command]
+pub(crate) fn set_profile_port(profile: String, port: u16) -> Result<(), String> {
+    if !crate::profiles::valid_profile_name(&profile) {
+        return Err("profile 名不合法".into());
+    }
+    if port == 0 {
+        return Err("端口不能为 0".into());
+    }
+    if crate::process::lifecycle::port_open(port) {
+        return Err(format!("端口 {port} 已被占用（本机其他实例或程序）"));
+    }
+    let mut settings = crate::settings::load_desktop_settings();
+    settings
+        .profile_ports
+        .get_or_insert_with(Default::default)
+        .insert(profile.clone(), port);
+    if profile == "web" {
+        settings.port = Some(port); // 双写 legacy 位（外部工具兼容）
+    }
+    // #90：持久化由 client→插件→dsh settings 服务承担
+    log::info!("[ports] {profile} 启动端口 → {port}（重启生效）");
+    Ok(())
+}
+
+/// 新建 Profile（prompt 流，与托盘入口同一链路）。
+#[tauri::command]
+pub(crate) fn create_profile_flow_command(app: tauri::AppHandle) {
+    crate::profiles::create_profile_flow(&app);
 }
 /// 最近一次启动的隔离事件摘要（通知区）。
 #[tauri::command]
@@ -738,7 +1004,8 @@ pub(crate) fn get_quarantine_settings() -> serde_json::Value {
     })
 }
 
-/// 存保险丝设置（写 settings.yaml 的 dsh-desktop-tauriapp: 键）。
+/// 存保险丝设置（#95 收尾：Rust 单写者直写 $DSH_HOME/desktop-settings.json；
+/// #90 时代「client→插件→dsh settings 服务持久化」的链路已随 v0.1.7 拆除）。
 #[tauri::command]
 pub(crate) fn save_quarantine_settings(
     first_party_protection: bool,
@@ -753,18 +1020,108 @@ pub(crate) fn save_quarantine_settings(
     s.quarantine_first_party_protection = Some(first_party_protection);
     s.quarantine_exclude = Some(exclude);
     s.quarantine_max_retries = Some(max_retries.clamp(0, 5));
+    // provider id 来自 dsh llm 目录（deepseek/minimax-cn/…）或 custom（base_url+key_env 覆盖）；
+    // 不做白名单——旧过滤曾把 minimax-cn 静默改写成 deepseek。解读路由缺口见 #96。
     s.ai_provider = Some(
         ai_provider
-            .filter(|p| p == "deepseek" || p == "custom")
+            .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| "deepseek".into()),
     );
     s.ai_model = ai_model.filter(|m| !m.trim().is_empty());
     s.ai_base_url = ai_base_url.filter(|b| !b.trim().is_empty());
     s.ai_key_env = ai_key_env.filter(|k| !k.trim().is_empty());
-    crate::settings::save_desktop_settings(&s);
-    serde_json::json!({ "ok": true })
+    match crate::settings::save_desktop_settings(&s) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    }
 }
 
+
+/// 迁移进度查询（#90 进度条，旧接口保留）：running / copied / total。
+#[tauri::command]
+pub(crate) fn migration_status() -> serde_json::Value {
+    serde_json::json!({
+        "running": crate::profiles::MIG_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
+        "copied": crate::profiles::MIG_COPIED.load(std::sync::atomic::Ordering::Relaxed),
+        "total": crate::profiles::MIG_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
+/// 通用长任务状态（#95 拒绝静默）：新建/迁移的 stage/进度/结果，前端任务卡轮询。
+#[tauri::command]
+pub(crate) fn task_status() -> serde_json::Value {
+    crate::profiles::task_status()
+}
+
+/// 运行时版本目录 + 已装列表 + 当前选择（#95 运行时下载/切换）。
+#[tauri::command]
+pub(crate) async fn list_runtime_catalog(
+    app: tauri::AppHandle,
+    source: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let src = source.unwrap_or_else(|| {
+        crate::settings::load_desktop_settings().runtime_source
+            .unwrap_or_else(|| "github".into())
+    });
+    let repo = crate::settings::load_desktop_settings().runtime_github_repo;
+    let entries = crate::runtime::registry::fetch_catalog(&src, repo.as_deref()).await?;
+    let installed = crate::runtime::registry::list_installed(&app);
+    let builtin = crate::runtime::registry::builtin_version(&app);
+    let selected = crate::settings::load_desktop_settings().dsh_runtime;
+    Ok(serde_json::json!({
+        "source": src,
+        "builtin": builtin,
+        "selected": selected,
+        "installed": installed,
+        "catalog": entries,
+    }))
+}
+
+/// 下载并安装一个运行时版本（进度经 runtime_download_status 轮询；安装统一走 pnpm）。
+#[tauri::command]
+pub(crate) async fn download_runtime(
+    app: tauri::AppHandle,
+    source: Option<String>,
+    version: String,
+) -> Result<serde_json::Value, String> {
+    let src = source.unwrap_or_else(|| {
+        crate::settings::load_desktop_settings().runtime_source
+            .unwrap_or_else(|| "github".into())
+    });
+    crate::runtime::registry::download_and_install(&app, &version).await?;
+    crate::runtime::registry::record_installed(
+        &app,
+        crate::runtime::registry::InstalledRuntime {
+            version: version.clone(),
+            source: src.clone(),
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        },
+    );
+    Ok(serde_json::json!({ "ok": true, "version": version }))
+}
+
+/// 运行时下载进度（前端轮询；dsh 页面是 remote origin，event.listen 不可用）。
+#[tauri::command]
+pub(crate) fn runtime_download_status() -> serde_json::Value {
+    crate::runtime::registry::runtime_download_status()
+}
+
+/// 删除一个已下载的运行时（内置/正在使用的不允许删）。
+#[tauri::command]
+pub(crate) fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
+    let current = crate::settings::load_desktop_settings().dsh_runtime;
+    if current.as_deref() == Some(version.as_str()) {
+        return Err(format!("{version} 正在使用，请先切换到其他版本"));
+    }
+    if crate::runtime::registry::builtin_version(&app).as_deref() == Some(version.as_str()) {
+        return Err(format!("{version} 是内置版本，不可删除"));
+    }
+    crate::runtime::registry::remove_installed(&app, &version);
+    Ok(())
+}
 #[cfg(test)]
 mod fuse_doctor_tests {
     // 复现用户实测「点运行体检无结果」：直接调命令函数，看 panic/异常
