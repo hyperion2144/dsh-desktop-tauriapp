@@ -189,6 +189,12 @@
           "markdownDescription": "下载管理器：取消任务并清理临时文件"
         },
         {
+          "description": "启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复",
+          "type": "string",
+          "const": "allow-check-startup-needed",
+          "markdownDescription": "启动检查：前端加载后调用，返回是否需要 profile 选择或完整性修复"
+        },
+        {
           "description": "允许加载页切换兼容/高级接入模式",
           "type": "string",
           "const": "allow-choose-desktop-mode",
@@ -199,6 +205,24 @@
           "type": "string",
           "const": "allow-clear-finished-downloads",
           "markdownDescription": "下载管理器：清空已完成任务记录"
+        },
+        {
+          "description": "启动时用户选择 profile（存量安装 + active_profile 未设）",
+          "type": "string",
+          "const": "allow-confirm-startup-profile",
+          "markdownDescription": "启动时用户选择 profile（存量安装 + active_profile 未设）"
+        },
+        {
+          "description": "桌面设置面板：create_profile_flow_command（#90）",
+          "type": "string",
+          "const": "allow-create-profile-flow-command",
+          "markdownDescription": "桌面设置面板：create_profile_flow_command（#90）"
+        },
+        {
+          "description": "桌面设置面板：下载并安装 dsh 运行时（#95）",
+          "type": "string",
+          "const": "allow-download-runtime",
+          "markdownDescription": "桌面设置面板：下载并安装 dsh 运行时（#95）"
         },
         {
           "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
@@ -231,6 +255,12 @@
           "markdownDescription": "下载管理器：读取并发上限设置"
         },
         {
+          "description": "桌面设置面板：get_dsh_source（#90）",
+          "type": "string",
+          "const": "allow-get-dsh-source",
+          "markdownDescription": "桌面设置面板：get_dsh_source（#90）"
+        },
+        {
           "description": "允许查询 dsh 服务状态（侧边栏状态标识）",
           "type": "string",
           "const": "allow-get-dsh-status",
@@ -247,6 +277,12 @@
           "type": "string",
           "const": "allow-get-mode-prompt-needed",
           "markdownDescription": "允许加载页轮询模式选择提示状态"
+        },
+        {
+          "description": "dsh 启动后取回启动时选择的 profile，前端通过 nsSave 持久化",
+          "type": "string",
+          "const": "allow-get-pending-active-profile",
+          "markdownDescription": "dsh 启动后取回启动时选择的 profile，前端通过 nsSave 持久化"
         },
         {
           "description": "允许查询代理设置与当前生效预览（设置表单回显）",
@@ -273,10 +309,22 @@
           "markdownDescription": "下载管理器：读取任务列表快照"
         },
         {
+          "description": "桌面设置面板：list_profile_ports（#90）",
+          "type": "string",
+          "const": "allow-list-profile-ports",
+          "markdownDescription": "桌面设置面板：list_profile_ports（#90）"
+        },
+        {
           "description": "允许读取插件保险丝隔离名单",
           "type": "string",
           "const": "allow-list-quarantine",
           "markdownDescription": "允许读取插件保险丝隔离名单"
+        },
+        {
+          "description": "桌面设置面板：运行时版本目录/已装列表（#95）",
+          "type": "string",
+          "const": "allow-list-runtime-catalog",
+          "markdownDescription": "桌面设置面板：运行时版本目录/已装列表（#95）"
         },
         {
           "description": "允许 WebView initialization_script 把 console.* 写入 ~/.dsh/dsh-desktop-webview.log",
@@ -289,6 +337,18 @@
           "type": "string",
           "const": "allow-log-diag",
           "markdownDescription": "允许桌面 client 把诊断信息写入应用日志"
+        },
+        {
+          "description": "桌面设置面板：migrate_profile（#88 profile 迁移）",
+          "type": "string",
+          "const": "allow-migrate-profile",
+          "markdownDescription": "桌面设置面板：migrate_profile（#88 profile 迁移）"
+        },
+        {
+          "description": "桌面设置面板：migration_status（#90 迁移进度条）",
+          "type": "string",
+          "const": "allow-migration-status",
+          "markdownDescription": "桌面设置面板：migration_status（#90 迁移进度条）"
         },
         {
           "description": "允许在外链点击/导航守卫中通过系统默认浏览器/应用打开 http/https/mailto/tel（桌面壳）",
@@ -333,6 +393,12 @@
           "markdownDescription": "桌面设置面板：remove_remote_address"
         },
         {
+          "description": "桌面设置面板：删除已下载的 dsh 运行时（#95）",
+          "type": "string",
+          "const": "allow-remove-runtime",
+          "markdownDescription": "桌面设置面板：删除已下载的 dsh 运行时（#95）"
+        },
+        {
           "description": "允许触发插件修复（dsh plugin add 重装）",
           "type": "string",
           "const": "allow-repair-plugin",
@@ -369,6 +435,12 @@
           "markdownDescription": "允许运行插件保险丝环境体检"
         },
         {
+          "description": "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）",
+          "type": "string",
+          "const": "allow-runtime-download-status",
+          "markdownDescription": "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）"
+        },
+        {
           "description": "下载管理器：blob 分块写入（base64）",
           "type": "string",
           "const": "allow-save-blob-chunk",
@@ -399,10 +471,22 @@
           "markdownDescription": "下载管理器：调整并发上限（写 settings.yaml）"
         },
         {
+          "description": "桌面设置面板：set_dsh_source（#90）",
+          "type": "string",
+          "const": "allow-set-dsh-source",
+          "markdownDescription": "桌面设置面板：set_dsh_source（#90）"
+        },
+        {
           "description": "桌面设置面板：set_local_port",
           "type": "string",
           "const": "allow-set-local-port",
           "markdownDescription": "桌面设置面板：set_local_port"
+        },
+        {
+          "description": "桌面设置面板：set_profile_port（#90）",
+          "type": "string",
+          "const": "allow-set-profile-port",
+          "markdownDescription": "桌面设置面板：set_profile_port（#90）"
         },
         {
           "description": "下载管理器：blob 下载开始（弹保存框，返回任务 id）",
@@ -415,6 +499,12 @@
           "type": "string",
           "const": "allow-switch-profile-command",
           "markdownDescription": "桌面设置面板：switch_profile_command"
+        },
+        {
+          "description": "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）",
+          "type": "string",
+          "const": "allow-task-status",
+          "markdownDescription": "桌面设置面板：通用长任务状态轮询（#95 拒绝静默：新建/迁移任务卡）"
         },
         {
           "description": "允许对代理地址做 TCP 连通性测试（设置表单测试按钮）",
