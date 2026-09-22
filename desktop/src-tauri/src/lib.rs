@@ -247,10 +247,6 @@ pub fn run() {
             downloads: download::DownloadManager::new(),
         })
         .setup(|app| {
-            // #95 v0.1.7：壳私有设置路径初始化（app_data/desktop-settings.json）
-            if let Ok(dir) = app.path().app_data_dir() {
-                settings::init_app_data_dir(dir);
-            }
             // #72：主窗口由代码创建（不再走 tauri.conf.json 声明）以挂载下载处理器
             // ——wry 无 handler 时 macOS WKWebView 会静默取消所有下载。
             let dl_app = app.handle().clone();

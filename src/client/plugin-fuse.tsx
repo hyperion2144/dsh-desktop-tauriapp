@@ -222,29 +222,20 @@ function FusePanel(): React.ReactElement {
       }
     })()
 
-    // 2. 设置（连接 RPC get；失败回退默认值）
+    // 2. 设置（#95 收尾：Tauri IPC 直连 Rust 单写者，不再经已删除的宿主设置 RPC；失败回退默认值）
     void (async () => {
-      if (!fuseConnection) {
-        setSettings(DEFAULT_SETTINGS)
-        return
-      }
       try {
-        const r = await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'get', {})
+        const v = await invoke<Record<string, unknown>>('get_quarantine_settings')
         if (cancelled) return
-        if (r?.ok && r.value && typeof r.value === 'object') {
-          const v = r.value as Record<string, unknown>
-          setSettings({
-            first_party_protection: (v.quarantine_first_party_protection as boolean) ?? true,
-            exclude: (v.quarantine_exclude as string[]) ?? [],
-            max_retries: (v.quarantine_max_retries as number) ?? 2,
-            ai_provider: (v.ai_provider as string) ?? 'deepseek',
-            ai_model: (v.ai_model as string) ?? '',
-            ai_base_url: (v.ai_base_url as string) ?? '',
-            ai_key_env: (v.ai_key_env as string) ?? '',
-          })
-        } else {
-          setSettings(DEFAULT_SETTINGS)
-        }
+        setSettings({
+          first_party_protection: (v.first_party_protection as boolean) ?? true,
+          exclude: (v.exclude as string[]) ?? [],
+          max_retries: (v.max_retries as number) ?? 2,
+          ai_provider: (v.ai_provider as string) ?? 'deepseek',
+          ai_model: (v.ai_model as string) ?? '',
+          ai_base_url: (v.ai_base_url as string) ?? '',
+          ai_key_env: (v.ai_key_env as string) ?? '',
+        })
       } catch {
         if (cancelled) return
         setSettings(DEFAULT_SETTINGS)
@@ -286,21 +277,18 @@ function FusePanel(): React.ReactElement {
   // ── 动作 ──
 
   const saveSettings = React.useCallback(async (next: FuseSettings): Promise<void> => {
-    if (!fuseConnection) {
-      setNoticeMsg('设置保存失败：connection 不可用（非桌面壳环境）')
-      return
-    }
     try {
-      const r = await fuseConnection.rpc.call('/dsh-desktop-fuse-settings', 'save', {
-        patch: {
-          quarantine_first_party_protection: next.first_party_protection,
-          quarantine_exclude: next.exclude,
-          quarantine_max_retries: next.max_retries,
-          ai_provider: next.ai_provider || 'deepseek',
-          ai_model: next.ai_model || '',
-        },
+      // #95 收尾：走壳自己的 Tauri IPC（Rust 单写者持久化）；面板注册已有 hasIpc 守卫。
+      const r = await invoke<{ ok: boolean; error?: string }>('save_quarantine_settings', {
+        firstPartyProtection: next.first_party_protection,
+        exclude: next.exclude,
+        maxRetries: next.max_retries,
+        aiProvider: next.ai_provider || 'deepseek',
+        aiModel: next.ai_model || '',
+        aiBaseUrl: next.ai_base_url || '',
+        aiKeyEnv: next.ai_key_env || '',
       })
-      if (!r?.ok) throw new Error(r?.error?.message ?? '保存被拒绝')
+      if (!r?.ok) throw new Error(r?.error ?? '保存被拒绝')
     } catch (err) {
       setNoticeMsg(`设置保存失败：${String(err)}`)
     }

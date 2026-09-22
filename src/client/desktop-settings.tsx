@@ -199,7 +199,7 @@ const DANGER_MSG_STYLE: React.CSSProperties = {
 
 // ── 持久化通道（nsSave / nsGet）──
 // #95 v0.1.7：dsh 废除 settings.yaml 插件命名空间——壳设置搬出 dsh，
-// 走壳自己的 Tauri IPC（Rust 单写者，app_data/desktop-settings.json），不再经宿主 RPC。
+// 走壳自己的 Tauri IPC（Rust 单写者，$DSH_HOME/desktop-settings.json），不再经宿主 RPC。
 async function nsSave(patch: Record<string, unknown>): Promise<void> {
   await invoke('save_desktop_settings', { patch })
 }

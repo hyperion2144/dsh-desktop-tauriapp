@@ -73,23 +73,11 @@ pub struct DesktopSettings {
     pub runtime_github_repo: Option<String>,
 }
 
-/// 壳私有设置文件路径（app_data/desktop-settings.json）。
-/// app_data 目录由壳启动时初始化（OnceLock 全局缓存，静态调用点免传 AppHandle）；
-/// 未初始化时退回 dsh_home()（单测场景）——两处都保证路径稳定。
-static APP_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// 初始化全局 app_data 目录（lib.rs setup 调一次；幂等）。
-pub fn init_app_data_dir(dir: PathBuf) {
-    let _ = APP_DATA_DIR.set(dir);
-}
-
-fn app_data_base() -> PathBuf {
-    APP_DATA_DIR.get().cloned().unwrap_or_else(|| dsh_home())
-}
-
-/// 壳私有设置文件（#95 v0.1.7：搬出 dsh settings.yaml）。
+/// 壳私有设置文件（#95 v0.1.7 搬出 dsh settings.yaml；收尾修正正位）：
+/// $DSH_HOME/desktop-settings.json 单一源（随 DSH_HOME 走、支持 ~ 展开）。
+/// 曾短暂落在 app_data/（d52b22d），按用户拍板不做遗留副本迁移清理，此后只认正位。
 pub fn settings_path() -> PathBuf {
-    app_data_base().join("desktop-settings.json")
+    dsh_home().join("desktop-settings.json")
 }
 
 /// 旧 settings.yaml 路径（仅一次性迁移读取，永不写入）。
@@ -516,5 +504,12 @@ mod tests {
     assert_eq!(FRESH_DEFAULT_PROFILE, "desktop");
   }
 
+
+  #[test]
+  fn settings_path_pins_dsh_home_single_source() {
+    // #95 收尾：壳设置唯一正位 $DSH_HOME/desktop-settings.json（不再走 app_data），
+    // 锁死该不变量，防止路径再次分叉出第二个源。
+    assert_eq!(settings_path(), dsh_home().join("desktop-settings.json"));
+  }
 
 }

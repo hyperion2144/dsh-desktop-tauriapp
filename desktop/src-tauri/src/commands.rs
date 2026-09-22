@@ -1004,7 +1004,8 @@ pub(crate) fn get_quarantine_settings() -> serde_json::Value {
     })
 }
 
-/// 存保险丝设置（写 settings.yaml 的 dsh-desktop-tauriapp: 键）。
+/// 存保险丝设置（#95 收尾：Rust 单写者直写 $DSH_HOME/desktop-settings.json；
+/// #90 时代「client→插件→dsh settings 服务持久化」的链路已随 v0.1.7 拆除）。
 #[tauri::command]
 pub(crate) fn save_quarantine_settings(
     first_party_protection: bool,
@@ -1019,16 +1020,20 @@ pub(crate) fn save_quarantine_settings(
     s.quarantine_first_party_protection = Some(first_party_protection);
     s.quarantine_exclude = Some(exclude);
     s.quarantine_max_retries = Some(max_retries.clamp(0, 5));
+    // provider id 来自 dsh llm 目录（deepseek/minimax-cn/…）或 custom（base_url+key_env 覆盖）；
+    // 不做白名单——旧过滤曾把 minimax-cn 静默改写成 deepseek。解读路由缺口见 #96。
     s.ai_provider = Some(
         ai_provider
-            .filter(|p| p == "deepseek" || p == "custom")
+            .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| "deepseek".into()),
     );
     s.ai_model = ai_model.filter(|m| !m.trim().is_empty());
     s.ai_base_url = ai_base_url.filter(|b| !b.trim().is_empty());
     s.ai_key_env = ai_key_env.filter(|k| !k.trim().is_empty());
-    // #90：持久化由 client→插件→dsh settings 服务承担
-    serde_json::json!({ "ok": true })
+    match crate::settings::save_desktop_settings(&s) {
+        Ok(()) => serde_json::json!({ "ok": true }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    }
 }
 
 
