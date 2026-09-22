@@ -1143,21 +1143,17 @@ mod tests {
         // 排除项没过来
         assert!(!dst.join("cordis.yml").exists());
         assert!(!dst.join("run.lock").exists());
+        // node_modules 整体排除（#95：迁移不复制，目标用 pnpm install 重建）
+        assert!(!dst.join("node_modules").exists());
         // 正常内容在
-        assert!(dst.join("node_modules/pkg/index.js").is_file());
+        assert!(dst.join("package.json").is_file());
         // bundles 校验可读且一致
         assert_eq!(
             profile_bundles(&src),
             Some(vec!["@deepseek-ai/dsh-base".to_string()])
         );
         assert_eq!(profile_bundles(&src), profile_bundles(&dst));
-        // 符号链接重建（unix）
-        #[cfg(unix)]
-        {
-            let l = dst.join("node_modules/.bin/pkg-link");
-            assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
-            assert_eq!(std::fs::read_link(&l).unwrap(), std::path::PathBuf::from("../pkg"));
-        }
+        // 树内符号链接随 node_modules 排除，不重建（重建发生在 pnpm install 后）
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
