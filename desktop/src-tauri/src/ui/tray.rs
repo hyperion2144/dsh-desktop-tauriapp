@@ -1,6 +1,6 @@
 //! 系统托盘模块。
 //!
-//! 菜单构建、模式切换重启、标题栏形态切换、重启流程编排。
+//! 菜单构建、模式切换重启、标题栏形态切换、重启流程编排、运行时版本切换（#98）。
 //! 迁移自 lib.rs 功能区域（tray）。
 
 use std::sync::atomic::Ordering;
@@ -23,6 +23,11 @@ use crate::{
     STATUS_RESTARTING,
 };
 use crate::settings::{configured_profile, port_for_profile};
+
+/// 托盘运行时目录缓存（build_tray 后异步拉取；static 免动 DshState 三处构造点）。
+/// (version, channel) 列表；None = 尚未拉取过（菜单仅显示本地 内置+已装 部分）。
+static RUNTIME_CATALOG: std::sync::Mutex<Option<Vec<(String, String)>>> =
+    std::sync::Mutex::new(None);
 
 /// 按当前接入模式构建托盘菜单（含「切换模式」项，标签显示当前模式）。
 pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
@@ -51,10 +56,38 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .text("new-profile", "新建 Profile…")
         .text("migrate-profile", "迁移 Profile…")
         .build()?;
+    // 运行时版本子菜单（#98）：内置 + 已装即时列出（本地数据）；目录未装项经异步缓存补充。
+    let builtin_ver = crate::runtime::registry::builtin_version(app);
+    let installed = crate::runtime::registry::list_installed(app);
+    let selected = crate::settings::load_desktop_settings().dsh_runtime;
+    let dl = {
+        let st = crate::runtime::registry::runtime_download_status();
+        let active = st.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+        if active {
+            st.get("version").and_then(|v| v.as_str()).map(String::from)
+        } else {
+            None
+        }
+    };
+    let catalog = RUNTIME_CATALOG.lock().unwrap().clone();
+    let mut rsub = tauri::menu::SubmenuBuilder::with_id(app, "runtime-menu", "运行时版本");
+    for (id, text) in runtime_menu_items(
+        builtin_ver.as_deref(),
+        &installed,
+        selected.as_deref(),
+        catalog.as_deref(),
+        dl.as_deref(),
+    ) {
+        rsub = rsub.text(&id, &text);
+    }
+    let runtime_sub = rsub
+        .separator()
+        .text("runtime-more", "更多版本（设置页）…")
+        .build()?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(app, &[&show, &pet, &profile_sub, &restart, &toggle, &quit])?)
+    Ok(Menu::with_items(app, &[&show, &pet, &profile_sub, &runtime_sub, &restart, &toggle, &quit])?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -96,6 +129,19 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 let name = id.strip_prefix("open-profile-").unwrap_or("").to_string();
                 crate::ui::multiwin::open_profile_window(app, &name);
             }
+            "runtime-builtin" => switch_runtime(app, None),
+            "runtime-more" => {
+                spawn_fetch_catalog(app);
+                show_main(app);
+            }
+            id if id.starts_with("runtime-switch-") => {
+                let ver = id.strip_prefix("runtime-switch-").unwrap_or("").to_string();
+                switch_runtime(app, Some(&ver));
+            }
+            id if id.starts_with("runtime-fetch-") => {
+                let ver = id.strip_prefix("runtime-fetch-").unwrap_or("").to_string();
+                fetch_runtime_and_switch(app, ver);
+            }
             "new-profile" => crate::profiles::create_profile_flow(app),
             "migrate-profile" => crate::profiles::migrate_profile_flow(app),
             "toggle-mode" => toggle_desktop_mode(app),
@@ -119,6 +165,8 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .map(|tray| {
             *app.state::<DshState>().tray.lock().unwrap() = Some(tray);
         })?;
+    // #98：托盘就绪后异步拉取运行时目录（失败静默，菜单先显示本地 内置+已装）
+    spawn_fetch_catalog(app.handle());
     Ok(())
 }
 
@@ -291,4 +339,174 @@ pub fn toggle_desktop_mode(app: &AppHandle) {
     let cur = app.state::<DshState>().mode.load(Ordering::SeqCst);
     let next = if cur == MODE_ADVANCED { MODE_COMPAT } else { MODE_ADVANCED };
     restart_dsh_in_mode(app, next, None);
+}
+
+/// 托盘切换运行时（#98）：保存 dsh_runtime（None=内置）+ 钉回 builtin 模式（对齐设置页
+/// 语义：external 模式下切版本无意义），随后重启 dsh 生效；重启流程尾部会刷新托盘。
+pub fn switch_runtime(app: &AppHandle, version: Option<&str>) {
+    let mut s = crate::settings::load_desktop_settings();
+    s.dsh_runtime = version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    s.dsh_mode = Some("builtin".into());
+    if let Err(e) = crate::settings::save_desktop_settings(&s) {
+        log::error!("[tray] 保存运行时设置失败：{e}");
+        show_notification(app, "运行时切换失败", &e);
+        return;
+    }
+    let label = s.dsh_runtime.as_deref().unwrap_or("内置版本");
+    show_notification(app, "运行时已切换", &format!("dsh {label}，正在重启服务…"));
+    restart_dsh(app);
+}
+
+/// 托盘「下载并切换」（#98）：下载安装（registry 单飞行防并发）→ 自动切换重启。
+/// 进度经系统通知反馈（托盘无进度条，详细进度在设置页）。
+fn fetch_runtime_and_switch(app: &AppHandle, version: String) {
+    let st = crate::runtime::registry::runtime_download_status();
+    if st.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let cur = st.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+        show_notification(app, "运行时下载中", &format!("正在下载 dsh {cur}，完成后可在托盘切换"));
+        return;
+    }
+    show_notification(app, "开始下载运行时", &format!("dsh {version} 安装中，完成后自动切换并重启"));
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let src = crate::settings::load_desktop_settings()
+            .runtime_source
+            .unwrap_or_else(|| "github".into());
+        match crate::runtime::registry::download_and_install(&handle, &version).await {
+            Ok(()) => {
+                crate::runtime::registry::record_installed(
+                    &handle,
+                    crate::runtime::registry::InstalledRuntime {
+                        version: version.clone(),
+                        source: src,
+                        installed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    },
+                );
+                refresh_tray_mode(&handle);
+                switch_runtime(&handle, Some(&version));
+            }
+            Err(e) => {
+                log::error!("[tray] 运行时 {version} 下载失败：{e}");
+                show_notification(&handle, "运行时下载失败", &e);
+            }
+        }
+    });
+}
+
+/// 异步拉取运行时目录进缓存并刷新托盘（build_tray 后一次；「更多版本」点击时重拉）。
+/// 失败仅记日志——菜单仍显示本地 内置+已装 部分。
+pub fn spawn_fetch_catalog(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let s = crate::settings::load_desktop_settings();
+        let src = s.runtime_source.unwrap_or_else(|| "github".into());
+        match crate::runtime::registry::fetch_catalog(&src, s.runtime_github_repo.as_deref()).await {
+            Ok(entries) => {
+                *RUNTIME_CATALOG.lock().unwrap() =
+                    Some(entries.into_iter().map(|e| (e.version, e.channel)).collect());
+                refresh_tray_mode(&handle);
+            }
+            Err(e) => log::warn!("[tray] 运行时目录拉取失败（菜单仅显示本地已装）：{e}"),
+        }
+    });
+}
+
+/// 生成「运行时版本」子菜单条目（纯函数，单测锁定语义）。
+/// 返回 (id, text)：内置项 + 已装项（● 当前选中 / ○ 其余，与内置同号去重）
+/// + 目录未装项（↓ 下载并切换，至多 5 条，下载中标注）。
+pub(crate) fn runtime_menu_items(
+    builtin: Option<&str>,
+    installed: &[crate::runtime::registry::InstalledRuntime],
+    selected: Option<&str>,
+    catalog: Option<&[(String, String)]>,
+    downloading: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut items = Vec::new();
+    let sel = selected.filter(|s| !s.is_empty());
+    let builtin_on = sel.is_none() || sel == builtin;
+    let builtin_label = match builtin {
+        Some(v) => format!("内置 {v}（随安装包）"),
+        None => "内置（随安装包，版本未知）".to_string()
+    };
+    items.push((
+        "runtime-builtin".into(),
+        format!("{}{builtin_label}", if builtin_on { "● " } else { "○ " }),
+    ));
+    for inst in installed {
+        if Some(inst.version.as_str()) == builtin {
+            continue;
+        }
+        let on = sel == Some(inst.version.as_str());
+        items.push((
+            format!("runtime-switch-{}", inst.version),
+            format!("{}{}", if on { "● " } else { "○ " }, inst.version),
+        ));
+    }
+    if let Some(cats) = catalog {
+        let mut shown = 0;
+        for (ver, channel) in cats {
+            if shown >= 5 {
+                break;
+            }
+            if Some(ver.as_str()) == builtin || installed.iter().any(|i| i.version == *ver) {
+                continue;
+            }
+            shown += 1;
+            let dl = if downloading == Some(ver.as_str()) { "（下载中…）" } else { "" };
+            items.push((
+                format!("runtime-fetch-{ver}"),
+                format!("↓ 下载并切换 {ver}（{channel}）{dl}"),
+            ));
+        }
+    }
+    items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::runtime_menu_items;
+    use crate::runtime::registry::InstalledRuntime;
+
+    fn inst(ver: &str) -> InstalledRuntime {
+        InstalledRuntime { version: ver.into(), source: "github".into(), installed_at: 0 }
+    }
+
+    #[test]
+    fn builtin_default_when_no_selection() {
+        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], None, None, None);
+        assert_eq!(items[0].0, "runtime-builtin");
+        assert!(items[0].1.contains("● 内置 0.1.6"));
+        assert!(items[1].1.starts_with("○ 0.1.7"));
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn installed_selection_marks_radio() {
+        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], Some("0.1.7"), None, None);
+        assert!(items[0].1.starts_with("○"));
+        assert!(items[1].1.starts_with("● 0.1.7"));
+    }
+
+    #[test]
+    fn catalog_dedupes_and_caps_at_five() {
+        // 8 个目录项：0.1.6=内置、0.1.7=已装 去重；其余 6 条截为 5
+        let vers = ["0.1.6", "0.1.7", "0.2.0", "0.2.1", "0.2.2", "0.2.3", "0.2.4", "0.3.0"];
+        let cats: Vec<(String, String)> =
+            vers.iter().map(|v| (v.to_string(), "latest".into())).collect();
+        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], None, Some(&cats), None);
+        let fetch: Vec<_> = items.iter().filter(|(id, _)| id.starts_with("runtime-fetch-")).collect();
+        assert_eq!(fetch.len(), 5, "未装目录项应截为 5 条：{items:?}");
+        assert!(!fetch.iter().any(|(id, _)| id.contains("0.3.0")), "第 6 条应被截断");
+    }
+
+    #[test]
+    fn downloading_version_annotated() {
+        let cats = vec![("0.2.0".to_string(), "alpha".to_string())];
+        let items = runtime_menu_items(None, &[], None, Some(&cats), Some("0.2.0"));
+        assert!(items[1].1.contains("下载中"));
+        assert!(items[1].1.contains("alpha"));
+    }
 }
