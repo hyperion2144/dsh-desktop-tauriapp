@@ -447,6 +447,12 @@
           "markdownDescription": "下载管理器：blob 分块写入（base64）"
         },
         {
+          "description": "壳设置保存（#95 v0.1.7：私有 JSON，Rust 单写者，替代 dsh settings RPC）",
+          "type": "string",
+          "const": "allow-save-desktop-settings",
+          "markdownDescription": "壳设置保存（#95 v0.1.7：私有 JSON，Rust 单写者，替代 dsh settings RPC）"
+        },
+        {
           "description": "允许保存代理设置（托盘代理设置表单提交）",
           "type": "string",
           "const": "allow-save-proxy-settings",

@@ -44,6 +44,7 @@
     "allow-save-quarantine-settings",
     "allow-list-ai-providers",
     "allow-get-desktop-settings-data",
+    "allow-save-desktop-settings",
     "allow-add-remote-address",
     "allow-remove-remote-address",
     "allow-select-remote-address",

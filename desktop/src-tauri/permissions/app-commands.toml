@@ -133,6 +133,10 @@ description = "桌面设置面板：get_desktop_settings_data"
 commands = { allow = ["get_desktop_settings_data"] }
 
 [[permission]]
+identifier = "allow-save-desktop-settings"
+description = "壳设置保存（#95 v0.1.7：私有 JSON，Rust 单写者，替代 dsh settings RPC）"
+commands = { allow = ["save_desktop_settings"] }
+[[permission]]
 identifier = "allow-add-remote-address"
 description = "桌面设置面板：add_remote_address"
 commands = { allow = ["add_remote_address"] }

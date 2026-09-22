@@ -695,6 +695,27 @@ pub(crate) fn list_ai_providers() -> serde_json::Value {
     serde_json::json!({ "providers": providers })
 }
 
+
+/// 壳设置保存（#95 v0.1.7：搬出 dsh settings.yaml，Rust 单写者）。
+/// client 的 nsSave 通道：invoke('save_desktop_settings', {patch}) → 读改写私有 JSON。
+#[tauri::command]
+pub(crate) fn save_desktop_settings(patch: serde_json::Value) -> Result<(), String> {
+    let mut current = load_desktop_settings();
+    if let Some(obj) = patch.as_object() {
+        let merged = serde_json::to_value(&current)
+            .map_err(|e| format!("序列化当前设置失败：{e}"))?;
+        if let Some(mut m) = Some(merged) {
+            if let Some(mobj) = m.as_object_mut() {
+                for (k, v) in obj {
+                    mobj.insert(k.clone(), v.clone());
+                }
+            }
+            current = serde_json::from_value(m)
+                .map_err(|e| format!("合并后的设置不合法：{e}"))?;
+        }
+    }
+    crate::settings::save_desktop_settings(&current)
+}
 /// 桌面设置面板：一次性读取服务地址/端口/Profile 数据。
 #[tauri::command]
 pub(crate) fn get_desktop_settings_data() -> serde_json::Value {

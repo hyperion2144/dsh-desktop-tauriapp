@@ -197,20 +197,18 @@ const DANGER_MSG_STYLE: React.CSSProperties = {
   color: 'var(--dsw-alias-state-danger-primary,#e5534b)',
 }
 
-// ── 持久化通道（nsSave / nsGet）：宿主 index.js 注册的 /dsh-desktop-fuse-settings 命名空间 RPC。──
+// ── 持久化通道（nsSave / nsGet）──
+// #95 v0.1.7：dsh 废除 settings.yaml 插件命名空间——壳设置搬出 dsh，
+// 走壳自己的 Tauri IPC（Rust 单写者，app_data/desktop-settings.json），不再经宿主 RPC。
 async function nsSave(patch: Record<string, unknown>): Promise<void> {
-  if (!nsRpc) throw new Error('dsh settings 通道不可用（需桌面壳环境）')
-  const r = await nsRpc.rpc.call(NS_CHANNEL, 'save', { patch })
-  if (!r?.ok) throw new Error(r?.error?.message ?? '保存被拒绝')
+  await invoke('save_desktop_settings', { patch })
 }
 
 async function nsGet(): Promise<Record<string, unknown>> {
-  if (!nsRpc) throw new Error('dsh settings 通道不可用（需桌面壳环境）')
-  const r = await nsRpc.rpc.call(NS_CHANNEL, 'get', {})
-  if (!r?.ok) throw new Error(r?.error?.message ?? '读取被拒绝')
-  return (r.value && typeof r.value === 'object' ? r.value : {}) as Record<string, unknown>
+  // 读侧走既有 get_desktop_settings_data 的设置段（同一 Rust 读源）
+  const d = await invoke<{ settings?: Record<string, unknown> }>('get_desktop_settings_data')
+  return (d.settings && typeof d.settings === 'object' ? d.settings : {}) as Record<string, unknown>
 }
-
 // 地址归一化（对齐 Rust normalize_remote_url 核心规则）：完整 URL 或 host[:port]。
 function normalizeRemote(input: string): string | null {
   const t = input.trim()

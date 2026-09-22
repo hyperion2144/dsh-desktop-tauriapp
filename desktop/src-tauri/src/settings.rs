@@ -7,8 +7,11 @@
 use std::path::PathBuf;
 
 
-/// 桌面壳专属设置：持久化于 $DSH_HOME/settings.yaml 的 `dsh-desktop-tauriapp:` 顶层键下。
-/// 只读写该键，文件其余内容（dsh 自身设置等）一律原样保留；原子写；解析失败先备份。
+/// 桌面壳专属设置：持久化于壳私有文件（app_data/desktop-settings.json）。
+/// #95 v0.1.7 适配：dsh 废除 settings.yaml 插件命名空间（改 Profile 插件配置），
+/// 壳设置彻底搬出 dsh 体系——壳是注入式插件，脱离壳后这些设置不应污染 dsh。
+/// 首次启动从旧 settings.yaml 的 dsh-desktop-tauriapp: 块一次性迁移（不碰该文件）。
+/// Rust 单写者：读 + 写都归壳；client 经 Tauri IPC（save_desktop_settings）。
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct DesktopSettings {
@@ -70,10 +73,29 @@ pub struct DesktopSettings {
     pub runtime_github_repo: Option<String>,
 }
 
-pub fn settings_path() -> PathBuf {
-    dsh_home().join("settings.yaml")
+/// 壳私有设置文件路径（app_data/desktop-settings.json）。
+/// app_data 目录由壳启动时初始化（OnceLock 全局缓存，静态调用点免传 AppHandle）；
+/// 未初始化时退回 dsh_home()（单测场景）——两处都保证路径稳定。
+static APP_DATA_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// 初始化全局 app_data 目录（lib.rs setup 调一次；幂等）。
+pub fn init_app_data_dir(dir: PathBuf) {
+    let _ = APP_DATA_DIR.set(dir);
 }
 
+fn app_data_base() -> PathBuf {
+    APP_DATA_DIR.get().cloned().unwrap_or_else(|| dsh_home())
+}
+
+/// 壳私有设置文件（#95 v0.1.7：搬出 dsh settings.yaml）。
+pub fn settings_path() -> PathBuf {
+    app_data_base().join("desktop-settings.json")
+}
+
+/// 旧 settings.yaml 路径（仅一次性迁移读取，永不写入）。
+fn legacy_settings_yaml() -> PathBuf {
+    dsh_home().join("settings.yaml")
+}
 /// dsh 数据目录（$DSH_HOME 或 ~/.dsh）。
 ///
 /// 注意：`DSH_HOME` 支持 `~` 前缀展开——dsh 的 resolveDshHome() 会展开（#56），
@@ -104,10 +126,43 @@ pub(crate) fn dsh_home() -> PathBuf {
     }
     home_base().join(".dsh")
 }
-/// 读取桌面壳设置（文件缺失或 `dsh-desktop-tauriapp:` 键缺失 → 默认值；解析失败 → 默认值）。
+/// 读取桌面壳设置（壳私有 desktop-settings.json）。
+/// 首次启动（私有文件不存在）：从旧 settings.yaml 的 dsh-desktop-tauriapp:/desktop:
+/// 块一次性迁移到私有文件（只读 yaml，永不写入）；此后永远只读私有文件。
+/// v0.1.7 dsh 废除 settings.yaml 插件命名空间后，壳设置与 dsh 完全解耦（#95）。
 pub fn load_desktop_settings() -> DesktopSettings {
     let path = settings_path();
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<DesktopSettings>(&text) {
+            return v;
+        }
+        // 私有文件损坏：备份后回退默认（下文迁移逻辑会重建）
+        let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
+        log::warn!("[settings] 私有设置文件损坏，已备份重建");
+    }
+    // 一次性迁移：旧 settings.yaml 的壳块 → 私有 JSON
+    let migrated = migrate_from_legacy_yaml();
+    let _ = save_desktop_settings(&migrated);
+    migrated
+}
+
+/// 壳单写者：写私有 desktop-settings.json（原子写：先 temp 后 rename）。
+pub fn save_desktop_settings(s: &DesktopSettings) -> Result<(), String> {
+    let path = settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建设置目录失败：{e}"))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(s).map_err(|e| format!("序列化失败：{e}"))?;
+    std::fs::write(&tmp, text).map_err(|e| format!("写设置失败：{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换设置失败：{e}"))?;
+    Ok(())
+}
+
+/// 从旧 settings.yaml 读取壳块（dsh-desktop-tauriapp: 或 legacy desktop:）。
+/// 只读不写；返回默认值当无块/解析失败。
+fn migrate_from_legacy_yaml() -> DesktopSettings {
+    let Ok(text) = std::fs::read_to_string(legacy_settings_yaml()) else {
         return DesktopSettings::default();
     };
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
@@ -118,7 +173,16 @@ pub fn load_desktop_settings() -> DesktopSettings {
         .or_else(|| legacy_desktop_block(&value))
         .cloned()
         .unwrap_or(serde_yaml::Value::Null);
-    from_yaml_value(selected).unwrap_or_default()
+    let migrated = from_yaml_value(selected).unwrap_or_default();
+    if !migrated_eq_default(&migrated) {
+        log::info!("[settings] 已从旧 settings.yaml 一次性迁移壳设置到私有文件");
+    }
+    migrated
+}
+
+fn migrated_eq_default(s: &DesktopSettings) -> bool {
+    // 粗粒度判定：全字段 JSON 序列化相等即默认（仅用于迁移日志）
+    serde_json::to_string(s).ok() == serde_json::to_string(&DesktopSettings::default()).ok()
 }
 
 /// 把 YAML Value 反序列化为桌面壳设置（映射缺失字段给默认）。
