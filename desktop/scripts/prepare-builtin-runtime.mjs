@@ -5,8 +5,9 @@
 // 产物（均 gitignore，不入库）:
 //   desktop/src-tauri/resources/dsh/           dsh 依赖树（package.json + node_modules）
 //   desktop/src-tauri/binaries/dsh-node-<triple>[.exe]  Node sidecar（tauri externalBin）
-// CI: release.yml 矩阵（平台 × latest/alpha）各调一次；本地 tauri dev 无需跑（内置缺
-// 资源时自动回退外部 dsh，见 runtime/builtin.rs）。
+// CI: release.yml 各平台调一次，固定 --variant latest（#95 运行时管理后安装包单变体，
+// alpha 等其它版本应用内下载切换）；本地 tauri dev 无需跑（内置缺资源时自动回退外部 dsh，
+// 见 runtime/builtin.rs）。--variant alpha 仍可本地手动使用。
 import { execSync } from "node:child_process";
 import { rmSync, mkdirSync, writeFileSync, chmodSync, cpSync, readdirSync } from "node:fs";
 import { join, dirname, resolve, basename } from "node:path";

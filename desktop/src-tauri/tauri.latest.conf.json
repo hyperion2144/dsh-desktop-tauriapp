@@ -1,9 +1,0 @@
-{
-  "productName": "DeepSeek Harness Desktop latest",
-  "bundle": {
-    "externalBin": ["binaries/dsh-node"],
-    "resources": {
-      "resources/dsh/": "dsh/"
-    }
-  }
-}
