@@ -165,8 +165,11 @@ fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), Str
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
     }
-    // pnpm postinstall 脚本可能需要 pwsh
-    paths.push(std::path::PathBuf::from(r"C:\Program Files\PowerShell\7"));
+    // pnpm postinstall 脚本可能需要 pwsh：动态探测候选目录（存在才 push，
+    // 绝不硬塞固定字段——macOS/Linux 上 C: 冒号会让 join_paths 直接报错，#95 实测）
+    for p in pwsh_fallback_dirs() {
+        paths.push(p);
+    }
     let joined = std::env::join_paths(&paths).map_err(|e| e.to_string())?;
     let mut child = Command::new(&node)
         .arg(&pnpm)
@@ -392,6 +395,29 @@ fn builtin_tree_root(app: &tauri::AppHandle) -> std::path::PathBuf {
         }
     }
     app.path().resource_dir().map(|r| r.join("dsh")).unwrap_or_default()
+}
+
+/// pwsh 兑底目录探测（#95）：仅 Windows 返回实际存在的候选（PS7 → PS6 → 内置 5.1）；
+/// 其他平台返回空。绝不返回未经 exists 验证的硬编码字段——含平台分隔符的字段会让
+/// join_paths 在非 Windows 平台直接报错（实测新建 profile 全挂根因）。非默认安装位的
+/// pwsh 依赖用户 PATH（调用方已 extend 进来）。
+fn pwsh_fallback_dirs() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        [
+            r"C:\Program Files\PowerShell\7",
+            r"C:\Program Files\PowerShell\6",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0", // powershell.exe 5.1
+        ]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
 }
 
 /// 常备 node/pnpm shim（#95）：sidecar 可执行名是 dsh-node，pnpm 只在包内 pnpm.cjs——
@@ -992,10 +1018,9 @@ async fn migrate_profile_inner(
         path_parts.push(shim_dir);
     }
     path_parts.push(node_dir.clone());
-    // postinstall 脚本可能需要 pwsh——确保在 PATH 中
-    let pwsh_dir = std::path::PathBuf::from(r"C:\Program Files\PowerShell\7");
-    if pwsh_dir.join("pwsh.exe").exists() {
-        path_parts.push(pwsh_dir);
+    // pwsh 动态探测（存在才 push；硬编码字段在非 Windows 平台会合 join_paths 报错）
+    for p in pwsh_fallback_dirs() {
+        path_parts.push(p);
     }
     if let Some(existing) = std::env::var_os("PATH") {
         path_parts.push(std::path::PathBuf::from(existing));
