@@ -125,7 +125,7 @@ export function registerFusePanel(ctx: ClientContext): void {
         order: 30,
         label: () => '插件保险丝',
       },
-      FusePanel,
+      FusePanelSafe,
     ),
   )
 }
@@ -166,6 +166,54 @@ function usePanelStyles(): void {
 }
 
 // ── 顶层组件 ────────────────────────────────────────────────────────────
+/** 面板错误边界（#59 收尾）：面板内任何渲染异常不再让整个设置区空白——
+ *  面板内显示可读错误，并把详情写进应用日志（webview console 镜像 → dsh-desktop-webview.log）。 */
+class FuseErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    const detail = `${String(error?.message ?? '')} | ${String(info?.componentStack ?? '')}`
+    console.error('[plugin-fuse] 面板渲染异常：', detail)
+    try {
+      void invoke('log_diag', { msg: `[plugin-fuse] 面板渲染异常：${detail}` })
+    } catch {
+      /* 日志通道不可用时忽略 */
+    }
+  }
+
+  render(): React.ReactNode {
+    if (this.state.error) {
+      return (
+        <div data-plugin-fuse="1" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+          <div style={{ color: 'var(--dsw-alias-state-danger-primary,#e5534b)' }}>
+            插件保险丝面板渲染失败：{String(this.state.error.message ?? this.state.error)}
+          </div>
+          <div style={{ color: 'var(--dsw-alias-label-secondary,#9aa4b2)', marginTop: 4 }}>
+            详情已写入应用日志（~/.dsh/dsh-desktop-webview.log）
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/** 注册用包装（错误边界 + FusePanel；名字独立便于日志辨认）。 */
+function FusePanelSafe(): React.ReactElement {
+  return (
+    <FuseErrorBoundary>
+      <FusePanel />
+    </FuseErrorBoundary>
+  )
+}
+
 
 function FusePanel(): React.ReactElement {
   usePanelStyles()
