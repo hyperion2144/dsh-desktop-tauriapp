@@ -447,15 +447,21 @@ function FusePanel(): React.ReactElement {
         let r: { ok: boolean; suggestion?: string; error?: string }
         if (settings && settings.ai_provider !== 'custom' && fuseConnection) {
           const e = entries.find((x) => x.id === id)
-          const resp = await fuseConnection.rpc.call('/dsh-desktop-fuse-explain', 'run', {
-            failureType: e?.failure_type ?? '',
-            name: e?.name ?? '',
-            rawError: e?.raw_error ?? '',
-            provider: settings.ai_provider,
-            model: settings.ai_model,
-          })
+          // #121：前端超时兜底（宿主侧已有 45s 看门狗；这里 75s 兜底，避免无限 loading）
+          const resp = (await Promise.race([
+            fuseConnection.rpc.call('/dsh-desktop-fuse-explain', 'run', {
+              failureType: e?.failure_type ?? '',
+              name: e?.name ?? '',
+              rawError: e?.raw_error ?? '',
+              provider: settings.ai_provider,
+              model: settings.ai_model,
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('解读超时（75 秒无响应）')), 75000)
+            }),
+          ])) as { ok: boolean; error?: { message?: string }; value?: { ok: boolean; suggestion?: string } }
           if (!resp?.ok) throw new Error(resp?.error?.message ?? '解读被拒绝')
-          r = resp.value
+          r = resp.value as { ok: boolean; suggestion?: string }
         } else {
           r = await invoke<{ ok: boolean; suggestion?: string; error?: string }>('explain_failure', { id })
         }
