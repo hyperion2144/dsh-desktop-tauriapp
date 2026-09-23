@@ -540,6 +540,7 @@ function FusePanel(): React.ReactElement {
           profile={profile}
           repairBusy={repairBusy}
           explainText={currentEntry ? explain[currentEntry.id] : undefined}
+          explainModel={settings?.ai_model}
           repairMsg={repairMsg}
           showRaw={showRaw}
           onRepair={doRepair}
@@ -1111,6 +1112,7 @@ function QuarantineDetail({
   onExplain,
   onRestore,
   onToggleRaw,
+  explainModel,
 }: {
   entry: QuarantineEntry | undefined
   profile: string
@@ -1122,6 +1124,8 @@ function QuarantineDetail({
   onExplain: (id: string) => void
   onRestore: (id: string) => void
   onToggleRaw: () => void
+  /** 当前设置的解读模型（由 FusePanel 传入；本组件作用域内没有 settings）。 */
+  explainModel?: string
 }): React.ReactElement {
   return (
     <div
@@ -1157,7 +1161,7 @@ function QuarantineDetail({
           onExplain={onExplain}
           onRestore={onRestore}
           onToggleRaw={onToggleRaw}
-          explainModel={settings?.ai_model}
+          explainModel={explainModel}
         />
       )}
     </div>
