@@ -7,7 +7,7 @@ import { createRewriteProxy, POLYFILL, LOOPBACK_HOSTNAME_PATCH, THEME_SYNC_PATCH
 import { createDshUpstreamAuth } from './dshauth.mjs';
 import { PairingStore, createFileStorage, deviceNameFromUA } from './pairing.mjs';
 import { selectLanIPv4, buildPairLink, buildHttpPairLink, normalizeRemote } from './links.mjs';
-import { readSettingsString, writeSettingsKey, readTopLevelBlockKey } from './settings.mjs';
+import { readSettingsString, writeSettingsKey, readTopLevelBlockKey, readShellSetting, writeShellSetting } from './settings.mjs';
 import { resolveCloudflared } from './cloudflared.mjs';
 
 /** 读取桌面端 ui-theme.preference（'dark' | 'light' | 'system' | null），供注入脚本同步远程视觉。 */
@@ -622,20 +622,23 @@ function apply(ctx) {
       settingsSvc.register(NS, passthrough)
     } catch { /* 已注册（桌面壳插件先注册） */ }
   }
+  // #116：壳专属键（tunnel_url/cloudflared_bin/ws_*）的权威落点是壳的
+  // $DSH_HOME/desktop-settings.json（#95 后 dsh settings 插件命名空间与 settings.yaml 均已废除，
+  // 经它们保存只会“看似成功”而无处落盘）；旧通道仅作历史数据读取兜底。
   const readSetting = (key) => {
+    const shell = readShellSetting(key)
+    if (shell !== null && shell !== undefined) {
+      return typeof shell === 'string' ? shell : JSON.stringify(shell)
+    }
     if (settingsSvc) {
       const v = settingsSvc.get(NS)?.[key];
-      return v === undefined ? null : v;
+      if (v !== undefined && v !== null) return v;
     }
     return readSettingsString(key);
   };
   const writeSettings = async (patch) => {
-    if (settingsSvc) {
-      const ops = Object.entries(patch).map(([key, value]) => ({ op: 'set', path: [key], value }));
-      await settingsSvc.mutate(NS, ops);
-      return;
-    }
-    for (const [key, value] of Object.entries(patch)) writeSettingsKey(key, JSON.stringify(value));
+    // #116：只写壳设置 JSON；不再 mutate dsh settings 命名空间（已废除，勿回改）
+    for (const [key, value] of Object.entries(patch)) writeShellSetting(key, value);
   };
   const svc = createMobileAccessService({
     upstreamHost: '127.0.0.1',
