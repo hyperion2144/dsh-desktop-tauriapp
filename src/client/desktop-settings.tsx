@@ -343,6 +343,8 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [runtimeDownloading, setRuntimeDownloading] = useState<
     Record<string, 'downloading' | 'downloaded' | { failed: string }>
   >({})
+  // #110：卸载中的版本（行级禁用态；删除可能数秒，期间按钮显示「卸载中…」）
+  const [removingVersion, setRemovingVersion] = useState<string | null>(null)
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
   const [dlProgress, setDlProgress] = useState<{
     version: string
@@ -778,14 +780,17 @@ function DesktopSettingsPanel(): React.ReactElement {
   }
 
   const handleRemoveRuntime = (version: string): void => {
-    // #104：卸载已下载运行时，后端 remove_runtime（#95 已有）拒绝使用中/内置版本；错误文案可观测。
+    // #104/#110：卸载已下载运行时，后端 async+spawn_blocking（不阻塞 UI）；错误文案可观测。
+    if (removingVersion) return
     if (!window.confirm(`卸载运行时 dsh ${version}？将删除本地已下载文件，不可恢复。`)) return
+    setRemovingVersion(version)
     invoke('remove_runtime', { version })
       .then(() => {
         setMsg({ ok: true, text: `已卸载运行时 dsh ${version}` })
         void refreshRuntimes()
       })
       .catch((err) => setMsg({ ok: false, text: `卸载失败：${String(err)}` }))
+      .finally(() => setRemovingVersion(null))
   }
 
   const refreshData = useCallback(async (): Promise<void> => {
@@ -1203,7 +1208,7 @@ function DesktopSettingsPanel(): React.ReactElement {
                                 </PfBtn>
                                 <PfBtn
                                   variant="danger"
-                                  disabled={runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
+                                  disabled={removingVersion !== null || runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
                                   title={
                                     runtimeCatalog.selected === c.version
                                       ? '使用中的版本不可卸载，请先切换'
@@ -1213,7 +1218,7 @@ function DesktopSettingsPanel(): React.ReactElement {
                                   }
                                   onClick={() => handleRemoveRuntime(c.version)}
                                 >
-                                  卸载
+                                  {removingVersion === c.version ? '卸载中…' : '卸载'}
                                 </PfBtn>
                               </div>
                             )}

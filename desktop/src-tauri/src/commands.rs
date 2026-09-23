@@ -1139,7 +1139,9 @@ pub(crate) fn runtime_download_status() -> serde_json::Value {
 
 /// 删除一个已下载的运行时（内置/正在使用的不允许删）。
 #[tauri::command]
-pub(crate) fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
+/// #110：async + spawn_blocking——删除含大量 node_modules 的目录耗时数秒（Windows 尤甚），
+/// 同步命令会在 Tauri 主线程执行并整窗冻结。校验走同步快路径，删除进阻塞线程池。
+pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
     let current = crate::settings::load_desktop_settings().dsh_runtime;
     if current.as_deref() == Some(version.as_str()) {
         return Err(format!("{version} 正在使用，请先切换到其他版本"));
@@ -1147,7 +1149,11 @@ pub(crate) fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(
     if crate::runtime::registry::builtin_version(&app).as_deref() == Some(version.as_str()) {
         return Err(format!("{version} 是内置版本，不可删除"));
     }
-    crate::runtime::registry::remove_installed(&app, &version);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::runtime::registry::remove_installed(&app, &version);
+    })
+    .await
+    .map_err(|e| format!("删除任务异常：{e}"))?;
     Ok(())
 }
 #[cfg(test)]
