@@ -1038,7 +1038,9 @@ async fn migrate_profile_inner(
             .arg(&pnpm_cjs)
             // CI=true：防交互提示挂起（迁移重建同样在 GUI 环境跑）
             .env("CI", "true")
-            .args(["install", "--prefer-offline"])
+            // #115：CI=true 下 pnpm 默认 frozen-lockfile；迁移重建的 lockfile 常落后于
+            // package.json（用户改 link: 本地插件后未重跑 install）→ 必须显式关闭 frozen
+            .args(["install", "--prefer-offline", "--no-frozen-lockfile"])
             .current_dir(&dst_for_pnpm)
             .env("PATH", &path_for_pnpm)
             .output();
