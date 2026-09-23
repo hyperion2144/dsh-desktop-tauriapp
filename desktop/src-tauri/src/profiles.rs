@@ -270,7 +270,9 @@ pub(crate) fn run_profile_plugin_add(
             parts.push(shim_dir);
         }
         if let Some(existing) = std::env::var_os("PATH") {
-            parts.push(std::path::PathBuf::from(existing));
+            // 必须 split_paths 展开：join_paths 遇到含冒号的整串元素会 Err →
+            // unwrap_or_default 静默变空 PATH（子进程找不到 node/pnpm/git）
+            parts.extend(std::env::split_paths(&existing));
         }
         let path_env = std::env::join_paths(&parts).unwrap_or_default();
         let out = std::process::Command::new(&node)
@@ -421,6 +423,30 @@ fn pwsh_fallback_dirs() -> Vec<std::path::PathBuf> {
     {
         Vec::new()
     }
+}
+
+/// git 常见安装目录（pnpm 解析 git 依赖需要 spawn git；存在才返回，跨平台安全）。
+fn git_fallback_dirs() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        for p in [r"C:\Program Files\Git\cmd", r"C:\Program Files (x86)\Git\cmd"] {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() {
+                out.push(pb);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        for p in ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() {
+                out.push(pb);
+            }
+        }
+    }
+    out
 }
 
 /// 常备 node/pnpm shim（#95）：sidecar 可执行名是 dsh-node，pnpm 只在包内 pnpm.cjs——
@@ -1026,8 +1052,15 @@ async fn migrate_profile_inner(
     for p in pwsh_fallback_dirs() {
         path_parts.push(p);
     }
+    // git 兜底：pnpm 解析 git 依赖（如 github 源插件）需 spawn git，GUI 精简 PATH 下
+    // 必须能找到（本次用户实测：迁移重建 resolved 到 git 依赖时报 spawn git ENOENT）
+    for p in git_fallback_dirs() {
+        path_parts.push(p);
+    }
     if let Some(existing) = std::env::var_os("PATH") {
-        path_parts.push(std::path::PathBuf::from(existing));
+        // 必须 split_paths 展开：join_paths 遇含冒号的整串元素会 Err → unwrap_or_default
+        // 静默变空 PATH（pnpm 自身靠绝对路径可跑，但其子进程 git 只能靠 PATH → ENOENT）
+        path_parts.extend(std::env::split_paths(&existing));
     }
     let path_for_pnpm = std::env::join_paths(&path_parts)
         .map(|p| p.to_string_lossy().into_owned())
