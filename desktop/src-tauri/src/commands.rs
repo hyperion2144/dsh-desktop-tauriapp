@@ -727,6 +727,32 @@ pub(crate) fn list_ai_providers() -> serde_json::Value {
     serde_json::json!({ "providers": providers })
 }
 
+/// 把 patch 键写入合并对象（支持点号路径，如 `profile_ports.desktop`）。
+/// 原实现只做顶层字面键插入：`"profile_ports.desktop"` 成为未知字段，反序列化时被
+/// 静默丢弃——前端按点号路径保存的设置（Profile 端口）因此保存无效（用户实测）。
+fn insert_patch_path(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    value: serde_json::Value,
+) {
+    match path.split_once('.') {
+        None => {
+            root.insert(path.to_string(), value);
+        }
+        Some((head, rest)) => {
+            let entry = root
+                .entry(head.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = entry.as_object_mut() {
+                insert_patch_path(map, rest, value);
+            }
+        }
+    }
+}
+
 
 /// 壳设置保存（#95 v0.1.7：搬出 dsh settings.yaml，Rust 单写者）。
 /// client 的 nsSave 通道：invoke('save_desktop_settings', {patch}) → 读改写私有 JSON。
@@ -739,7 +765,7 @@ pub(crate) fn save_desktop_settings(patch: serde_json::Value) -> Result<(), Stri
         if let Some(mut m) = Some(merged) {
             if let Some(mobj) = m.as_object_mut() {
                 for (k, v) in obj {
-                    mobj.insert(k.clone(), v.clone());
+                    insert_patch_path(mobj, k, v.clone());
                 }
             }
             current = serde_json::from_value(m)
@@ -1193,6 +1219,29 @@ mod fuse_doctor_tests {
         assert!(super::explain_provider_guard("custom").is_none());
         let err = super::explain_provider_guard("minimax-cn").expect("目录 provider 应被拒绝");
         assert!(err.contains("dsh llm"), "文案应指向 dsh 通道：{err}");
+    }
+
+    #[test]
+    fn insert_patch_path_supports_dotted_keys() {
+        // 用户实测：Profile 端口保存无效——点号路径键（profile_ports.desktop）必须
+        // 展开为嵌套对象，否则成为未知顶层字段被反序列化静默丢弃。
+        let mut root = serde_json::json!({ "profile_ports": { "web": 3080 } });
+        {
+            let mobj = root.as_object_mut().unwrap();
+            super::insert_patch_path(mobj, "profile_ports.desktop", serde_json::json!(3081));
+        }
+        assert_eq!(root["profile_ports"]["desktop"], 3081);
+        assert_eq!(root["profile_ports"]["web"], 3080, "兄弟键保留");
+        // 顶层普通键不受影响
+        {
+            let mobj = root.as_object_mut().unwrap();
+            super::insert_patch_path(mobj, "active_profile", serde_json::json!("web"));
+        }
+        assert_eq!(root["active_profile"], "web");
+        // 中间值非对象 → 覆盖为对象（不 panic）
+        let mut r2 = serde_json::json!({ "profile_ports": 5 });
+        super::insert_patch_path(r2.as_object_mut().unwrap(), "profile_ports.x", serde_json::json!(1));
+        assert_eq!(r2["profile_ports"]["x"], 1);
     }
 
     #[test]

@@ -1109,6 +1109,7 @@ function QuarantineDetail({
           onExplain={onExplain}
           onRestore={onRestore}
           onToggleRaw={onToggleRaw}
+          explainModel={settings?.ai_model}
         />
       )}
     </div>
@@ -1126,6 +1127,7 @@ function DetailBody({
   onExplain,
   onRestore,
   onToggleRaw,
+  explainModel,
 }: {
   entry: QuarantineEntry
   profile: string
@@ -1137,6 +1139,8 @@ function DetailBody({
   onExplain: (id: string) => void
   onRestore: (id: string) => void
   onToggleRaw: () => void
+  /** 当前设置的解读模型（#96 后实际由 dsh 路由使用）——用于 loading 文案与实际一致。 */
+  explainModel?: string
 }): React.ReactElement {
   const e = entry
   return (
@@ -1255,7 +1259,7 @@ function DetailBody({
             color: 'var(--dsw-alias-label-secondary,#9aa4b2)',
           }}
         >
-          AI 解读中…（deepseek-v4-flash）
+          {explainModel ? `AI 解读中…（${explainModel}）` : 'AI 解读中…'}
         </div>
       ) : typeof explainText === 'string' ? (
         <>

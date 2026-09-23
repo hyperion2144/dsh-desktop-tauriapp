@@ -1159,6 +1159,14 @@ function DesktopSettingsPanel(): React.ReactElement {
                 const installedOnly = runtimeCatalog.installed
                   .filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version))
                   .map((i) => ({ version: i.version, channel: '' }))
+                // 补：内置版本同样可能不在 catalog（目录拉取失败时）——必须可见以切回内置
+                if (
+                  runtimeCatalog.builtin &&
+                  !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) &&
+                  !installedOnly.some((i) => i.version === runtimeCatalog.builtin)
+                ) {
+                  installedOnly.unshift({ version: runtimeCatalog.builtin, channel: '' })
+                }
                 const visible = runtimeExpanded
                   ? [...runtimeCatalog.catalog, ...installedOnly]
                   : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))]
