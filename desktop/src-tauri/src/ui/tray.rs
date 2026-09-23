@@ -352,9 +352,11 @@ pub fn switch_runtime(app: &AppHandle, version: Option<&str>) {
         show_notification(app, "运行时切换失败", &e);
         return;
     }
-    let label = s.dsh_runtime.as_deref().unwrap_or("内置版本");
+    let label = s.dsh_runtime.clone().unwrap_or_else(|| "内置版本".into());
     show_notification(app, "运行时已切换", &format!("dsh {label}，正在重启服务…"));
     restart_dsh(app);
+    // 重启完成后再补一条终态（用户实测反馈：点击后不知道啥时候成功/重启）
+    notify_when_ready(app, label);
 }
 
 /// 托盘「下载并切换」（#98）：下载安装（registry 单飞行防并发）→ 自动切换重启。
@@ -372,6 +374,7 @@ fn fetch_runtime_and_switch(app: &AppHandle, version: String) {
         let src = crate::settings::load_desktop_settings()
             .runtime_source
             .unwrap_or_else(|| "github".into());
+        spawn_download_progress_notifier(&handle, version.clone());
         match crate::runtime::registry::download_and_install(&handle, &version).await {
             Ok(()) => {
                 crate::runtime::registry::record_installed(
@@ -414,6 +417,64 @@ pub fn spawn_fetch_catalog(app: &AppHandle) {
     });
 }
 
+
+/// 下载进度通知泵（#98 实测反馈补）：轮询 registry 进度，节流（≥15s 且数字变化）发系统通知，
+/// 下载结束（连续两轮 inactive，容忍置位竞态）自动退出；成败终态由 fetch 流程负责，不重复。
+fn spawn_download_progress_notifier(app: &AppHandle, version: String) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut last_at = std::time::Instant::now();
+        let mut last_nums = (0u64, 0u64, 0u64);
+        let mut idle = 0u8;
+        // 上限 ~10 分钟（3s × 200），覆盖最大依赖树下载
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let st = crate::runtime::registry::runtime_download_status();
+            let active = st.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            if !active {
+                idle += 1;
+                if idle >= 2 {
+                    break;
+                }
+                continue;
+            }
+            idle = 0;
+            let num = |k: &str| st.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let nums = (num("resolved"), num("downloaded"), num("added"));
+            if nums != last_nums && last_at.elapsed() >= Duration::from_secs(15) {
+                show_notification(
+                    &handle,
+                    "运行时下载中",
+                    &format!("dsh {version}：解析 {} · 下载 {} · 安装 {} 个包", nums.0, nums.1, nums.2),
+                );
+                last_at = std::time::Instant::now();
+                last_nums = nums;
+            }
+        }
+    });
+}
+
+/// 切换后等待重启完成并弹终态（#98 实测反馈补）：先观察到 restarting=true 再等它落下且
+/// 服务 READY（seen 标志防误读切换前旧状态），90s 超时静默放弃（守护器另有兑底提示）。
+fn notify_when_ready(app: &AppHandle, label: String) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut seen = false;
+        for _ in 0..90 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let state = handle.state::<DshState>();
+            if state.restarting.load(Ordering::SeqCst) {
+                seen = true;
+                continue;
+            }
+            if seen && state.status.load(Ordering::SeqCst) == crate::runtime::state::STATUS_READY {
+                show_notification(&handle, "运行时切换完成", &format!("✅ dsh {label} 已启动"));
+                return;
+            }
+        }
+        log::warn!("[tray] 等待运行时 {label} 就绪超时（90s），放弃完成通知");
+    });
+}
 /// 生成「运行时版本」子菜单条目（纯函数，单测锁定语义）。
 /// 返回 (id, text)：内置项 + 已装项（● 当前选中 / ○ 其余，与内置同号去重）
 /// + 目录未装项（↓ 下载并切换，至多 5 条，下载中标注）。
