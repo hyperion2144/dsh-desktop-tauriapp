@@ -10,6 +10,8 @@ export interface DesktopClientEnvironment {
   mode: DesktopClientMode
   /** Host platform used for native spacing and drag regions. */
   platform: DesktopClientPlatform
+  /** 窗口所属 profile（#109：外壳侧边栏外链分流只在 desktop profile 生效）。 */
+  profile?: string
 }
 
 const MODES = new Set<DesktopClientMode>(['compatibility', 'advanced'])
@@ -61,5 +63,5 @@ export async function requestDesktopClientEnvironment(): Promise<DesktopClientEn
   if (!env) return undefined
   if (env.mode !== 'compatibility' && env.mode !== 'advanced') return undefined
   if (env.platform !== 'darwin' && env.platform !== 'win32' && env.platform !== 'linux') return undefined
-  return { mode: env.mode, platform: env.platform }
+  return { mode: env.mode, platform: env.platform, profile: typeof env.profile === 'string' ? env.profile : undefined }
 }

@@ -92,11 +92,27 @@ pub(crate) fn get_mode_prompt_needed(state: tauri::State<DshState>) -> bool {
 /// token 交换的 303 重定向会剥掉 query 参数，URL 标记无法与 token 同跳，
 /// 故由壳按当前接入模式/平台直接下发。client 拿到 advanced 才装桌面 chrome。
 #[tauri::command]
-pub(crate) fn get_desktop_client_environment(state: tauri::State<DshState>) -> serde_json::Value {
+pub(crate) fn get_desktop_client_environment(
+    window: tauri::WebviewWindow,
+    state: tauri::State<DshState>,
+) -> serde_json::Value {
+    // #109 追加：窗口所属 profile（外壳侧边栏分流只在 desktop profile 生效）。
+    // 主窗 label=main → 激活/待定 profile；次窗 label=profile-<name>。
+    let label = window.label().to_string();
+    let profile = match label.strip_prefix("profile-") {
+        Some(name) => name.to_string(),
+        None => state
+            .pending_active_profile
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(crate::settings::configured_profile),
+    };
     let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
     serde_json::json!({
         "mode": if advanced { "advanced" } else { "compatibility" },
         "platform": desktop_platform_tag(),
+        "profile": profile,
     })
 }
 
