@@ -37,6 +37,8 @@
     "allow-list-ai-providers",
     "allow-get-desktop-settings-data",
     "allow-save-desktop-settings",
+    "allow-list-profile-dependency-status",
+    "allow-rebuild-profile-dependencies",
     "allow-add-remote-address",
     "allow-remove-remote-address",
     "allow-select-remote-address",

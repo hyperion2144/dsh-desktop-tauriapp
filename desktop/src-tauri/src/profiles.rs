@@ -142,7 +142,7 @@ fn write_profile_templates(dir: &std::path::Path, profile: &str) -> Result<(), S
 }
 
 /// 在 profile 目录跑 pnpm install（从 pnpm_direct_add :390-421 提取）。
-fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), String> {
+pub(crate) fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), String> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
     let dir = crate::dsh_home().join("profiles").join(profile);
@@ -447,6 +447,52 @@ fn git_fallback_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// 内置 pnpm 版本（读包内 `node_modules/pnpm/package.json`）。
+pub(crate) fn builtin_pnpm_version(app: &tauri::AppHandle) -> Option<String> {
+    let pkg = pnpm_cjs_path(app)?.parent()?.parent()?.join("package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(String::from)
+}
+
+/// 该 profile 的 node_modules 记录的 pnpm 版本（`.modules.yaml` 的 packageManager 行）。
+/// 行级提取（不解析整份 YAML）：形如 `  "packageManager": "pnpm@10.34.5",`。
+pub(crate) fn profile_recorded_pnpm(profile: &str) -> Option<String> {
+    let p = crate::dsh_home()
+        .join("profiles")
+        .join(profile)
+        .join("node_modules")
+        .join(".modules.yaml");
+    let text = std::fs::read_to_string(p).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("\"packageManager\":") else {
+            continue;
+        };
+        let raw = rest.trim().trim_end_matches(',').trim().trim_matches('"');
+        if let Some(ver) = raw.strip_prefix("pnpm@") {
+            return Some(ver.to_string());
+        }
+    }
+    None
+}
+
+/// 依赖不一致判定（#122）：node_modules 记录的 pnpm 与内置 pnpm 不同 → 返回
+/// (记录的版本, 内置版本)。store 大版本不同时 dsh 的插件操作会报
+/// ERR_PNPM_UNEXPECTED_STORE（历史上 web profile 可能由系统 pnpm 安装）。
+pub(crate) fn profile_dependency_mismatch(
+    app: &tauri::AppHandle,
+    profile: &str,
+) -> Option<(String, String)> {
+    let recorded = profile_recorded_pnpm(profile)?;
+    let builtin = builtin_pnpm_version(app)?;
+    if recorded == builtin {
+        None
+    } else {
+        Some((recorded, builtin))
+    }
 }
 
 /// 常备 node/pnpm shim（#95）：sidecar 可执行名是 dsh-node，pnpm 只在包内 pnpm.cjs——

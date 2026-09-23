@@ -341,6 +341,42 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [runtimeDownloading, setRuntimeDownloading] = useState<
     Record<string, 'downloading' | 'downloaded' | { failed: string }>
   >({})
+  // 依赖状态（#122）：各 profile 的 node_modules 记录的 pnpm 与内置 pnpm 是否一致
+  const [depProfiles, setDepProfiles] = useState<Array<{
+    profile: string
+    recordedPnpm: string | null
+    builtinPnpm: string | null
+    needsRebuild: boolean
+    running: boolean
+  }> | null>(null)
+  const [depRebuilding, setDepRebuilding] = useState<string | null>(null)
+  const [depNote, setDepNote] = useState<string>('')
+
+  const refreshDepStatus = useCallback(async (): Promise<void> => {
+    try {
+      const r = await invoke<{ profiles: typeof depProfiles }>('list_profile_dependency_status')
+      setDepProfiles(r?.profiles ?? [])
+    } catch {
+      setDepProfiles(null)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void refreshDepStatus()
+  }, [refreshDepStatus])
+
+  const handleRebuildDeps = (profile: string): void => {
+    if (depRebuilding) return
+    setDepRebuilding(profile)
+    setDepNote(`${profile}：依赖重建中（用内置 pnpm 重装，可能需要几分钟）…`)
+    void invoke('rebuild_profile_dependencies', { profile })
+      .then(() => {
+        setDepNote(`${profile}：依赖已重建，重启该 profile 后生效。`)
+        return refreshDepStatus()
+      })
+      .catch((err) => setDepNote(`${profile}：重建失败 —— ${String(err)}`))
+      .finally(() => setDepRebuilding(null))
+  }
   // #110：卸载中的版本（行级禁用态；删除可能数秒，期间按钮显示「卸载中…」）
   const [removingVersion, setRemovingVersion] = useState<string | null>(null)
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
@@ -1276,6 +1312,59 @@ function DesktopSettingsPanel(): React.ReactElement {
         </div>
       </SectionBox>
 
+      {/* ── 依赖状态（#122）── */}
+      <SectionBox title="依赖状态（pnpm store 一致性）">
+        <div style={LABEL_STYLE}>
+          dsh 的插件安装/卸载由内置 pnpm 执行；profile 的 node_modules 若由其它 pnpm 版本装过，
+          store 大版本不一致会报 ERR_PNPM_UNEXPECTED_STORE。此处可查看并重建。
+        </div>
+        {depProfiles === null ? (
+          <div style={NOTE_STYLE}>读取失败（仅桌面壳可用）</div>
+        ) : depProfiles.length === 0 ? (
+          <div style={NOTE_STYLE}>未发现 profile</div>
+        ) : (
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', opacity: 0.75 }}>
+                <th style={{ padding: '4px 6px' }}>Profile</th>
+                <th style={{ padding: '4px 6px' }}>依赖由 pnpm</th>
+                <th style={{ padding: '4px 6px' }}>内置 pnpm</th>
+                <th style={{ padding: '4px 6px' }}>状态</th>
+                <th style={{ padding: '4px 6px' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {depProfiles.map((p) => (
+                <tr key={p.profile}>
+                  <td style={{ padding: '4px 6px' }}>{p.profile}</td>
+                  <td style={{ padding: '4px 6px', opacity: 0.85 }}>{p.recordedPnpm ?? '未知'}</td>
+                  <td style={{ padding: '4px 6px', opacity: 0.85 }}>{p.builtinPnpm ?? '未知'}</td>
+                  <td style={{ padding: '4px 6px' }}>
+                    {!p.needsRebuild ? '一致' : p.running ? '需重建（运行中）' : '需重建'}
+                  </td>
+                  <td style={{ padding: '4px 6px' }}>
+                    <PfBtn
+                      variant="ghost"
+                      disabled={!p.needsRebuild || p.running || depRebuilding !== null}
+                      title={
+                        p.running
+                          ? '该 profile 正在运行：先停止再重建'
+                          : p.needsRebuild
+                            ? '用内置 pnpm 重建依赖（迁移 store 大版本）'
+                            : '无需重建'
+                      }
+                      onClick={() => handleRebuildDeps(p.profile)}
+                    >
+                      {depRebuilding === p.profile ? '重建中…' : '重建'}
+                    </PfBtn>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {depNote ? <div style={NOTE_STYLE}>{depNote}</div> : null}
+      </SectionBox>
       {/* ── 下载（#72）── */}
       <SectionBox title="下载">
         <div style={ROW_STYLE}>

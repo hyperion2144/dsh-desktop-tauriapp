@@ -51,7 +51,11 @@ if (!skipPackages) {
 
   mkdirSync(stage, { recursive: true });
   writeFileSync(join(stage, "package.json"), JSON.stringify({ private: true }));
-  execSync(`npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@${version} pnpm@10`, {
+  // pnpm 固定精确版本（不浮动）：它是内置工具链的一部分，决定 profile 依赖的 store
+  // 大版本（如 10.x → store/v10、11.x → store/v11）。浮动版本会让不同时间构建出不同
+  // store 版本，导致 dsh 插件操作报 ERR_PNPM_UNEXPECTED_STORE（#119/#122）。
+  // 11.16.0 对齐目标机器上系统 pnpm 的 store/v11，使既有 web profile 无需重建。
+  execSync(`npm install --no-save --no-audit --no-fund @deepseek-ai/dsh@${version} pnpm@11.16.0`, {
     cwd: stage, stdio: "inherit",
   });
 

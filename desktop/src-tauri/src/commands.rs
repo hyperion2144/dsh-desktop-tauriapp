@@ -526,6 +526,49 @@ fn active_profile() -> String {
     configured_profile()
 }
 
+/// 各 profile 的依赖状态（#122）：node_modules 记录的 pnpm 与内置 pnpm 是否一致，
+/// 以及该 profile 是否在运行（运行中不能重建）。
+#[tauri::command]
+pub(crate) fn list_profile_dependency_status(app: tauri::AppHandle) -> serde_json::Value {
+    let builtin = crate::profiles::builtin_pnpm_version(&app);
+    let profiles: Vec<serde_json::Value> = crate::profiles::scan_profiles()
+        .iter()
+        .map(|p| {
+            let recorded = crate::profiles::profile_recorded_pnpm(&p.name);
+            let mismatch = crate::profiles::profile_dependency_mismatch(&app, &p.name).is_some();
+            let port = crate::settings::port_for_profile(&p.name);
+            serde_json::json!({
+                "profile": p.name,
+                "recordedPnpm": recorded,
+                "builtinPnpm": builtin,
+                "needsRebuild": mismatch,
+                "running": crate::process::lifecycle::port_open(port),
+            })
+        })
+        .collect();
+    serde_json::json!({ "profiles": profiles })
+}
+
+/// 用内置 pnpm 重建某 profile 的依赖（#122）：把 node_modules 迁移到内置 pnpm 的
+/// store 大版本，修复 dsh 插件操作的 ERR_PNPM_UNEXPECTED_STORE。
+/// 运行中的 profile 拒绝（重建会破坏运行实例的 node_modules）。
+#[tauri::command]
+pub(crate) async fn rebuild_profile_dependencies(
+    app: tauri::AppHandle,
+    profile: String,
+) -> Result<(), String> {
+    let port = crate::settings::port_for_profile(&profile);
+    if crate::process::lifecycle::port_open(port) {
+        return Err(format!("{profile} 正在运行（端口 {port}），请先停止该 profile 再重建"));
+    }
+    let app2 = app.clone();
+    let profile2 = profile.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::profiles::pnpm_install_profile(&app2, &profile2)
+    })
+    .await
+    .map_err(|e| format!("重建任务执行失败：{e}"))?
+}
 /// 隔离名单（含 repairable 判定，供 UI 决定是否展示「修复」）。
 #[tauri::command]
 pub(crate) fn list_quarantine(profile: Option<String>) -> serde_json::Value {
