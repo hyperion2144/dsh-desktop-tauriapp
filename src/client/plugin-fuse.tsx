@@ -394,7 +394,23 @@ function FusePanel(): React.ReactElement {
       if (explain[id] === 'loading') return
       setExplain((prev) => ({ ...prev, [id]: 'loading' }))
       try {
-        const r = await invoke<{ ok: boolean; suggestion?: string; error?: string }>('explain_failure', { id })
+        // #96：dsh provider 路由的解读经宿主 RPC 在 dsh 进程内发起（llm 服务单一事实源，
+        // 路由/密钥/端点全由 dsh 解析）；custom（自定义端点/密钥）与无连接时回退壳 Rust。
+        let r: { ok: boolean; suggestion?: string; error?: string }
+        if (settings && settings.ai_provider !== 'custom' && fuseConnection) {
+          const e = entries.find((x) => x.id === id)
+          const resp = await fuseConnection.rpc.call('/dsh-desktop-fuse-explain', 'run', {
+            failureType: e?.failure_type ?? '',
+            name: e?.name ?? '',
+            rawError: e?.raw_error ?? '',
+            provider: settings.ai_provider,
+            model: settings.ai_model,
+          })
+          if (!resp?.ok) throw new Error(resp?.error?.message ?? '解读被拒绝')
+          r = resp.value
+        } else {
+          r = await invoke<{ ok: boolean; suggestion?: string; error?: string }>('explain_failure', { id })
+        }
         setExplain((prev) => ({
           ...prev,
           [id]: r.ok && r.suggestion ? r.suggestion : `AI 解读不可用：${r.error ?? '未知'}`,
@@ -403,7 +419,7 @@ function FusePanel(): React.ReactElement {
         setExplain((prev) => ({ ...prev, [id]: `AI 解读不可用：${String(err)}` }))
       }
     },
-    [explain],
+    [explain, entries, settings],
   )
 
   const askRestore = React.useCallback(

@@ -607,6 +607,17 @@ pub(crate) fn run_doctor() -> serde_json::Value {
 }
 
 /// AI 解读（读 .credentials.yaml 密钥；任何失败静默返回，不阻塞隔离主流程）。
+/// #96：explain_failure 只承载 deepseek（默认路由）与 custom（自定义端点/密钥）；
+/// 其它 dsh 目录 provider 返回错误文案（防 #95 之前“一律 deepseek 默认路由”的静默错路由）。
+fn explain_provider_guard(provider: &str) -> Option<String> {
+    if provider == "deepseek" || provider == "custom" {
+        return None;
+    }
+    Some(format!(
+        "provider \"{provider}\" 的解读路由归 dsh llm 服务——请用保险丝面板「AI 解读」按钮（自动经 dsh 通道），或切回 deepseek/custom"
+    ))
+}
+
 #[tauri::command]
 pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>) -> serde_json::Value {
     let _ = profile;
@@ -618,9 +629,14 @@ pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>)
     else {
         return serde_json::json!({ "ok": false, "error": format!("台账中不存在 {id}") });
     };
-    // AI 路由按设置解析：provider（deepseek/custom）→ 密钥 env 名 + 端点 + 模型
+    // AI 路由按设置解析：deepseek（默认路由）与 custom（自定义端点/密钥）；其它 provider 归 dsh llm 服务。
     let s = load_desktop_settings();
     let provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
+    // #96：非 deepseek/custom 的 provider 路由归 dsh llm 目录（client 已自动经
+    // /dsh-desktop-fuse-explain 走 dsh 进程内通道）；直达本命令时明确报错防静默错路由。
+    if let Some(err) = explain_provider_guard(&provider) {
+        return serde_json::json!({ "ok": false, "error": err });
+    }
     let model_label = s
         .ai_model
         .clone()
@@ -1133,6 +1149,16 @@ mod fuse_doctor_tests {
         for c in checks {
             assert!(c.get("label").is_some(), "每项应有 label：{c}");
         }
+    }
+
+    #[test]
+    fn explain_provider_guard_routes_only_builtin() {
+        // #96：deepseek（默认路由）与 custom（自定义端点）放行；
+        // 其它 dsh 目录 provider（如 minimax-cn）拒绝直达，逼走路由正确的 dsh 进程内通道。
+        assert!(super::explain_provider_guard("deepseek").is_none());
+        assert!(super::explain_provider_guard("custom").is_none());
+        let err = super::explain_provider_guard("minimax-cn").expect("目录 provider 应被拒绝");
+        assert!(err.contains("dsh llm"), "文案应指向 dsh 通道：{err}");
     }
 
     #[test]
