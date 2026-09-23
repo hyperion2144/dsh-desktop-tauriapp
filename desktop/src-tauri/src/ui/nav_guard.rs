@@ -1,6 +1,7 @@
 //! Tauri 导航守卫插件模块。
 //!
-//! 拦截外链交默认浏览器，内部主机放行。
+//! 拦截顶层外部导航（阻止），内部主机放行；用户主动点击的外链由 client 侧接管
+//! （capture 点击 / window.open 覆盖均转系统浏览器）。
 //! 迁移自 lib.rs 功能区域（nav_guard）。
 
 use crate::runtime::state::INTERNAL_HOSTS;
@@ -28,8 +29,12 @@ pub fn navigate_guard(url: &tauri::Url) -> bool {
             if internal {
                 return true;
             }
-            log::info!("[nav] 拦截外部链接并交给默认浏览器：{url}");
-            let _ = open_external_impl(url.as_str());
+            // 顶层外部导航：阻止且不转浏览器。用户主动点击的外链已由 client 侧接管
+            // （capture 点击判定 system、<a target=_blank>/window.open 由覆盖层转系统），
+            // 能走到这里的只剩 iframe 顶层导航尝试（侧边栏浏览器关闭沙箱后的
+            // frame-busting）与页面脚本主动 location 跳转——转浏览器会把用户从应用
+            // 甩到外部（实测：点「解锁沙箱」即被甩走）。
+            log::info!("[nav] 已阻止顶层外部导航（不转浏览器）：{url}");
             false
         }
         "mailto" | "tel" => {
@@ -38,5 +43,26 @@ pub fn navigate_guard(url: &tauri::Url) -> bool {
             false
         }
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(s: &str) -> tauri::Url {
+        tauri::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn navigate_guard_allows_internal_and_blocks_external_top_level() {
+        // 内部主机放行（dsh web 各形态）
+        assert!(navigate_guard(&u("http://127.0.0.1:3081/")));
+        assert!(navigate_guard(&u("http://localhost:3080/x")));
+        assert!(navigate_guard(&u("http://tauri.localhost/assets/a.js")));
+        // 外部：阻止顶层导航，且不触发系统浏览器（#117 续：frame-busting 误开）
+        assert!(!navigate_guard(&u("https://example.com/a")));
+        // 其它 scheme 放行（不参与外链判定）
+        assert!(navigate_guard(&u("tauri://localhost/index.html")));
     }
 }
