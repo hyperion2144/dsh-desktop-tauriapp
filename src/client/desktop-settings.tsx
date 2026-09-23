@@ -1292,7 +1292,10 @@ function DesktopSettingsPanel(): React.ReactElement {
           </>
         )}
 
+        {/* #102：NO_PROXY 为 manual 专属（system 模式下后端读系统设置，编辑不生效）；凭证两种模式都生效（拼入代理 URL） */}
         {(proxy.proxy_mode === 'manual' || proxy.proxy_mode === 'system') && (
+          <>
+        {proxy.proxy_mode === 'manual' && (
           <>
             <div style={LABEL_STYLE}>NO_PROXY（不走代理的地址，逗号分隔）</div>
             <input
@@ -1303,6 +1306,8 @@ function DesktopSettingsPanel(): React.ReactElement {
               data-desktop-settings="no-proxy"
               onChange={(e) => setProxy({ ...proxy, no_proxy: e.target.value.trim() })}
             />
+          </>
+        )}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <div style={FLEX_1_STYLE}>
@@ -1332,6 +1337,9 @@ function DesktopSettingsPanel(): React.ReactElement {
 
         {proxyEffective && (
           <div style={NOTE_STYLE}>当前生效：{JSON.stringify(proxyEffective)}</div>
+        )}
+        {proxy.proxy_mode === 'system' && (
+          <div style={NOTE_STYLE}>系统代理模式下，代理地址与 NO_PROXY 来自系统设置（如 Windows 注册表 ProxyOverride）；用户名/密码仍取自设置并拼入代理地址。</div>
         )}
 
         {proxy.proxy_mode === 'manual' && proxy.proxy_url && (
