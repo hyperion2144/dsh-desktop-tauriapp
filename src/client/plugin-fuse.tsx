@@ -125,7 +125,7 @@ export function registerFusePanel(ctx: ClientContext): void {
         order: 30,
         label: () => '插件保险丝',
       },
-      FusePanel,
+      FusePanelSafe,
     ),
   )
 }
@@ -166,6 +166,54 @@ function usePanelStyles(): void {
 }
 
 // ── 顶层组件 ────────────────────────────────────────────────────────────
+/** 面板错误边界（#59 收尾）：面板内任何渲染异常不再让整个设置区空白——
+ *  面板内显示可读错误，并把详情写进应用日志（webview console 镜像 → dsh-desktop-webview.log）。 */
+class FuseErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null }
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error }
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    const detail = `${String(error?.message ?? '')} | ${String(info?.componentStack ?? '')}`
+    console.error('[plugin-fuse] 面板渲染异常：', detail)
+    try {
+      void invoke('log_diag', { msg: `[plugin-fuse] 面板渲染异常：${detail}` })
+    } catch {
+      /* 日志通道不可用时忽略 */
+    }
+  }
+
+  render(): React.ReactNode {
+    if (this.state.error) {
+      return (
+        <div data-plugin-fuse="1" style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+          <div style={{ color: 'var(--dsw-alias-state-danger-primary,#e5534b)' }}>
+            插件保险丝面板渲染失败：{String(this.state.error.message ?? this.state.error)}
+          </div>
+          <div style={{ color: 'var(--dsw-alias-label-secondary,#9aa4b2)', marginTop: 4 }}>
+            详情已写入应用日志（~/.dsh/dsh-desktop-webview.log）
+          </div>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+/** 注册用包装（错误边界 + FusePanel；名字独立便于日志辨认）。 */
+function FusePanelSafe(): React.ReactElement {
+  return (
+    <FuseErrorBoundary>
+      <FusePanel />
+    </FuseErrorBoundary>
+  )
+}
+
 
 function FusePanel(): React.ReactElement {
   usePanelStyles()
@@ -394,7 +442,29 @@ function FusePanel(): React.ReactElement {
       if (explain[id] === 'loading') return
       setExplain((prev) => ({ ...prev, [id]: 'loading' }))
       try {
-        const r = await invoke<{ ok: boolean; suggestion?: string; error?: string }>('explain_failure', { id })
+        // #96：dsh provider 路由的解读经宿主 RPC 在 dsh 进程内发起（llm 服务单一事实源，
+        // 路由/密钥/端点全由 dsh 解析）；custom（自定义端点/密钥）与无连接时回退壳 Rust。
+        let r: { ok: boolean; suggestion?: string; error?: string }
+        if (settings && settings.ai_provider !== 'custom' && fuseConnection) {
+          const e = entries.find((x) => x.id === id)
+          // #121：前端超时兜底（宿主侧已有 45s 看门狗；这里 75s 兜底，避免无限 loading）
+          const resp = (await Promise.race([
+            fuseConnection.rpc.call('/dsh-desktop-fuse-explain', 'run', {
+              failureType: e?.failure_type ?? '',
+              name: e?.name ?? '',
+              rawError: e?.raw_error ?? '',
+              provider: settings.ai_provider,
+              model: settings.ai_model,
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error('解读超时（75 秒无响应）')), 75000)
+            }),
+          ])) as { ok: boolean; error?: { message?: string }; value?: { ok: boolean; suggestion?: string } }
+          if (!resp?.ok) throw new Error(resp?.error?.message ?? '解读被拒绝')
+          r = resp.value as { ok: boolean; suggestion?: string }
+        } else {
+          r = await invoke<{ ok: boolean; suggestion?: string; error?: string }>('explain_failure', { id })
+        }
         setExplain((prev) => ({
           ...prev,
           [id]: r.ok && r.suggestion ? r.suggestion : `AI 解读不可用：${r.error ?? '未知'}`,
@@ -403,7 +473,7 @@ function FusePanel(): React.ReactElement {
         setExplain((prev) => ({ ...prev, [id]: `AI 解读不可用：${String(err)}` }))
       }
     },
-    [explain],
+    [explain, entries, settings],
   )
 
   const askRestore = React.useCallback(
@@ -476,6 +546,7 @@ function FusePanel(): React.ReactElement {
           profile={profile}
           repairBusy={repairBusy}
           explainText={currentEntry ? explain[currentEntry.id] : undefined}
+          explainModel={settings?.ai_model}
           repairMsg={repairMsg}
           showRaw={showRaw}
           onRepair={doRepair}
@@ -1047,6 +1118,7 @@ function QuarantineDetail({
   onExplain,
   onRestore,
   onToggleRaw,
+  explainModel,
 }: {
   entry: QuarantineEntry | undefined
   profile: string
@@ -1058,6 +1130,8 @@ function QuarantineDetail({
   onExplain: (id: string) => void
   onRestore: (id: string) => void
   onToggleRaw: () => void
+  /** 当前设置的解读模型（由 FusePanel 传入；本组件作用域内没有 settings）。 */
+  explainModel?: string
 }): React.ReactElement {
   return (
     <div
@@ -1093,6 +1167,7 @@ function QuarantineDetail({
           onExplain={onExplain}
           onRestore={onRestore}
           onToggleRaw={onToggleRaw}
+          explainModel={explainModel}
         />
       )}
     </div>
@@ -1110,6 +1185,7 @@ function DetailBody({
   onExplain,
   onRestore,
   onToggleRaw,
+  explainModel,
 }: {
   entry: QuarantineEntry
   profile: string
@@ -1121,6 +1197,8 @@ function DetailBody({
   onExplain: (id: string) => void
   onRestore: (id: string) => void
   onToggleRaw: () => void
+  /** 当前设置的解读模型（#96 后实际由 dsh 路由使用）——用于 loading 文案与实际一致。 */
+  explainModel?: string
 }): React.ReactElement {
   const e = entry
   return (
@@ -1239,7 +1317,7 @@ function DetailBody({
             color: 'var(--dsw-alias-label-secondary,#9aa4b2)',
           }}
         >
-          AI 解读中…（deepseek-v4-flash）
+          {explainModel ? `AI 解读中…（${explainModel}）` : 'AI 解读中…'}
         </div>
       ) : typeof explainText === 'string' ? (
         <>

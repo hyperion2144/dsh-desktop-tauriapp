@@ -359,10 +359,31 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         // 内置模式（#90 实测）：Finder 启动的 App 只有系统 PATH，dsh 的插件子进程
         // （git/gh/pnpm 等工具链检测）会全部落空。用用户登录 shell 恢复完整 PATH
         // （anywhere-labs 模式简版）；恢复失败回退静态常见目录。
-        match recover_login_path() {
-            Some(p) => cmd.env("PATH", &p),
-            None => cmd.env("PATH", FALLBACK_TOOL_PATH),
-        };
+        //
+        // #119：shim 目录（内置 node/pnpm）必须**前置**——dsh 的插件管理会裸调 `pnpm`，
+        // 若命中用户系统 pnpm（实测 11.16.0，store/v11）而 profile 的 node_modules 是
+        // 内置 pnpm（10.34.5，store/v10）装的，会报 ERR_PNPM_UNEXPECTED_STORE，
+        // 导致 dsh 自带的插件卸载/安装全部失败。故把**仅含 pnpm** 的 shim 目录前置：
+        // pnpm 钉回内置（store 大版本一致），但**不劫持 node**——用户项目里的 node 应
+        // 保持登录 PATH 顺序（实测系统 node v26 vs 内置 v24，劫持会改变项目行为）。
+        let mut parts: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(shim) = crate::profiles::ensure_pnpm_shim_dir(app) {
+            parts.push(shim);
+        }
+        let login = recover_login_path();
+        match &login {
+            Some(p) => parts.extend(std::env::split_paths(p)),
+            None => parts.extend(std::env::split_paths(FALLBACK_TOOL_PATH)),
+        }
+        match std::env::join_paths(parts) {
+            Ok(joined) => {
+                cmd.env("PATH", joined);
+            }
+            Err(e) => {
+                log::warn!("[spawn] 拼 PATH 失败，回退登录 PATH：{e}");
+                cmd.env("PATH", login.unwrap_or_else(|| FALLBACK_TOOL_PATH.to_string()));
+            }
+        }
     }
     let lane = lane_port_for_profile(profile);
     cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())

@@ -292,3 +292,13 @@ commands = { allow = ['save_blob_chunk'] }
 identifier = 'allow-finish-blob-download'
 description = '下载管理器：blob 分块结束（落盘+通知）'
 commands = { allow = ['finish_blob_download'] }
+
+[[permission]]
+identifier = 'allow-list-profile-dependency-status'
+description = '依赖状态（#122）：查询各 profile 的 node_modules 记录的 pnpm 版本与内置 pnpm 是否一致（store 大版本不匹配会导致 dsh 插件操作报 ERR_PNPM_UNEXPECTED_STORE）'
+commands = { allow = ['list_profile_dependency_status'] }
+
+[[permission]]
+identifier = 'allow-rebuild-profile-dependencies'
+description = '依赖状态（#122）：用内置 pnpm 重建某 profile 的依赖（迁移 store 大版本）；运行中的 profile 会被拒绝'
+commands = { allow = ['rebuild_profile_dependencies'] }

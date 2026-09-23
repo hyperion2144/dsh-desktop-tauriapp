@@ -2,9 +2,30 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
-## 未发布
+## 未发布（分支验证中，待实机确认后随下版发布）
 
-（无——当前主干即 v0.9.1 覆盖重发内容，见下）
+- **AI 解读路由修复（#96）**：dsh 目录 provider（如 minimax-cn）的解读改由 dsh 进程内 llm 服务发起（宿主新 RPC `/dsh-desktop-fuse-explain`）；custom 仍走壳 Rust；其它 provider 直达 Rust 时明确报错不再静默错路由
+- **系统代理模式隐藏 no_proxy 输入（#102）**：system 模式下后端读系统设置，编辑无效故隐藏并加来源说明；凭证两模式都生效（拼入代理 URL）保持可编辑
+- **目录拉取失败降级（#107 + 补）**：目录拉取失败时不再清空列表——已下载版本仍可见/可切换/可卸载并显示失败提示；**降级列表同时纳入内置版本**（原先拉取失败时内置行消失，无法切回内置）
+- **壳侧网络统一走代理（#108）**：运行时目录拉取、运行时下载（pnpm 子进程）、应用文件下载均经 `app_client_builder`（系统/手动代理与凭证一致），修复公司代理下 401
+- **链接处理回归官方语义（#109 收尾，方案 A）**：**删除 client 侧全部自创外链逻辑**（`external-links.ts` 整文件：click/中键 capture、window.open 覆盖、双开抑制、profile/区域门控、会话区探针）——会话内链接的侧边栏路由本就是 **dsh 自身**做的（chat openExternalLink → sidebarRight.openTab），宿主不插手。壳只守两条边界（对齐 dsh 官方 Electron 桌面 `apps/desktop/src/main.ts:210-281`）：**新窗请求（window.open / target=_blank）→ 系统浏览器 + 应用内不开新窗**；**异源顶层导航 → 阻止**（官方为“阻止+系统浏览器”，按用户要求只阻止，避免 frame-busting 把用户甩走）。一并修掉自创层带来的误拦（web profile / 设置弹窗）、双开、解锁沙箱被甩到浏览器等一串问题
+- **卸载运行时不再冻结界面（#110）**：`remove_runtime` 改 async + spawn_blocking；卸载中按钮禁用并显示「卸载中…」
+- **中键点击外链 → 系统浏览器（#111）**：现由平台新窗钩子统一接管（不再需要 client 侧独立分支）
+- **侧边栏「在浏览器打开」→ 系统浏览器（#112）**：同上，由新窗钩子接管（原 client window.open 覆盖已随方案 A 移除）
+- **内置版本可直接切换（#113）**：内置行标「内置」，当前使用时显示「使用中」；切内置写 `dsh_runtime: null`
+- **下载/卸载运行时不再触发 dsh 插件 rebuilt（#114）**：dsh 客户端插件 rev = sha1(mtime|ctime|size)，pnpm store 与运行树 hardlink 共享 inode → 下载写 store / 卸载删 link 都会改元数据触发重载白屏。修复：运行时安装用独立 store（`runtimes/.pnpm-store`）+ 卸载改 rename 到 `runtimes/.trash`（真实删除推迟到下次启动）
+- **profile 迁移依赖重建修复（#115）**：①CI=true 下 pnpm 默认 frozen-lockfile 致迁移失败（三处 install 显式 `--no-frozen-lockfile`）②迁移重建 PATH 被 `join_paths` 静默清空致 pnpm 解析 git 依赖报 `spawn git ENOENT`（改 split_paths + git 候选目录兜底）
+- **手机访问隧道地址保存落盘（#116）**：原先写已废除的 dsh settings 命名空间/settings.yaml（保存看似成功实则丢失）；改读写 `$DSH_HOME/desktop-settings.json`（Rust DesktopSettings 补 tunnel_url/ws_* 字段，防其读改写丢弃）
+- **点号路径设置保存修复**：`save_desktop_settings` 的 merge 把 `profile_ports.desktop` 当字面顶层键 → 反序列化静默丢弃 → Profile 端口保存无效；新增递归写入（含单测）
+- **托盘「切换 Profile（本窗口）」（#117）**：就地切换当前聚焦窗口的 profile（区别于「在新窗口打开」）；不可行时明确提示且不改绑；主窗切换同步并持久化激活 profile；同时移除设置页重复且显示错误的「本地端口」区块
+- 保险丝面板 AI 解读 loading 文案改为显示当前设置的模型（原硬编码 deepseek-v4-flash 与实际路由不一致）
+- **dsh 自带插件卸载/安装报 ERR_PNPM_UNEXPECTED_STORE（#119）**：内置模式下壳给 dsh 的 PATH 是用户登录 shell 的 PATH（含 /opt/homebrew/bin），dsh 的插件管理裸调 `pnpm` 时命中**系统 pnpm**（实测 11.16.0，store/v11），而 profile 的 node_modules 由内置 pnpm（10.34.5，store/v10）安装 → store 大版本不匹配直接拒绝操作。修复：内置模式下把**仅含 pnpm 的 shim 目录**（`runtime/bin-pnpm`）**前置**到 dsh 的 PATH——pnpm 钉回内置 pnpm.cjs（store 一致），但**不劫持 node**（用户项目仍用登录 PATH 的 node；实测系统 v26 与内置 v24 不同版本）
+- **插件保险丝面板空白（#120）**：`QuarantineDetail` 作用域内引用了不存在的 `settings`（其为 `FusePanel` 的 state）→ 渲染即 `ReferenceError: Can't find variable: settings` → React 卸载整棵树致面板全空。修复：`explainModel` 改由 `FusePanel` 通过 prop 传入；同时保留面板错误边界（异常直接显示可读错误 + 写入应用日志）
+- **保险丝面板 AI 解读无限 loading（#121）**：走 dsh 路由的解读链路（宿主 RPC → `llm.stream`）宿主侧与前端均无超时——provider 无响应时 `await next()` 永不返回，面板一直「AI 解读中」且无任何可诊断信息。修复：宿主侧改为逐次 `next()` + `Promise.race` 看门狗（45s 无新数据即收尾并报「模型无响应（已收到 N 个数据块）」）+ `[fuse-explain]` 过程日志（provider/model/块数/字数）；前端 `rpc.call` 加 75s 超时兜底
+- **依赖状态 + 内置 pnpm 升级（#122）**：dsh 的插件安装/卸载由**内置 pnpm** 执行，它的 store 大版本决定 profile 依赖能否被操作——历史遗留（web 由系统 pnpm 11 装、desktop 由内置 pnpm 10 装）导致切换 profile 后总有一方报 `ERR_PNPM_UNEXPECTED_STORE`。修复：①`prepare-builtin-runtime.mjs` 把浮动的 `pnpm@10` 改为**精确 pin `pnpm@11.16.0`**（与既有 web profile 的 store/v11 对齐；同时构建可复现，不再随构建时间漂移小版本）②设置页新增**「依赖状态」**区块（各 profile 记录的 pnpm / 内置版本 / 是否需重建 / 运行中禁重建 + 一键重建）③壳启动后台检查：不一致且未运行 → 自动用内置 pnpm 重建并通知；运行中的 profile 只提示不重建（避免破坏运行实例的 node_modules）
+- **下载图标兼容 dsh 0.1.7 重命名（#103）**：`IconDownloadOutline16 ?? IconDownloadOutlineRegular` 双名 fallback，修复 0.1.7 下下载按钮消失与 Tab 标题空白
+- **运行时版本卸载入口（#104）**：设置页已下载版本列表加卸载按钮（二次确认；使用中/内置灰置+tooltip），复用 #95 既有 remove_runtime，后端零改动
+- **手机布局包升级 v3.0.1（#105）**：dsh-web-mobile submodule v2.3.0 → v3.0.1（0.1.6/0.1.7 宿管适配、系统返回退出、文件手势、图标跨代兼容、真机修复）
 
 
 ## 已发布
@@ -29,6 +50,7 @@
 - 壳配置正位：`$DSH_HOME/desktop-settings.json` 单一源（原 app_data 双源收敛）
 - builtin 检查路径写错导致「切换内置没反应」静默回退——改显式系统通知
 - **macOS CI 包「已损坏，无法打开」**（覆盖重发修复）：`.app` 缺 bundle 级签名（无 `_CodeSignature/`）+ sidecar `dsh-node` 未签，带 quarantine 的下载包 Gatekeeper 校验必败（「任何来源」不豁免签名完整性）。修复：`signingIdentity: "-"` ad-hoc 完整签名。旧包解法：`xattr -cr "/Applications/DeepSeek Harness Desktop.app"`
+- **AI 解读路由修复（#96）**：选 dsh 目录 provider（如 minimax-cn）时，解读改由 dsh 进程内 llm 服务发起（路由/密钥/端点单一事实源，宿主新 RPC `/dsh-desktop-fuse-explain`）；custom（自定义端点/密钥）仍走壳 Rust，deepseek 保持默认路由；其它 provider 直达 Rust 命令时明确报错，不再静默打到 api.deepseek.com
 
 #### 工程
 

@@ -102,3 +102,40 @@ export function readTopLevelBlockKey(block, subKey) {
   }
   return null;
 }
+
+// ── #116：壳设置（desktop-settings.json）读写 ──────────────────────────────
+// #95 v0.1.7 后壳设置的权威落点是 $DSH_HOME/desktop-settings.json（dsh settings 的插件
+// 命名空间与 settings.yaml 均已废除）。手机访问的壳专属键（tunnel_url/cloudflared_bin/ws_*）
+// 走这里读写；字段名与 Rust 侧 DesktopSettings 一致（Rust 未知字段会在其读改写时被丢弃）。
+// 读改写 + 原子写（tmp+rename），保留文件内其它字段。
+
+export function shellSettingsPath() {
+  const home = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+  return path.join(home, 'desktop-settings.json');
+}
+
+/** 读壳设置字段；文件缺失/损坏/字段不存在 → null。 */
+export function readShellSetting(subKey) {
+  try {
+    const obj = JSON.parse(fs.readFileSync(shellSettingsPath(), 'utf8'));
+    const v = obj?.[subKey];
+    return v === undefined ? null : v;
+  } catch {
+    return null;
+  }
+}
+
+/** 写壳设置字段（读改写 + 原子写）；返回写入值。 */
+export function writeShellSetting(subKey, value) {
+  const p = shellSettingsPath();
+  let obj = {};
+  try {
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) obj = parsed;
+  } catch { /* 首次写入或文件损坏 → 新建 */ }
+  obj[subKey] = value;
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
+  fs.renameSync(tmp, p);
+  return value;
+}

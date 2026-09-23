@@ -1,7 +1,6 @@
 import type { ClientContext } from './ctx-types.ts'
 import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
-import { installExternalLinkHandler } from './external-links.ts'
 import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
@@ -110,8 +109,6 @@ export function apply(ctx: ClientContext): void {
   installWebviewConsoleMirror()
   // WebView 橡皮筋滚动对齐浏览器（禁 rubber-band）
   installNoRubberBand()
-  // 桌面 webview（含复用降级/无标记场景）都接管外链打开；纯浏览器无 Tauri IPC 时 no-op
-  installExternalLinkHandler()
   // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
   registerDownloadsTab(ctx)
   // blob:/data: 下载拦截转 IPC（纯浏览器不装）

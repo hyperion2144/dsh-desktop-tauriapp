@@ -71,6 +71,15 @@ pub struct DesktopSettings {
     /// GitHub 运行时仓库（owner/repo，github 源用；默认官方仓库）。
     #[serde(default)]
     pub runtime_github_repo: Option<String>,
+    /// 第三方隧道地址（cpolar 等；#116：手机访问 lane 经 desktop-settings.json 读写）。
+    #[serde(default)]
+    pub tunnel_url: Option<String>,
+    /// WS 空闲保活 ping 间隔 ms（0=关闭；lane 读，默认 15000）。
+    #[serde(default)]
+    pub ws_keepalive_ms: Option<u64>,
+    /// WS pong 判死超时 ms（lane 读，默认 10000）。
+    #[serde(default)]
+    pub ws_pong_timeout_ms: Option<u64>,
 }
 
 /// 壳私有设置文件（#95 v0.1.7 搬出 dsh settings.yaml；收尾修正正位）：
@@ -425,6 +434,9 @@ mod tests {
       dsh_runtime: None,
       runtime_source: None,
       runtime_github_repo: None,
+      tunnel_url: Some("https://t.example.com".into()),
+      ws_keepalive_ms: Some(15000),
+      ws_pong_timeout_ms: Some(10000),
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
@@ -434,6 +446,10 @@ mod tests {
     assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
     assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(back.port, Some(3081));
+    // #116：手机访问壳键随序列化往返不丢（lane 经 desktop-settings.json 读写）
+    assert_eq!(back.tunnel_url.as_deref(), Some("https://t.example.com"));
+    assert_eq!(back.ws_keepalive_ms, Some(15000));
+    assert_eq!(back.ws_pong_timeout_ms, Some(10000));
     assert_eq!(back.active_profile.as_deref(), Some("web"));
     assert_eq!(back.remote_list, vec!["x.cn:3091".to_string()]);
     assert_eq!(back.lane_port, Some(3092));

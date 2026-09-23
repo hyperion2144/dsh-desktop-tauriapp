@@ -79,6 +79,8 @@ interface RuntimeCatalog {
   selected: string | null
   installed: { version: string }[]
   catalog: { version: string; channel: string }[]
+  /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
+  error?: string
 }
 
 interface MigrationStatus {
@@ -235,12 +237,14 @@ function PfBtn({
   onClick,
   children,
   style,
+  title,
 }: {
   variant?: 'primary' | 'ghost' | 'danger'
   disabled?: boolean
   onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void
   children: React.ReactNode
   style?: React.CSSProperties
+  title?: string
 }): React.ReactElement {
   const baseStyle =
     variant === 'primary' ? BTN_PRIMARY_STYLE : variant === 'ghost' ? BTN_GHOST_STYLE : BTN_DANGER_STYLE
@@ -250,6 +254,7 @@ function PfBtn({
       type="button"
       className={cls}
       disabled={disabled}
+      title={title}
       onClick={onClick}
       style={{ ...baseStyle, ...(style ?? {}) }}
     >
@@ -301,8 +306,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // dsh 服务地址
   const [newRemoteUrl, setNewRemoteUrl] = useState('')
 
-  // 本地端口
-  const [portDraft, setPortDraft] = useState('')
 
   // 下载
   const [concurrencyInput, setConcurrencyInput] = useState<string>('3')
@@ -338,6 +341,44 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [runtimeDownloading, setRuntimeDownloading] = useState<
     Record<string, 'downloading' | 'downloaded' | { failed: string }>
   >({})
+  // 依赖状态（#122）：各 profile 的 node_modules 记录的 pnpm 与内置 pnpm 是否一致
+  const [depProfiles, setDepProfiles] = useState<Array<{
+    profile: string
+    recordedPnpm: string | null
+    builtinPnpm: string | null
+    needsRebuild: boolean
+    running: boolean
+  }> | null>(null)
+  const [depRebuilding, setDepRebuilding] = useState<string | null>(null)
+  const [depNote, setDepNote] = useState<string>('')
+
+  const refreshDepStatus = useCallback(async (): Promise<void> => {
+    try {
+      const r = await invoke<{ profiles: typeof depProfiles }>('list_profile_dependency_status')
+      setDepProfiles(r?.profiles ?? [])
+    } catch {
+      setDepProfiles(null)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    void refreshDepStatus()
+  }, [refreshDepStatus])
+
+  const handleRebuildDeps = (profile: string): void => {
+    if (depRebuilding) return
+    setDepRebuilding(profile)
+    setDepNote(`${profile}：依赖重建中（用内置 pnpm 重装，可能需要几分钟）…`)
+    void invoke('rebuild_profile_dependencies', { profile })
+      .then(() => {
+        setDepNote(`${profile}：依赖已重建，重启该 profile 后生效。`)
+        return refreshDepStatus()
+      })
+      .catch((err) => setDepNote(`${profile}：重建失败 —— ${String(err)}`))
+      .finally(() => setDepRebuilding(null))
+  }
+  // #110：卸载中的版本（行级禁用态；删除可能数秒，期间按钮显示「卸载中…」）
+  const [removingVersion, setRemovingVersion] = useState<string | null>(null)
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
   const [dlProgress, setDlProgress] = useState<{
     version: string
@@ -494,7 +535,11 @@ function DesktopSettingsPanel(): React.ReactElement {
     try {
       const s = await invoke<RuntimeCatalog>('list_runtime_catalog', { source: runtimeSource })
       setRuntimeCatalog(s)
-      setRuntimeStatus({ state: 'ok' })
+      setRuntimeStatus(
+        s.error
+          ? { state: 'error', text: `目录拉取失败：${s.error}（仅显示已下载版本）` }
+          : { state: 'ok' },
+      )
       setRuntimeDownloading({})
     } catch (err) {
       setRuntimeStatus({ state: 'error', text: `版本目录读取失败：${String(err)}` })
@@ -616,23 +661,6 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((e) => setProfilePortBoxNote(`保存失败：${String(e)}`))
   }
 
-  const handleSavePort = (): void => {
-    const port = Number(portDraft)
-    if (!portDraft || Number.isNaN(port) || port < 1 || port > 65535) {
-      setMsg({ ok: false, text: '请输入 1-65535 的有效端口' })
-      return
-    }
-    void (async () => {
-      try {
-        await nsSave({ port })
-        setPortDraft('')
-        setMsg({ ok: true, text: `端口已改为 ${port}；重启 dsh 后生效。` })
-      } catch (err) {
-        setMsg({ ok: false, text: `设置端口失败：${String(err)}` })
-      }
-      await refreshData()
-    })()
-  }
 
   const handleSaveConcurrency = (): void => {
     const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3))
@@ -759,13 +787,29 @@ function DesktopSettingsPanel(): React.ReactElement {
 
   const handleSwitchRuntime = (version: string): void => {
     // 运行时切换 = 内置树换版本：必须同时钉回 builtin（否则 mode=external 时切了也仍走外部 CLI）
-    void nsSave({ dsh_runtime: version, dsh_mode: 'builtin' })
+    // #113：内置版本 = 回内置兜底 → dsh_runtime 置 null（存版本号会让顶部误显示「当前使用：运行时 xxx」）
+    const isBuiltin = runtimeCatalog?.builtin === version
+    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: 'builtin' })
       .then(() => invoke('restart_dsh_service'))
       .then(() => {
         setMsg({ ok: true, text: `已切换到 dsh ${version}，正在重启…` })
         void refreshRuntimes()
       })
       .catch((err) => setMsg({ ok: false, text: `切换失败：${String(err)}` }))
+  }
+
+  const handleRemoveRuntime = (version: string): void => {
+    // #104/#110：卸载已下载运行时，后端 async+spawn_blocking（不阻塞 UI）；错误文案可观测。
+    if (removingVersion) return
+    if (!window.confirm(`卸载运行时 dsh ${version}？将删除本地已下载文件，不可恢复。`)) return
+    setRemovingVersion(version)
+    invoke('remove_runtime', { version })
+      .then(() => {
+        setMsg({ ok: true, text: `已卸载运行时 dsh ${version}` })
+        void refreshRuntimes()
+      })
+      .catch((err) => setMsg({ ok: false, text: `卸载失败：${String(err)}` }))
+      .finally(() => setRemovingVersion(null))
   }
 
   const refreshData = useCallback(async (): Promise<void> => {
@@ -1128,14 +1172,36 @@ function DesktopSettingsPanel(): React.ReactElement {
                     runtimeCatalog.installed.some((i) => i.version === c.version),
                 )
                 const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version))
-                const visible = runtimeExpanded ? runtimeCatalog.catalog : [...heads, ...installedPinned]
+                // #107 并集渲染：installed 中不在 catalog 的版本（目录拉取失败/版本已下架）也要可见
+                const installedOnly = runtimeCatalog.installed
+                  .filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version))
+                  .map((i) => ({ version: i.version, channel: '' }))
+                // 补：内置版本同样可能不在 catalog（目录拉取失败时）——必须可见以切回内置
+                if (
+                  runtimeCatalog.builtin &&
+                  !runtimeCatalog.catalog.some((c) => c.version === runtimeCatalog.builtin) &&
+                  !installedOnly.some((i) => i.version === runtimeCatalog.builtin)
+                ) {
+                  installedOnly.unshift({ version: runtimeCatalog.builtin, channel: '' })
+                }
+                const visible = runtimeExpanded
+                  ? [...runtimeCatalog.catalog, ...installedOnly]
+                  : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))]
                 return (
                   <>
                     {visible.map((c) => {
                       const installed = runtimeCatalog.installed.some((i) => i.version === c.version)
+                      // #113：内置随包分发（不在 installed 数组）——可切换、标「内置」、不显示下载
+                      const isBuiltin = runtimeCatalog.builtin === c.version
+                      const available = installed || isBuiltin
+                      // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
+                      const isCurrent = runtimeCatalog.selected
+                        ? runtimeCatalog.selected === c.version
+                        : isBuiltin
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
-                      if (installed) tags.push('已下载')
+                      if (isBuiltin) tags.push('内置')
+                      else if (installed) tags.push('已下载')
                       const downloadState = runtimeDownloading[c.version]
                       const failedReason = typeof downloadState === 'object' ? downloadState.failed : ''
                       const pct =
@@ -1152,7 +1218,7 @@ function DesktopSettingsPanel(): React.ReactElement {
                             }}
                           >
                             <span>{`${c.version}${tags.length ? '（' + tags.join(' · ') + '）' : ''}`}</span>
-                            {!installed ? (
+                            {!available ? (
                               <PfBtn
                                 variant="ghost"
                                 disabled={downloadState === 'downloading'}
@@ -1167,13 +1233,29 @@ function DesktopSettingsPanel(): React.ReactElement {
                                       : '下载'}
                               </PfBtn>
                             ) : (
-                              <PfBtn
-                                variant="ghost"
-                                disabled={runtimeCatalog.selected === c.version}
-                                onClick={() => handleSwitchRuntime(c.version)}
-                              >
-                                {runtimeCatalog.selected === c.version ? '使用中' : '切换到此版本'}
-                              </PfBtn>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <PfBtn
+                                  variant="ghost"
+                                  disabled={isCurrent}
+                                  onClick={() => handleSwitchRuntime(c.version)}
+                                >
+                                  {isCurrent ? '使用中' : '切换到此版本'}
+                                </PfBtn>
+                                <PfBtn
+                                  variant="danger"
+                                  disabled={removingVersion !== null || runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
+                                  title={
+                                    runtimeCatalog.selected === c.version
+                                      ? '使用中的版本不可卸载，请先切换'
+                                      : c.version === runtimeCatalog.builtin
+                                        ? '内置版本随应用分发，不可卸载'
+                                        : '删除本地已下载的运行时'
+                                  }
+                                  onClick={() => handleRemoveRuntime(c.version)}
+                                >
+                                  {removingVersion === c.version ? '卸载中…' : '卸载'}
+                                </PfBtn>
+                              </div>
                             )}
                           </div>
                           {downloadState === 'downloading' && (
@@ -1230,21 +1312,59 @@ function DesktopSettingsPanel(): React.ReactElement {
         </div>
       </SectionBox>
 
-      {/* ── 本地端口 ── */}
-      <SectionBox title="本地端口">
-        <div style={ROW_STYLE}>
-          <input
-            placeholder={`当前 ${desktop.port}`}
-            style={{ ...INPUT_BASE_STYLE, width: 140 }}
-            data-desktop-settings="port"
-            value={portDraft}
-            onChange={(e) => setPortDraft(e.target.value.trim())}
-          />
-          <PfBtn variant="ghost" onClick={handleSavePort}>保存端口</PfBtn>
+      {/* ── 依赖状态（#122）── */}
+      <SectionBox title="依赖状态（pnpm store 一致性）">
+        <div style={LABEL_STYLE}>
+          dsh 的插件安装/卸载由内置 pnpm 执行；profile 的 node_modules 若由其它 pnpm 版本装过，
+          store 大版本不一致会报 ERR_PNPM_UNEXPECTED_STORE。此处可查看并重建。
         </div>
-        <div style={NOTE_STYLE}>改动后需重启 dsh 生效（可用托盘「重启 dsh 服务」）。</div>
+        {depProfiles === null ? (
+          <div style={NOTE_STYLE}>读取失败（仅桌面壳可用）</div>
+        ) : depProfiles.length === 0 ? (
+          <div style={NOTE_STYLE}>未发现 profile</div>
+        ) : (
+          <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ textAlign: 'left', opacity: 0.75 }}>
+                <th style={{ padding: '4px 6px' }}>Profile</th>
+                <th style={{ padding: '4px 6px' }}>依赖由 pnpm</th>
+                <th style={{ padding: '4px 6px' }}>内置 pnpm</th>
+                <th style={{ padding: '4px 6px' }}>状态</th>
+                <th style={{ padding: '4px 6px' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {depProfiles.map((p) => (
+                <tr key={p.profile}>
+                  <td style={{ padding: '4px 6px' }}>{p.profile}</td>
+                  <td style={{ padding: '4px 6px', opacity: 0.85 }}>{p.recordedPnpm ?? '未知'}</td>
+                  <td style={{ padding: '4px 6px', opacity: 0.85 }}>{p.builtinPnpm ?? '未知'}</td>
+                  <td style={{ padding: '4px 6px' }}>
+                    {!p.needsRebuild ? '一致' : p.running ? '需重建（运行中）' : '需重建'}
+                  </td>
+                  <td style={{ padding: '4px 6px' }}>
+                    <PfBtn
+                      variant="ghost"
+                      disabled={!p.needsRebuild || p.running || depRebuilding !== null}
+                      title={
+                        p.running
+                          ? '该 profile 正在运行：先停止再重建'
+                          : p.needsRebuild
+                            ? '用内置 pnpm 重建依赖（迁移 store 大版本）'
+                            : '无需重建'
+                      }
+                      onClick={() => handleRebuildDeps(p.profile)}
+                    >
+                      {depRebuilding === p.profile ? '重建中…' : '重建'}
+                    </PfBtn>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {depNote ? <div style={NOTE_STYLE}>{depNote}</div> : null}
       </SectionBox>
-
       {/* ── 下载（#72）── */}
       <SectionBox title="下载">
         <div style={ROW_STYLE}>
@@ -1292,7 +1412,10 @@ function DesktopSettingsPanel(): React.ReactElement {
           </>
         )}
 
+        {/* #102：NO_PROXY 为 manual 专属（system 模式下后端读系统设置，编辑不生效）；凭证两种模式都生效（拼入代理 URL） */}
         {(proxy.proxy_mode === 'manual' || proxy.proxy_mode === 'system') && (
+          <>
+        {proxy.proxy_mode === 'manual' && (
           <>
             <div style={LABEL_STYLE}>NO_PROXY（不走代理的地址，逗号分隔）</div>
             <input
@@ -1303,6 +1426,8 @@ function DesktopSettingsPanel(): React.ReactElement {
               data-desktop-settings="no-proxy"
               onChange={(e) => setProxy({ ...proxy, no_proxy: e.target.value.trim() })}
             />
+          </>
+        )}
 
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <div style={FLEX_1_STYLE}>
@@ -1332,6 +1457,9 @@ function DesktopSettingsPanel(): React.ReactElement {
 
         {proxyEffective && (
           <div style={NOTE_STYLE}>当前生效：{JSON.stringify(proxyEffective)}</div>
+        )}
+        {proxy.proxy_mode === 'system' && (
+          <div style={NOTE_STYLE}>系统代理模式下，代理地址与 NO_PROXY 来自系统设置（如 Windows 注册表 ProxyOverride）；用户名/密码仍取自设置并拼入代理地址。</div>
         )}
 
         {proxy.proxy_mode === 'manual' && proxy.proxy_url && (

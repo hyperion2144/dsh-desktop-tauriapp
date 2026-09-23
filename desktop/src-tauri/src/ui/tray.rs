@@ -56,6 +56,21 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .text("new-profile", "新建 Profile…")
         .text("migrate-profile", "迁移 Profile…")
         .build()?;
+    // 切换 Profile 分组（#117）：在当前聚焦窗口内就地切换（与上面「在新窗口打开」的区别：不新建窗）
+    let mut ssub =
+        tauri::menu::SubmenuBuilder::with_id(app, "switch-profile-menu", "切换 Profile（本窗口）");
+    for info in crate::profiles::scan_profiles() {
+        let port = port_for_profile(&info.name);
+        let running = crate::process::lifecycle::port_open(port);
+        let id = format!("switch-profile-{}", info.name);
+        let text = if running {
+            format!("{} · {}（运行中）", info.name, port)
+        } else {
+            format!("{} · {}", info.name, port)
+        };
+        ssub = ssub.text(&id, &text);
+    }
+    let switch_sub = ssub.build()?;
     // 运行时版本子菜单（#98）：内置 + 已装即时列出（本地数据）；目录未装项经异步缓存补充。
     let builtin_ver = crate::runtime::registry::builtin_version(app);
     let installed = crate::runtime::registry::list_installed(app);
@@ -87,7 +102,19 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(app, &[&show, &pet, &profile_sub, &runtime_sub, &restart, &toggle, &quit])?)
+    Ok(Menu::with_items(
+        app,
+        &[
+            &show,
+            &pet,
+            &profile_sub,
+            &switch_sub,
+            &runtime_sub,
+            &restart,
+            &toggle,
+            &quit,
+        ],
+    )?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -128,6 +155,12 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             id if id.starts_with("open-profile-") => {
                 let name = id.strip_prefix("open-profile-").unwrap_or("").to_string();
                 crate::ui::multiwin::open_profile_window(app, &name);
+            }
+            id if id.starts_with("switch-profile-") => {
+                let name = id.strip_prefix("switch-profile-").unwrap_or("").to_string();
+                // 「本窗口」= 当前聚焦窗口（无聚焦则主窗）；桌宠窗不参与
+                let label = crate::ui::multiwin::focused_window_label(app);
+                crate::ui::multiwin::switch_profile_in_window(app, &label, &name);
             }
             "runtime-builtin" => switch_runtime(app, None),
             "runtime-more" => {

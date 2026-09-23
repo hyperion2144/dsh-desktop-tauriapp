@@ -92,11 +92,30 @@ pub(crate) fn get_mode_prompt_needed(state: tauri::State<DshState>) -> bool {
 /// token 交换的 303 重定向会剥掉 query 参数，URL 标记无法与 token 同跳，
 /// 故由壳按当前接入模式/平台直接下发。client 拿到 advanced 才装桌面 chrome。
 #[tauri::command]
-pub(crate) fn get_desktop_client_environment(state: tauri::State<DshState>) -> serde_json::Value {
+pub(crate) fn get_desktop_client_environment(
+    window: tauri::WebviewWindow,
+    state: tauri::State<DshState>,
+) -> serde_json::Value {
+    // #109/#117：窗口所属 profile——先查绑定表（就地切换后 label 不再权威），
+    // 再回落 label 约定（profile-<name>），最后用激活/待定 profile（主窗）。
+    let label = window.label().to_string();
+    let profile = match state.profile_of_window(&label) {
+        Some(bound) => bound,
+        None => match label.strip_prefix("profile-") {
+            Some(name) => name.to_string(),
+            None => state
+                .pending_active_profile
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(crate::settings::configured_profile),
+        },
+    };
     let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
     serde_json::json!({
         "mode": if advanced { "advanced" } else { "compatibility" },
         "platform": desktop_platform_tag(),
+        "profile": profile,
     })
 }
 
@@ -507,6 +526,49 @@ fn active_profile() -> String {
     configured_profile()
 }
 
+/// 各 profile 的依赖状态（#122）：node_modules 记录的 pnpm 与内置 pnpm 是否一致，
+/// 以及该 profile 是否在运行（运行中不能重建）。
+#[tauri::command]
+pub(crate) fn list_profile_dependency_status(app: tauri::AppHandle) -> serde_json::Value {
+    let builtin = crate::profiles::builtin_pnpm_version(&app);
+    let profiles: Vec<serde_json::Value> = crate::profiles::scan_profiles()
+        .iter()
+        .map(|p| {
+            let recorded = crate::profiles::profile_recorded_pnpm(&p.name);
+            let mismatch = crate::profiles::profile_dependency_mismatch(&app, &p.name).is_some();
+            let port = crate::settings::port_for_profile(&p.name);
+            serde_json::json!({
+                "profile": p.name,
+                "recordedPnpm": recorded,
+                "builtinPnpm": builtin,
+                "needsRebuild": mismatch,
+                "running": crate::process::lifecycle::port_open(port),
+            })
+        })
+        .collect();
+    serde_json::json!({ "profiles": profiles })
+}
+
+/// 用内置 pnpm 重建某 profile 的依赖（#122）：把 node_modules 迁移到内置 pnpm 的
+/// store 大版本，修复 dsh 插件操作的 ERR_PNPM_UNEXPECTED_STORE。
+/// 运行中的 profile 拒绝（重建会破坏运行实例的 node_modules）。
+#[tauri::command]
+pub(crate) async fn rebuild_profile_dependencies(
+    app: tauri::AppHandle,
+    profile: String,
+) -> Result<(), String> {
+    let port = crate::settings::port_for_profile(&profile);
+    if crate::process::lifecycle::port_open(port) {
+        return Err(format!("{profile} 正在运行（端口 {port}），请先停止该 profile 再重建"));
+    }
+    let app2 = app.clone();
+    let profile2 = profile.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::profiles::pnpm_install_profile(&app2, &profile2)
+    })
+    .await
+    .map_err(|e| format!("重建任务执行失败：{e}"))?
+}
 /// 隔离名单（含 repairable 判定，供 UI 决定是否展示「修复」）。
 #[tauri::command]
 pub(crate) fn list_quarantine(profile: Option<String>) -> serde_json::Value {
@@ -607,6 +669,17 @@ pub(crate) fn run_doctor() -> serde_json::Value {
 }
 
 /// AI 解读（读 .credentials.yaml 密钥；任何失败静默返回，不阻塞隔离主流程）。
+/// #96：explain_failure 只承载 deepseek（默认路由）与 custom（自定义端点/密钥）；
+/// 其它 dsh 目录 provider 返回错误文案（防 #95 之前“一律 deepseek 默认路由”的静默错路由）。
+fn explain_provider_guard(provider: &str) -> Option<String> {
+    if provider == "deepseek" || provider == "custom" {
+        return None;
+    }
+    Some(format!(
+        "provider \"{provider}\" 的解读路由归 dsh llm 服务——请用保险丝面板「AI 解读」按钮（自动经 dsh 通道），或切回 deepseek/custom"
+    ))
+}
+
 #[tauri::command]
 pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>) -> serde_json::Value {
     let _ = profile;
@@ -618,9 +691,14 @@ pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>)
     else {
         return serde_json::json!({ "ok": false, "error": format!("台账中不存在 {id}") });
     };
-    // AI 路由按设置解析：provider（deepseek/custom）→ 密钥 env 名 + 端点 + 模型
+    // AI 路由按设置解析：deepseek（默认路由）与 custom（自定义端点/密钥）；其它 provider 归 dsh llm 服务。
     let s = load_desktop_settings();
     let provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
+    // #96：非 deepseek/custom 的 provider 路由归 dsh llm 目录（client 已自动经
+    // /dsh-desktop-fuse-explain 走 dsh 进程内通道）；直达本命令时明确报错防静默错路由。
+    if let Some(err) = explain_provider_guard(&provider) {
+        return serde_json::json!({ "ok": false, "error": err });
+    }
     let model_label = s
         .ai_model
         .clone()
@@ -695,6 +773,32 @@ pub(crate) fn list_ai_providers() -> serde_json::Value {
     serde_json::json!({ "providers": providers })
 }
 
+/// 把 patch 键写入合并对象（支持点号路径，如 `profile_ports.desktop`）。
+/// 原实现只做顶层字面键插入：`"profile_ports.desktop"` 成为未知字段，反序列化时被
+/// 静默丢弃——前端按点号路径保存的设置（Profile 端口）因此保存无效（用户实测）。
+fn insert_patch_path(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    path: &str,
+    value: serde_json::Value,
+) {
+    match path.split_once('.') {
+        None => {
+            root.insert(path.to_string(), value);
+        }
+        Some((head, rest)) => {
+            let entry = root
+                .entry(head.to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if !entry.is_object() {
+                *entry = serde_json::Value::Object(serde_json::Map::new());
+            }
+            if let Some(map) = entry.as_object_mut() {
+                insert_patch_path(map, rest, value);
+            }
+        }
+    }
+}
+
 
 /// 壳设置保存（#95 v0.1.7：搬出 dsh settings.yaml，Rust 单写者）。
 /// client 的 nsSave 通道：invoke('save_desktop_settings', {patch}) → 读改写私有 JSON。
@@ -707,7 +811,7 @@ pub(crate) fn save_desktop_settings(patch: serde_json::Value) -> Result<(), Stri
         if let Some(mut m) = Some(merged) {
             if let Some(mobj) = m.as_object_mut() {
                 for (k, v) in obj {
-                    mobj.insert(k.clone(), v.clone());
+                    insert_patch_path(mobj, k, v.clone());
                 }
             }
             current = serde_json::from_value(m)
@@ -1064,17 +1168,29 @@ pub(crate) async fn list_runtime_catalog(
             .unwrap_or_else(|| "github".into())
     });
     let repo = crate::settings::load_desktop_settings().runtime_github_repo;
-    let entries = crate::runtime::registry::fetch_catalog(&src, repo.as_deref()).await?;
+    // #107：目录拉取失败不整体报错——返回部分结果（本地数据 + 空目录 + error 标记），
+    // 设置页降级显示已下载版本（与托盘先本地后远程的行为对齐）。
+    let entries = match crate::runtime::registry::fetch_catalog(&src, repo.as_deref()).await {
+        Ok(e) => (e, None),
+        Err(err) => {
+            log::warn!("[runtime] 版本目录拉取失败（降级为仅本地已装）：{err}");
+            (Vec::new(), Some(err))
+        }
+    };
     let installed = crate::runtime::registry::list_installed(&app);
     let builtin = crate::runtime::registry::builtin_version(&app);
     let selected = crate::settings::load_desktop_settings().dsh_runtime;
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "source": src,
         "builtin": builtin,
         "selected": selected,
         "installed": installed,
-        "catalog": entries,
-    }))
+        "catalog": entries.0,
+    });
+    if let Some(err) = entries.1 {
+        value["error"] = serde_json::Value::String(err);
+    }
+    Ok(value)
 }
 
 /// 下载并安装一个运行时版本（进度经 runtime_download_status 轮询；安装统一走 pnpm）。
@@ -1111,7 +1227,9 @@ pub(crate) fn runtime_download_status() -> serde_json::Value {
 
 /// 删除一个已下载的运行时（内置/正在使用的不允许删）。
 #[tauri::command]
-pub(crate) fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
+/// #110：async + spawn_blocking——删除含大量 node_modules 的目录耗时数秒（Windows 尤甚），
+/// 同步命令会在 Tauri 主线程执行并整窗冻结。校验走同步快路径，删除进阻塞线程池。
+pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
     let current = crate::settings::load_desktop_settings().dsh_runtime;
     if current.as_deref() == Some(version.as_str()) {
         return Err(format!("{version} 正在使用，请先切换到其他版本"));
@@ -1119,7 +1237,11 @@ pub(crate) fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(
     if crate::runtime::registry::builtin_version(&app).as_deref() == Some(version.as_str()) {
         return Err(format!("{version} 是内置版本，不可删除"));
     }
-    crate::runtime::registry::remove_installed(&app, &version);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::runtime::registry::remove_installed(&app, &version);
+    })
+    .await
+    .map_err(|e| format!("删除任务异常：{e}"))?;
     Ok(())
 }
 #[cfg(test)]
@@ -1133,6 +1255,39 @@ mod fuse_doctor_tests {
         for c in checks {
             assert!(c.get("label").is_some(), "每项应有 label：{c}");
         }
+    }
+
+    #[test]
+    fn explain_provider_guard_routes_only_builtin() {
+        // #96：deepseek（默认路由）与 custom（自定义端点）放行；
+        // 其它 dsh 目录 provider（如 minimax-cn）拒绝直达，逼走路由正确的 dsh 进程内通道。
+        assert!(super::explain_provider_guard("deepseek").is_none());
+        assert!(super::explain_provider_guard("custom").is_none());
+        let err = super::explain_provider_guard("minimax-cn").expect("目录 provider 应被拒绝");
+        assert!(err.contains("dsh llm"), "文案应指向 dsh 通道：{err}");
+    }
+
+    #[test]
+    fn insert_patch_path_supports_dotted_keys() {
+        // 用户实测：Profile 端口保存无效——点号路径键（profile_ports.desktop）必须
+        // 展开为嵌套对象，否则成为未知顶层字段被反序列化静默丢弃。
+        let mut root = serde_json::json!({ "profile_ports": { "web": 3080 } });
+        {
+            let mobj = root.as_object_mut().unwrap();
+            super::insert_patch_path(mobj, "profile_ports.desktop", serde_json::json!(3081));
+        }
+        assert_eq!(root["profile_ports"]["desktop"], 3081);
+        assert_eq!(root["profile_ports"]["web"], 3080, "兄弟键保留");
+        // 顶层普通键不受影响
+        {
+            let mobj = root.as_object_mut().unwrap();
+            super::insert_patch_path(mobj, "active_profile", serde_json::json!("web"));
+        }
+        assert_eq!(root["active_profile"], "web");
+        // 中间值非对象 → 覆盖为对象（不 panic）
+        let mut r2 = serde_json::json!({ "profile_ports": 5 });
+        super::insert_patch_path(r2.as_object_mut().unwrap(), "profile_ports.x", serde_json::json!(1));
+        assert_eq!(r2["profile_ports"]["x"], 1);
     }
 
     #[test]

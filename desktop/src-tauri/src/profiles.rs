@@ -142,7 +142,7 @@ fn write_profile_templates(dir: &std::path::Path, profile: &str) -> Result<(), S
 }
 
 /// 在 profile 目录跑 pnpm install（从 pnpm_direct_add :390-421 提取）。
-fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), String> {
+pub(crate) fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), String> {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
     let dir = crate::dsh_home().join("profiles").join(profile);
@@ -174,7 +174,10 @@ fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), Str
     let mut child = Command::new(&node)
         .arg(&pnpm)
         .env("CI", "true")
-        .arg("install")
+        // 注：CI=true 是为防 pnpm 在无 TTY 下挂起交互，但 pnpm 同时会在 CI 环境默认
+        // frozen-lockfile——profile 迁移/重建场景 lockfile 常落后于 package.json（如用户
+        // 把插件改为 link: 本地路径后未重跑 install），必须显式关闭 frozen 才能重建。
+        .args(["install", "--no-frozen-lockfile"])
         .current_dir(&dir)
         .env("PATH", &joined)
         .stdout(Stdio::piped())
@@ -267,7 +270,9 @@ pub(crate) fn run_profile_plugin_add(
             parts.push(shim_dir);
         }
         if let Some(existing) = std::env::var_os("PATH") {
-            parts.push(std::path::PathBuf::from(existing));
+            // 必须 split_paths 展开：join_paths 遇到含冒号的整串元素会 Err →
+            // unwrap_or_default 静默变空 PATH（子进程找不到 node/pnpm/git）
+            parts.extend(std::env::split_paths(&existing));
         }
         let path_env = std::env::join_paths(&parts).unwrap_or_default();
         let out = std::process::Command::new(&node)
@@ -420,12 +425,133 @@ fn pwsh_fallback_dirs() -> Vec<std::path::PathBuf> {
     }
 }
 
+/// git 常见安装目录（pnpm 解析 git 依赖需要 spawn git；存在才返回，跨平台安全）。
+fn git_fallback_dirs() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    #[cfg(windows)]
+    {
+        for p in [r"C:\Program Files\Git\cmd", r"C:\Program Files (x86)\Git\cmd"] {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() {
+                out.push(pb);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        for p in ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() {
+                out.push(pb);
+            }
+        }
+    }
+    out
+}
+
+/// 内置 pnpm 版本（读包内 `node_modules/pnpm/package.json`）。
+pub(crate) fn builtin_pnpm_version(app: &tauri::AppHandle) -> Option<String> {
+    let pkg = pnpm_cjs_path(app)?.parent()?.parent()?.join("package.json");
+    let text = std::fs::read_to_string(pkg).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version").and_then(|x| x.as_str()).map(String::from)
+}
+
+/// 该 profile 的 node_modules 记录的 pnpm 版本（`.modules.yaml` 的 packageManager 行）。
+/// 行级提取（不解析整份 YAML）：形如 `  "packageManager": "pnpm@10.34.5",`。
+pub(crate) fn profile_recorded_pnpm(profile: &str) -> Option<String> {
+    let p = crate::dsh_home()
+        .join("profiles")
+        .join(profile)
+        .join("node_modules")
+        .join(".modules.yaml");
+    let text = std::fs::read_to_string(p).ok()?;
+    for line in text.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("\"packageManager\":") else {
+            continue;
+        };
+        let raw = rest.trim().trim_end_matches(',').trim().trim_matches('"');
+        if let Some(ver) = raw.strip_prefix("pnpm@") {
+            return Some(ver.to_string());
+        }
+    }
+    None
+}
+
+/// 依赖不一致判定（#122）：node_modules 记录的 pnpm 与内置 pnpm 不同 → 返回
+/// (记录的版本, 内置版本)。store 大版本不同时 dsh 的插件操作会报
+/// ERR_PNPM_UNEXPECTED_STORE（历史上 web profile 可能由系统 pnpm 安装）。
+pub(crate) fn profile_dependency_mismatch(
+    app: &tauri::AppHandle,
+    profile: &str,
+) -> Option<(String, String)> {
+    let recorded = profile_recorded_pnpm(profile)?;
+    let builtin = builtin_pnpm_version(app)?;
+    if recorded == builtin {
+        None
+    } else {
+        Some((recorded, builtin))
+    }
+}
+
 /// 常备 node/pnpm shim（#95）：sidecar 可执行名是 dsh-node，pnpm 只在包内 pnpm.cjs——
 /// 而子进程裸调 `node`（postinstall）或 `pnpm`（dsh plugin add 内部转发）都会 command not found。
 /// 在 app_data/runtime/bin/ 写同名包装脚本并前置 PATH（幂等）。
 pub(crate) fn ensure_node_shim_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let sidecar = crate::runtime::builtin::find_builtin_node()?;
-    let pnpm_cjs = app
+    let pnpm_cjs = pnpm_cjs_path(app)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("runtime")
+        .join("bin");
+    std::fs::create_dir_all(&dir).ok()?;
+    let sidecar_s = sidecar.to_string_lossy().to_string();
+    let pnpm_s = pnpm_cjs.to_string_lossy().to_string();
+    write_shim(
+        &dir,
+        "node",
+        &format!("exec \"{sidecar_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" %*"),
+    )?;
+    write_shim(
+        &dir,
+        "pnpm",
+        &format!("exec \"{sidecar_s}\" \"{pnpm_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" \"{pnpm_s}\" %*"),
+    )?;
+    Some(dir)
+}
+
+/// 仅 pnpm 的 shim 目录（#119 修正）：dsh 的插件子进程裸调 `pnpm` 必须命中内置 pnpm
+/// （与 profile 的 node_modules/store 大版本一致），但**不劫持** `node`——用户项目里的
+/// node 应保持登录 PATH 顺序（实测系统 node v26 vs 内置 v24，劫持会改变项目行为）。
+pub(crate) fn ensure_pnpm_shim_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let sidecar = crate::runtime::builtin::find_builtin_node()?;
+    let pnpm_cjs = pnpm_cjs_path(app)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("runtime")
+        .join("bin-pnpm");
+    std::fs::create_dir_all(&dir).ok()?;
+    let sidecar_s = sidecar.to_string_lossy().to_string();
+    let pnpm_s = pnpm_cjs.to_string_lossy().to_string();
+    write_shim(
+        &dir,
+        "pnpm",
+        &format!("exec \"{sidecar_s}\" \"{pnpm_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" \"{pnpm_s}\" %*"),
+    )?;
+    Some(dir)
+}
+
+/// pnpm 的包内入口（resources/dsh/node_modules/pnpm/bin/pnpm.cjs）。
+fn pnpm_cjs_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let p = app
         .path()
         .resource_dir()
         .ok()?
@@ -434,49 +560,40 @@ pub(crate) fn ensure_node_shim_dir(app: &tauri::AppHandle) -> Option<std::path::
         .join("pnpm")
         .join("bin")
         .join("pnpm.cjs");
-    if !pnpm_cjs.is_file() {
-        return None;
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
     }
-    let dir = app
-        .path()
-        .app_data_dir()
-        .ok()?
-        .join("runtime")
-        .join("bin");
-    std::fs::create_dir_all(&dir).ok()?;
-    let scripts: Vec<(std::path::PathBuf, String, String)> = vec![
-        (
-            dir.join(if cfg!(windows) { "node.cmd" } else { "node" }),
-            format!("exec \"{}\" \"$@\"", sidecar.to_string_lossy()),
-            format!("\"{}\" %*", sidecar.to_string_lossy()),
-        ),
-        (
-            dir.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" }),
-            format!(
-                "exec \"{}\" \"{}\" \"$@\"",
-                sidecar.to_string_lossy(),
-                pnpm_cjs.to_string_lossy()
-            ),
-            format!("\"{}\" \"{}\" %*", sidecar.to_string_lossy(), pnpm_cjs.to_string_lossy()),
-        ),
-    ];
-    for (path, unix_body, win_body) in scripts {
-        #[cfg(unix)]
-        let content = format!("#!/bin/sh\n{unix_body}\n");
-        #[cfg(windows)]
-        let content = format!("@echo off\r\n{win_body}\r\n");
-        let need = std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str());
-        if need {
-            std::fs::write(&path, content).ok()?; }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-    Some(dir)
 }
 
+/// 写 shim 脚本（unix `#!/bin/sh` / windows `.cmd`）：幂等 + 可执行位。
+fn write_shim(
+    dir: &std::path::Path,
+    name: &str,
+    unix_body: &str,
+    win_body: &str,
+) -> Option<()> {
+    let file = if cfg!(windows) {
+        format!("{name}.cmd")
+    } else {
+        name.to_string()
+    };
+    let path = dir.join(file);
+    #[cfg(unix)]
+    let content = format!("#!/bin/sh\n{unix_body}\n");
+    #[cfg(windows)]
+    let content = format!("@echo off\r\n{win_body}\r\n");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
+        std::fs::write(&path, content).ok()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    Some(())
+}
 /// 对齐版本号（纯版本，无包名前缀）：
 /// 1) 运行时树内有该包（如 dsh 本体依赖）→ 树内实际版本；
 /// 2) 树内没有（dsh-base/dsh-web-app 等 profile 发行插件，与 dsh 同版本发布）→ 运行时 dsh 版本号。
@@ -586,7 +703,8 @@ fn pnpm_direct_add(app: &tauri::AppHandle, profile: &str, pkg: &str) -> Result<(
         .arg(&pnpm)
         // CI=true：防 pnpm 交互提示在无 TTY 的 stdin 上挂起
         .env("CI", "true")
-        .arg("install")
+        // 同 pnpm_install_profile：CI=true 下 pnpm 默认 frozen-lockfile，显式关闭以便 lockfile 落后 package.json 时重建
+        .args(["install", "--no-frozen-lockfile"])
         .current_dir(&dir)
         .env("PATH", &joined)
         .stdout(Stdio::piped())
@@ -1022,8 +1140,15 @@ async fn migrate_profile_inner(
     for p in pwsh_fallback_dirs() {
         path_parts.push(p);
     }
+    // git 兜底：pnpm 解析 git 依赖（如 github 源插件）需 spawn git，GUI 精简 PATH 下
+    // 必须能找到（本次用户实测：迁移重建 resolved 到 git 依赖时报 spawn git ENOENT）
+    for p in git_fallback_dirs() {
+        path_parts.push(p);
+    }
     if let Some(existing) = std::env::var_os("PATH") {
-        path_parts.push(std::path::PathBuf::from(existing));
+        // 必须 split_paths 展开：join_paths 遇含冒号的整串元素会 Err → unwrap_or_default
+        // 静默变空 PATH（pnpm 自身靠绝对路径可跑，但其子进程 git 只能靠 PATH → ENOENT）
+        path_parts.extend(std::env::split_paths(&existing));
     }
     let path_for_pnpm = std::env::join_paths(&path_parts)
         .map(|p| p.to_string_lossy().into_owned())
@@ -1034,7 +1159,9 @@ async fn migrate_profile_inner(
             .arg(&pnpm_cjs)
             // CI=true：防交互提示挂起（迁移重建同样在 GUI 环境跑）
             .env("CI", "true")
-            .args(["install", "--prefer-offline"])
+            // #115：CI=true 下 pnpm 默认 frozen-lockfile；迁移重建的 lockfile 常落后于
+            // package.json（用户改 link: 本地插件后未重跑 install）→ 必须显式关闭 frozen
+            .args(["install", "--prefer-offline", "--no-frozen-lockfile"])
             .current_dir(&dst_for_pnpm)
             .env("PATH", &path_for_pnpm)
             .output();

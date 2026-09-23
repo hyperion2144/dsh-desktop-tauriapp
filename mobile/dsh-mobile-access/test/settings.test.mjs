@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { readSettingsKey, readSettingsString, writeSettingsKey, settingsPath } from '../lib/settings.mjs';
+import { readSettingsKey, readSettingsString, writeSettingsKey, settingsPath, readShellSetting, writeShellSetting } from '../lib/settings.mjs';
 
 function withTempSettings(content, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-test-'));
@@ -67,5 +67,45 @@ test('settings.mjs：清空值（空串）持久化', () => {
   withTempSettings('dsh-desktop-tauriapp:\n  cloudflared_bin: "/old"\n', () => {
     writeSettingsKey('cloudflared_bin', JSON.stringify(''));
     assert.equal(readSettingsString('cloudflared_bin'), '');
+  });
+});
+
+// #116：壳设置 JSON（desktop-settings.json）读写——手机访问壳专属键的新落点
+function withTempShellHome(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-mobile-shell-'));
+  const prevHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = dir;
+  try {
+    return fn(path.join(dir, 'desktop-settings.json'));
+  } finally {
+    if (prevHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevHome;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('#116：壳设置 JSON 写入保留其它字段、读取回原值', () => {
+  withTempShellHome((p) => {
+    fs.writeFileSync(p, JSON.stringify({ port: 3081, dsh_mode: 'builtin' }, null, 2));
+    assert.equal(readShellSetting('tunnel_url'), null);
+    writeShellSetting('tunnel_url', 'https://t.example.com');
+    const obj = JSON.parse(fs.readFileSync(p, 'utf8'));
+    assert.equal(obj.tunnel_url, 'https://t.example.com');
+    assert.equal(obj.port, 3081);
+    assert.equal(obj.dsh_mode, 'builtin');
+    assert.equal(readShellSetting('tunnel_url'), 'https://t.example.com');
+    // UI 空串清除语义
+    writeShellSetting('tunnel_url', '');
+    assert.equal(readShellSetting('tunnel_url'), '');
+  });
+});
+
+test('#116：壳设置文件缺失/损坏时读 null、写可重建', () => {
+  withTempShellHome((p) => {
+    assert.equal(readShellSetting('cloudflared_bin'), null); // 文件不存在
+    fs.writeFileSync(p, '{ not json');
+    assert.equal(readShellSetting('cloudflared_bin'), null); // 损坏
+    writeShellSetting('cloudflared_bin', '/opt/homebrew/bin/cloudflared');
+    assert.equal(readShellSetting('cloudflared_bin'), '/opt/homebrew/bin/cloudflared');
   });
 });

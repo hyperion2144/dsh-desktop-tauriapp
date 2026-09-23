@@ -73,6 +73,7 @@ use commands::{
     run_doctor, explain_failure, get_fuse_summary,
     get_quarantine_settings, save_quarantine_settings, list_ai_providers,
     save_desktop_settings, get_desktop_settings_data, add_remote_address, remove_remote_address,
+    list_profile_dependency_status, rebuild_profile_dependencies,
     select_remote_address, set_local_port, switch_profile_command,
     confirm_startup_profile,
     check_startup_needed,
@@ -192,6 +193,8 @@ pub fn run() {
             set_profile_port,
             create_profile_flow_command,
             list_quarantine,
+            list_profile_dependency_status,
+            rebuild_profile_dependencies,
             list_runtime_catalog,
             download_runtime,
             remove_runtime,
@@ -247,6 +250,51 @@ pub fn run() {
             downloads: download::DownloadManager::new(),
         })
         .setup(|app| {
+            // #114：清空运行时回收站（卸载延迟删除的落地）——须在 dsh spawn 之前，
+            // 此刻无运行中实例依赖这些 inode（避免硬 link ctime 变化触发插件 rebuilt）
+            crate::runtime::registry::purge_trash(app.handle());
+            // #122：后台检查各 profile 的依赖 store 是否与内置 pnpm 一致（历史上某些
+            // profile 由系统 pnpm 安装，store 大版本不同会让 dsh 的插件操作报
+            // ERR_PNPM_UNEXPECTED_STORE）；不一致且未运行 → 用内置 pnpm 自动重建一次。
+            {
+                let bg = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        for p in crate::profiles::scan_profiles() {
+                            let Some((recorded, builtin)) =
+                                crate::profiles::profile_dependency_mismatch(&bg, &p.name)
+                            else {
+                                continue;
+                            };
+                            let port = crate::settings::port_for_profile(&p.name);
+                            if crate::process::lifecycle::port_open(port) {
+                                crate::network::notify::show_notification(
+                                    &bg,
+                                    "依赖需重建",
+                                    &format!(
+                                        "{} 的依赖由 pnpm {recorded} 安装（内置 {builtin}），该 profile 正在运行未自动重建；停止后可在设置页「依赖状态」重建。",
+                                        p.name
+                                    ),
+                                );
+                                continue;
+                            }
+                            match crate::profiles::pnpm_install_profile(&bg, &p.name) {
+                                Ok(()) => crate::network::notify::show_notification(
+                                    &bg,
+                                    "依赖已重建",
+                                    &format!("{} 的依赖已按内置 pnpm {builtin} 重建（原 {recorded}），重启该 profile 生效。", p.name),
+                                ),
+                                Err(e) => crate::network::notify::show_notification(
+                                    &bg,
+                                    "依赖重建失败",
+                                    &format!("{}：{e}", p.name),
+                                ),
+                            }
+                        }
+                    })
+                    .await;
+                });
+            }
             // #72：主窗口由代码创建（不再走 tauri.conf.json 声明）以挂载下载处理器
             // ——wry 无 handler 时 macOS WKWebView 会静默取消所有下载。
             let dl_app = app.handle().clone();
@@ -276,6 +324,15 @@ pub fn run() {
                     false // 原生下载一律取消（转交 Rust 下载管理器）
                 }
                 _ => true,
+            })
+            // 新窗请求（window.open / <a target=_blank>）→ 系统浏览器，应用内不开新窗
+            // （对齐 dsh 官方 Electron 桌面 setWindowOpenHandler；见 nav_guard 模块注释）
+            .on_new_window(|url, _| {
+                if crate::ui::nav_guard::new_window_guard(&url) {
+                    tauri::webview::NewWindowResponse::Allow
+                } else {
+                    tauri::webview::NewWindowResponse::Deny
+                }
             })
             .build();
             if let Err(e) = main_window {

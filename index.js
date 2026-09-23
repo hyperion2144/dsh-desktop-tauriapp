@@ -183,5 +183,57 @@ export function apply(ctx) {
       }
       return { ok: true, value: { providers: result } }
     }, { authority: 'trusted-host' })
+    // AI 解读（#96）：dsh provider 路由的解读由 dsh 进程内发起——路由知识（baseUrl/密钥/env）
+    // 归 llm 服务单一事实源，壳不再复刻 provider 解析；custom（自定义端点）仍走壳 Rust。
+    // prompt 模板与 desktop/src-tauri/src/network/ai.rs explain_prompt 保持一致（改一处同步另一处）。
+    webContext.connection.rpc.handle('/dsh-desktop-fuse-explain', async (_endpoint, payload) => {
+      const llm = ctx.get('llm')
+      if (llm === void 0) throw new Error('llm service unavailable')
+      const { failureType, name, rawError, provider, model } = payload ?? {}
+      if (!provider || !model) throw new Error('缺少 provider/model（先在保险丝设置里选择）')
+      const raw = String(rawError ?? '').split('\n').slice(0, 40).join('\n')
+      const prompt = `你是 dsh（DeepSeek Harness）桌面壳的启动保险丝助手。dsh 启动失败，一个插件被自动禁用。\n失败类型：${failureType}\n插件：${name}\n原始错误（已截断）：\n${raw}\n\n请用中文按三段回答：【原因】为什么会失败；【建议】给出具体可执行的修复步骤；【置信】高/中/低。总长不超过 300 字。`
+      const messages = [{
+        id: crypto.randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text: prompt }],
+        source: { kind: 'dsh-desktop-tauriapp' },
+      }]
+      let suggestion = ''
+      let failure = null
+      // #121：看门狗——provider 无响应时 llm.stream 可能永不结束（实测「一直解读中」），
+      // 用 Promise.race 包住每次 next()：45s 无新数据即中止并明确报错，避免无限 loading。
+      const iterator = llm.stream({ provider, model, messages, maxTokens: 1024, purpose: 'plugin-fuse-explain' })[Symbol.asyncIterator]()
+      let records = 0
+      try {
+        while (true) {
+          let timer
+          const step = await Promise.race([
+            iterator.next(),
+            new Promise((resolve) => {
+              timer = setTimeout(() => resolve({ __timeout: true }), 45000)
+            }),
+          ])
+          clearTimeout(timer)
+          if (step.__timeout === true) {
+            try { await iterator.return?.() } catch { /* 忽略收尾异常 */ }
+            throw new Error(`模型无响应（45 秒未返回数据；已收到 ${records} 个数据块）`)
+          }
+          if (step.done === true) break
+          const record = step.value
+          records += 1
+          if (record.type === 'chunk' && record.chunk?.type === 'text-delta') suggestion += record.chunk.text
+          else if (record.type === 'text-chunks') suggestion += record.texts.join('')
+          else if (record.type === 'finish' && record.reason?.kind === 'error') failure = record.reason.failure
+        }
+      } catch (streamError) {
+        ctx.logger?.warn?.(`[fuse-explain] 流中断：${streamError?.message ?? streamError}（provider=${provider} model=${model}，已收 ${records} 块）`)
+        throw streamError
+      }
+      ctx.logger?.info?.(`[fuse-explain] 完成：provider=${provider} model=${model}，${records} 块，${suggestion.length} 字`)
+      if (failure) throw new Error(`模型调用失败：${failure.message ?? failure.code ?? String(failure)}`)
+      if (!suggestion.trim()) throw new Error(`模型未返回文本（收到 ${records} 个数据块）`)
+      return { ok: true, value: { ok: true, suggestion, model } }
+    }, { authority: 'trusted-host' })
   })
 }
