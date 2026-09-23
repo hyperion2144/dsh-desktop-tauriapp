@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Node/V8 sidecar（dsh-node）必需：hardened runtime 下 JIT 与可执行内存豁免。
+         CI dmg 带 quarantine 经 Finder 启动时 AMFI 强制 runtime 限制，缺这些豁免
+         会让 V8 初始化直接 Fatal OOM（Failed to reserve virtual memory for CodeRange），
+         实测 2026-09-22 v0.9.1 覆盖重发包。 -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- resources/dsh/node_modules 内 .node 原生模块未逐个签名，需关库校验 -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

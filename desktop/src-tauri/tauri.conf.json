@@ -44,7 +44,8 @@
     "longDescription": "一键启动 DeepSeek Harness Web GUI 的桌面壳：自动拉起本地服务、托盘常驻、退出自动清理。",
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "wix": {
