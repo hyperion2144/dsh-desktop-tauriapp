@@ -79,6 +79,8 @@ interface RuntimeCatalog {
   selected: string | null
   installed: { version: string }[]
   catalog: { version: string; channel: string }[]
+  /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
+  error?: string
 }
 
 interface MigrationStatus {
@@ -497,7 +499,11 @@ function DesktopSettingsPanel(): React.ReactElement {
     try {
       const s = await invoke<RuntimeCatalog>('list_runtime_catalog', { source: runtimeSource })
       setRuntimeCatalog(s)
-      setRuntimeStatus({ state: 'ok' })
+      setRuntimeStatus(
+        s.error
+          ? { state: 'error', text: `目录拉取失败：${s.error}（仅显示已下载版本）` }
+          : { state: 'ok' },
+      )
       setRuntimeDownloading({})
     } catch (err) {
       setRuntimeStatus({ state: 'error', text: `版本目录读取失败：${String(err)}` })
@@ -1142,7 +1148,13 @@ function DesktopSettingsPanel(): React.ReactElement {
                     runtimeCatalog.installed.some((i) => i.version === c.version),
                 )
                 const rest = runtimeCatalog.catalog.filter((c) => !seen.has(c.version))
-                const visible = runtimeExpanded ? runtimeCatalog.catalog : [...heads, ...installedPinned]
+                // #107 并集渲染：installed 中不在 catalog 的版本（目录拉取失败/版本已下架）也要可见
+                const installedOnly = runtimeCatalog.installed
+                  .filter((i) => !runtimeCatalog.catalog.some((c) => c.version === i.version))
+                  .map((i) => ({ version: i.version, channel: '' }))
+                const visible = runtimeExpanded
+                  ? [...runtimeCatalog.catalog, ...installedOnly]
+                  : [...heads, ...installedPinned, ...installedOnly.filter((i) => !seen.has(i.version))]
                 return (
                   <>
                     {visible.map((c) => {

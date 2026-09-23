@@ -1080,17 +1080,29 @@ pub(crate) async fn list_runtime_catalog(
             .unwrap_or_else(|| "github".into())
     });
     let repo = crate::settings::load_desktop_settings().runtime_github_repo;
-    let entries = crate::runtime::registry::fetch_catalog(&src, repo.as_deref()).await?;
+    // #107：目录拉取失败不整体报错——返回部分结果（本地数据 + 空目录 + error 标记），
+    // 设置页降级显示已下载版本（与托盘先本地后远程的行为对齐）。
+    let entries = match crate::runtime::registry::fetch_catalog(&src, repo.as_deref()).await {
+        Ok(e) => (e, None),
+        Err(err) => {
+            log::warn!("[runtime] 版本目录拉取失败（降级为仅本地已装）：{err}");
+            (Vec::new(), Some(err))
+        }
+    };
     let installed = crate::runtime::registry::list_installed(&app);
     let builtin = crate::runtime::registry::builtin_version(&app);
     let selected = crate::settings::load_desktop_settings().dsh_runtime;
-    Ok(serde_json::json!({
+    let mut value = serde_json::json!({
         "source": src,
         "builtin": builtin,
         "selected": selected,
         "installed": installed,
-        "catalog": entries,
-    }))
+        "catalog": entries.0,
+    });
+    if let Some(err) = entries.1 {
+        value["error"] = serde_json::Value::String(err);
+    }
+    Ok(value)
 }
 
 /// 下载并安装一个运行时版本（进度经 runtime_download_status 轮询；安装统一走 pnpm）。
