@@ -4,6 +4,13 @@
 
 ## 已发布
 
+### v0.9.3（2026-09-23）
+
+- **内置运行时升级到 dsh 0.1.7-rc.1（对齐官方 RC）**：`prepare-builtin-runtime.mjs` 的内置 dsh 版本改为**精确 pin**（顶部 `BUILTIN_DSH_VERSION`，支持 `--dsh-version` 临时覆盖），不再跟随 npm 的浮动 `latest` tag——此前 `latest` 指向旧的 0.1.5-rc.3，使内置树长期落后于官方 RC。本地与 CI 共用同一脚本，内置版本从此一致且可复现
+- **依赖状态命令的 ACL 修正**：新增的 `list_profile_dependency_status` / `rebuild_profile_dependencies` 原先只加进 `capabilities/default.json`，而本壳页面 origin 是 `http://127.0.0.1:308x`（Tauri 视作 remote origin）→ 实际生效的 `remote-desktop.json` 未授权 → 面板报「读取失败：Command … not allowed by ACL」。修复：两个 capability 同步补齐（`remote.urls` 仅本机回环，本机维护类命令加入也安全）；`default.json` 窗口范围同时扩为 `["main", "profile-*"]`
+- **依赖状态失败不再吞错**：读取失败时把真实原因显示在面板并写 console（原提示「仅桌面壳可用」会掩盖 ACL/命令错误）
+- **诊断**：`get_desktop_client_environment` 记录实际窗口 label，便于定位 ACL 类问题
+
 ### v0.9.2（2026-09-23）
 
 本版集中修复桌面壳体验与三类链路问题：外链路由（回归官方语义）、配置持久化（隧道地址/端口保存）、运行时依赖（pnpm store 一致性），并新增依赖状态自检、托盘 Profile 切换与面板错误边界。

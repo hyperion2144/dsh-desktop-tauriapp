@@ -63,6 +63,8 @@
     "allow-get-dsh-source",
     "allow-set-dsh-source",
     "allow-list-profile-ports",
+    "allow-list-profile-dependency-status",
+    "allow-rebuild-profile-dependencies",
     "allow-set-profile-port",
     "allow-create-profile-flow-command",
     "allow-get-proxy-settings",

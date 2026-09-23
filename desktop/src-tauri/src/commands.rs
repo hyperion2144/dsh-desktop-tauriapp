@@ -99,6 +99,9 @@ pub(crate) fn get_desktop_client_environment(
     // #109/#117：窗口所属 profile——先查绑定表（就地切换后 label 不再权威），
     // 再回落 label 约定（profile-<name>），最后用激活/待定 profile（主窗）。
     let label = window.label().to_string();
+    // #122 排查：ACL 按窗口 label 授权（capability 的 windows 匹配），被拒不报具体原因；
+    // 把实际 label 写进壳日志，便于定位“not allowed by ACL”。
+    log::info!("[env] get_desktop_client_environment label={label}");
     let profile = match state.profile_of_window(&label) {
         Some(bound) => bound,
         None => match label.strip_prefix("profile-") {

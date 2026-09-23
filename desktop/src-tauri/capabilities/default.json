@@ -1,10 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
-  "windows": [
-    "main"
-  ],
+  "description": "Capability for local application windows (main + per-profile secondary windows)",
+  "windows": ["main", "profile-*"],
   "permissions": [
     "allow-get-desktop-client-environment",
     "core:default",

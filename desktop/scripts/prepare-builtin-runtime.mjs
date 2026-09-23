@@ -23,6 +23,10 @@ const opt = (name, fallback) => {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : fallback;
 };
+// 内置 dsh 的版本（**pin，不浮动**）：内置运行时随安装包分发，本地与 CI 必须一致且可复现。
+// 升级内置 dsh 版本 = 改这一行（也可用 --dsh-version <ver> 临时覆盖）。
+const BUILTIN_DSH_VERSION = "0.1.7-rc.1";
+const dshVersion = opt("--dsh-version", BUILTIN_DSH_VERSION);
 const variant = opt("--variant");
 const nodeVersionTag = opt("--node-version", "latest-v24.x");
 const skipNode = flag("--skip-node");
@@ -42,12 +46,12 @@ const stage = join(srcTauri, ".builtin-stage");
 
 // ── 1) dsh 依赖树（npm 装 → 拷进 resources/dsh）──
 if (!skipPackages) {
+  // 版本来自 pin（不再跟随 npm dist-tag；dist-tag 仅作升级时的参考信息）
+  const version = dshVersion;
   const distTags = JSON.parse(
     execSync("npm view @deepseek-ai/dsh dist-tags --json", { encoding: "utf8" })
   );
-  const version = distTags[variant];
-  if (!version) die(`npm dist-tags 里没有 ${variant}（现有：${Object.keys(distTags).join(", ")}）`);
-  log(`内置 dsh ${variant} = ${version}`);
+  log(`内置 dsh 版本（pin）= ${version}（当前 dist-tags：${JSON.stringify(distTags)}）`);
 
   mkdirSync(stage, { recursive: true });
   writeFileSync(join(stage, "package.json"), JSON.stringify({ private: true }));

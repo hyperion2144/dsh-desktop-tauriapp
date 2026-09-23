@@ -351,12 +351,16 @@ function DesktopSettingsPanel(): React.ReactElement {
   }> | null>(null)
   const [depRebuilding, setDepRebuilding] = useState<string | null>(null)
   const [depNote, setDepNote] = useState<string>('')
+  const [depError, setDepError] = useState<string | null>(null)
 
   const refreshDepStatus = useCallback(async (): Promise<void> => {
     try {
       const r = await invoke<{ profiles: typeof depProfiles }>('list_profile_dependency_status')
       setDepProfiles(r?.profiles ?? [])
-    } catch {
+    } catch (err) {
+      // 不吞错：写日志并展示真实原因（#122 收尾——原提示“仅桌面壳可用”会掩盖 ACL/命令错误）
+      console.error('[desktop-settings] list_profile_dependency_status 失败：', err)
+      setDepError(String(err))
       setDepProfiles(null)
     }
   }, [])
@@ -1319,7 +1323,7 @@ function DesktopSettingsPanel(): React.ReactElement {
           store 大版本不一致会报 ERR_PNPM_UNEXPECTED_STORE。此处可查看并重建。
         </div>
         {depProfiles === null ? (
-          <div style={NOTE_STYLE}>读取失败（仅桌面壳可用）</div>
+          <div style={NOTE_STYLE}>读取失败：{depError ?? '未知原因'}</div>
         ) : depProfiles.length === 0 ? (
           <div style={NOTE_STYLE}>未发现 profile</div>
         ) : (
