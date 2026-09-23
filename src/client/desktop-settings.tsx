@@ -770,7 +770,9 @@ function DesktopSettingsPanel(): React.ReactElement {
 
   const handleSwitchRuntime = (version: string): void => {
     // 运行时切换 = 内置树换版本：必须同时钉回 builtin（否则 mode=external 时切了也仍走外部 CLI）
-    void nsSave({ dsh_runtime: version, dsh_mode: 'builtin' })
+    // #113：内置版本 = 回内置兜底 → dsh_runtime 置 null（存版本号会让顶部误显示「当前使用：运行时 xxx」）
+    const isBuiltin = runtimeCatalog?.builtin === version
+    void nsSave({ dsh_runtime: isBuiltin ? null : version, dsh_mode: 'builtin' })
       .then(() => invoke('restart_dsh_service'))
       .then(() => {
         setMsg({ ok: true, text: `已切换到 dsh ${version}，正在重启…` })
@@ -1164,9 +1166,17 @@ function DesktopSettingsPanel(): React.ReactElement {
                   <>
                     {visible.map((c) => {
                       const installed = runtimeCatalog.installed.some((i) => i.version === c.version)
+                      // #113：内置随包分发（不在 installed 数组）——可切换、标「内置」、不显示下载
+                      const isBuiltin = runtimeCatalog.builtin === c.version
+                      const available = installed || isBuiltin
+                      // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
+                      const isCurrent = runtimeCatalog.selected
+                        ? runtimeCatalog.selected === c.version
+                        : isBuiltin
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
-                      if (installed) tags.push('已下载')
+                      if (isBuiltin) tags.push('内置')
+                      else if (installed) tags.push('已下载')
                       const downloadState = runtimeDownloading[c.version]
                       const failedReason = typeof downloadState === 'object' ? downloadState.failed : ''
                       const pct =
@@ -1183,7 +1193,7 @@ function DesktopSettingsPanel(): React.ReactElement {
                             }}
                           >
                             <span>{`${c.version}${tags.length ? '（' + tags.join(' · ') + '）' : ''}`}</span>
-                            {!installed ? (
+                            {!available ? (
                               <PfBtn
                                 variant="ghost"
                                 disabled={downloadState === 'downloading'}
@@ -1201,10 +1211,10 @@ function DesktopSettingsPanel(): React.ReactElement {
                               <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                                 <PfBtn
                                   variant="ghost"
-                                  disabled={runtimeCatalog.selected === c.version}
+                                  disabled={isCurrent}
                                   onClick={() => handleSwitchRuntime(c.version)}
                                 >
-                                  {runtimeCatalog.selected === c.version ? '使用中' : '切换到此版本'}
+                                  {isCurrent ? '使用中' : '切换到此版本'}
                                 </PfBtn>
                                 <PfBtn
                                   variant="danger"
