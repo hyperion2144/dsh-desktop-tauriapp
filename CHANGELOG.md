@@ -21,6 +21,7 @@
 - 保险丝面板 AI 解读 loading 文案改为显示当前设置的模型（原硬编码 deepseek-v4-flash 与实际路由不一致）
 - **dsh 自带插件卸载/安装报 ERR_PNPM_UNEXPECTED_STORE（#119）**：内置模式下壳给 dsh 的 PATH 是用户登录 shell 的 PATH（含 /opt/homebrew/bin），dsh 的插件管理裸调 `pnpm` 时命中**系统 pnpm**（实测 11.16.0，store/v11），而 profile 的 node_modules 由内置 pnpm（10.34.5，store/v10）安装 → store 大版本不匹配直接拒绝操作。修复：内置模式下把**仅含 pnpm 的 shim 目录**（`runtime/bin-pnpm`）**前置**到 dsh 的 PATH——pnpm 钉回内置 pnpm.cjs（store 一致），但**不劫持 node**（用户项目仍用登录 PATH 的 node；实测系统 v26 与内置 v24 不同版本）
 - **插件保险丝面板空白（#120）**：`QuarantineDetail` 作用域内引用了不存在的 `settings`（其为 `FusePanel` 的 state）→ 渲染即 `ReferenceError: Can't find variable: settings` → React 卸载整棵树致面板全空。修复：`explainModel` 改由 `FusePanel` 通过 prop 传入；同时保留面板错误边界（异常直接显示可读错误 + 写入应用日志）
+- **保险丝面板 AI 解读无限 loading（#121）**：走 dsh 路由的解读链路（宿主 RPC → `llm.stream`）宿主侧与前端均无超时——provider 无响应时 `await next()` 永不返回，面板一直「AI 解读中」且无任何可诊断信息。修复：宿主侧改为逐次 `next()` + `Promise.race` 看门狗（45s 无新数据即收尾并报「模型无响应（已收到 N 个数据块）」）+ `[fuse-explain]` 过程日志（provider/model/块数/字数）；前端 `rpc.call` 加 75s 超时兜底
 - **下载图标兼容 dsh 0.1.7 重命名（#103）**：`IconDownloadOutline16 ?? IconDownloadOutlineRegular` 双名 fallback，修复 0.1.7 下下载按钮消失与 Tab 标题空白
 - **运行时版本卸载入口（#104）**：设置页已下载版本列表加卸载按钮（二次确认；使用中/内置灰置+tooltip），复用 #95 既有 remove_runtime，后端零改动
 - **手机布局包升级 v3.0.1（#105）**：dsh-web-mobile submodule v2.3.0 → v3.0.1（0.1.6/0.1.7 宿管适配、系统返回退出、文件手势、图标跨代兼容、真机修复）
