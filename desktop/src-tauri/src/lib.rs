@@ -247,6 +247,9 @@ pub fn run() {
             downloads: download::DownloadManager::new(),
         })
         .setup(|app| {
+            // #114：清空运行时回收站（卸载延迟删除的落地）——须在 dsh spawn 之前，
+            // 此刻无运行中实例依赖这些 inode（避免硬 link ctime 变化触发插件 rebuilt）
+            crate::runtime::registry::purge_trash(app.handle());
             // #72：主窗口由代码创建（不再走 tauri.conf.json 声明）以挂载下载处理器
             // ——wry 无 handler 时 macOS WKWebView 会静默取消所有下载。
             let dl_app = app.handle().clone();

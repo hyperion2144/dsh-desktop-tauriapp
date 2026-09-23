@@ -41,6 +41,32 @@ pub(crate) fn runtime_dir(app: &tauri::AppHandle, version: &str) -> PathBuf {
     runtimes_dir(app).join(version)
 }
 
+/// 运行时回收站（#114）：卸载先 rename 到此、真实删除推迟到下次启动——
+/// 直接 unlink 会改变与运行树 hardlink 共享 inode 的 ctime，触发 dsh 插件 rebuilt（页面白屏）。
+pub(crate) fn trash_dir(app: &tauri::AppHandle) -> PathBuf {
+    runtimes_dir(app).join(".trash")
+}
+
+/// 清空回收站（#114）：壳启动、dsh spawn 之前调用（此刻无运行中实例依赖这些 inode）。
+/// 失败仅记日志，不阻塞启动。
+pub(crate) fn purge_trash(app: &tauri::AppHandle) {
+    let dir = trash_dir(app);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        let r = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        if let Err(err) = r {
+            log::warn!("[runtime] 回收站清理失败 {}：{err}", p.display());
+        }
+    }
+}
+
 /// 运行时目录有效性：与内置同构（dsh 包 lib 存在）。
 pub(crate) fn is_valid_runtime(dir: &std::path::Path) -> bool {
     dir.join("node_modules")
@@ -80,8 +106,31 @@ pub(crate) fn remove_installed(app: &tauri::AppHandle, version: &str) -> bool {
     let before = list.len();
     list.retain(|r| r.version != version);
     save_installed(app, &list);
-    let _ = std::fs::remove_dir_all(runtime_dir(app, version));
+    discard_runtime_dir(app, version);
     list.len() != before
+}
+
+/// 丢弃一个运行时目录（#114）：rename 到 .trash、真实删除推迟到下次启动 purge_trash。
+/// 直接 unlink 会改与运行树 hardlink 共享 inode 的 ctime（rev = mtime|ctime|size）→
+/// 运行中 dsh 判定插件 rebuilt → 重载 → 页面白屏。异常（跨卷等）回退直接删除并记日志。
+pub(crate) fn discard_runtime_dir(app: &tauri::AppHandle, version: &str) {
+    let dir = runtime_dir(app, version);
+    if !dir.exists() {
+        return;
+    }
+    let trash = trash_dir(app);
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dest = trash.join(format!("{version}-{ts}"));
+    let moved = std::fs::create_dir_all(&trash).is_ok() && std::fs::rename(&dir, &dest).is_ok();
+    if !moved {
+        log::warn!("[runtime] 回收站不可用，回退直接删除 {version}");
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            log::warn!("[runtime] 删除 {version} 目录失败：{e}");
+        }
+    }
 }
 
 /// 读指定安装根（npm 布局）里 dsh 包的版本号。
@@ -288,7 +337,17 @@ fn pnpm_add_runtime(
     // #95 实测：pnpm 默认 .pnpm symlink 布局顶层只有直接依赖，dsh/lib/bin.js 向上解析
     // dsh-app-boot 等兄弟包会 MODULE_NOT_FOUND。hoisted = npm 式全量平铺，与内置
     // resources/dsh 同构，解析钩子与启动器无需区分树型。
-    std::fs::write(dst.join(".npmrc"), "node-linker=hoisted\n")
+    // #114：独立 store（绝对路径，正斜杠）——不写全局 store，避免触碰与运行树 hardlink
+    // 共享 inode 的 mtime/ctime（rev = mtime|ctime|size，改动即触发 dsh 插件 rebuilt → 白屏）
+    let store = dst
+        .parent()
+        .map(|p| p.join(".pnpm-store"))
+        .unwrap_or_else(|| dst.join(".pnpm-store"));
+    let store_path = store.display().to_string().replace('\\', "/");
+    std::fs::write(
+        dst.join(".npmrc"),
+        format!("node-linker=hoisted\nstore-dir={store_path}\n"),
+    )
         .map_err(|e| format!("写入 .npmrc 失败：{e}"))?;
     // pnpm 及其子进程需要 node：前置内置 node 目录
     let node_dir = node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
@@ -400,7 +459,7 @@ fn install_via_pnpm(app: &tauri::AppHandle, version: &str) -> Result<(), String>
     })();
     if let Err(e) = &outcome {
         *DL_ERROR.lock().unwrap() = e.clone();
-        let _ = std::fs::remove_dir_all(runtime_dir(app, version));
+        discard_runtime_dir(app, version);
     }
     DL_ACTIVE.store(false, Ordering::SeqCst);
     outcome
