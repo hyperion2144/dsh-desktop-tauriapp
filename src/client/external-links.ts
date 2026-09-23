@@ -130,21 +130,23 @@ function openInSystem(url: string): void {
 
 /** 安装全局外链拦截器（点击 + 中键 + window.open 覆盖）；返回卸载函数（页面存活期保持）。 */
 export function installExternalLinkHandler(ctx?: unknown): () => void {
-  const onClick = (event: MouseEvent): void => {
-    // 每次点击实时探测 Tauri，避免安装时早于注入导致永久失效
-    if (!tauriInvoke()) return
-    if (event.defaultPrevented) return
-    // 左键(0)/中键(1)；右键(2)放行（保留原生右键菜单）
-    if (event.button !== 0 && event.button !== 1) return
+  /** 命中外部链接锚点则返回 URL（按钮过滤交由调用方）；每次实时探测 Tauri 防安装早于注入。 */
+  const anchorExternalUrl = (event: MouseEvent): string | undefined => {
+    if (!tauriInvoke()) return undefined
+    if (event.defaultPrevented) return undefined
     const el = event.target as Element | null
     const anchor = el?.closest?.('a') as HTMLAnchorElement | null
-    if (!anchor) return
-    const url = externalUrl(anchor.getAttribute('href'))
+    if (!anchor) return undefined
+    return externalUrl(anchor.getAttribute('href'))
+  }
+  const onClick = (event: MouseEvent): void => {
+    // 左键(0)参与分流；其他按钮（中键归 onAuxClick、右键保留原生菜单）放行
+    if (event.button !== 0) return
+    const url = anchorExternalUrl(event)
     if (!url) return
     event.preventDefault()
     // #109：sidebar 模式且右栏浏览器可用 → 侧边栏内打开（desktop profile）；否则系统打开
     if (decideSidebarRoute(ctx, url) === 'sidebar') {
-      event.preventDefault()
       event.stopPropagation()
       diag('外链转侧边栏浏览器: ' + url)
       openInSidebar(ctx, url)
@@ -154,18 +156,24 @@ export function installExternalLinkHandler(ctx?: unknown): () => void {
     diag('拦截到外链: ' + url)
     openInSystem(url)
   }
-  const onAuxClick = (event: MouseEvent): void => onClick(event)
+  // #111：中键=明确的外部打开意图，恒走系统浏览器（不参与侧边栏分流）
+  const onAuxClick = (event: MouseEvent): void => {
+    if (event.button !== 1) return
+    const url = anchorExternalUrl(event)
+    if (!url) return
+    event.preventDefault()
+    event.stopPropagation()
+    diag('中键外链转系统浏览器: ' + url)
+    openInSystem(url)
+  }
 
   const originalOpen = window.open.bind(window)
   const openOverride: typeof window.open = (url, target, features) => {
     const external = externalUrl(typeof url === 'string' ? url : url?.href)
     if (external && tauriInvoke()) {
-      diag('window.open 外链: ' + external)
-      if (decideSidebarRoute(ctx, external) === 'sidebar') {
-        diag('window.open 外链转侧边栏浏览器: ' + external)
-        openInSidebar(ctx, external)
-        return null
-      }
+      // #112：window.open 是程序化调用（侧边栏「在浏览器打开」按钮、代码内 open）→ 恒系统浏览器；
+      // 侧边栏分流仅归左键 click 路径（dsh 自身 sidebar 路由走 openTab，不经 window.open）
+      diag('window.open 外链转系统: ' + external)
       openInSystem(external)
       return null
     }
