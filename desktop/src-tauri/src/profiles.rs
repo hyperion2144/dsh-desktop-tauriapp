@@ -174,7 +174,10 @@ fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Result<(), Str
     let mut child = Command::new(&node)
         .arg(&pnpm)
         .env("CI", "true")
-        .arg("install")
+        // 注：CI=true 是为防 pnpm 在无 TTY 下挂起交互，但 pnpm 同时会在 CI 环境默认
+        // frozen-lockfile——profile 迁移/重建场景 lockfile 常落后于 package.json（如用户
+        // 把插件改为 link: 本地路径后未重跑 install），必须显式关闭 frozen 才能重建。
+        .args(["install", "--no-frozen-lockfile"])
         .current_dir(&dir)
         .env("PATH", &joined)
         .stdout(Stdio::piped())
@@ -586,7 +589,8 @@ fn pnpm_direct_add(app: &tauri::AppHandle, profile: &str, pkg: &str) -> Result<(
         .arg(&pnpm)
         // CI=true：防 pnpm 交互提示在无 TTY 的 stdin 上挂起
         .env("CI", "true")
-        .arg("install")
+        // 同 pnpm_install_profile：CI=true 下 pnpm 默认 frozen-lockfile，显式关闭以便 lockfile 落后 package.json 时重建
+        .args(["install", "--no-frozen-lockfile"])
         .current_dir(&dir)
         .env("PATH", &joined)
         .stdout(Stdio::piped())
