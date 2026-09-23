@@ -119,7 +119,8 @@ pub(crate) async fn fetch_catalog(
     source: &str,
     repo: Option<&str>,
 ) -> Result<Vec<CatalogEntry>, String> {
-    let client = reqwest::Client::builder()
+    // #108：壳自身请求走设置页代理（app_client_builder 复用 resolved_proxy_env 全语义）
+    let client = crate::network::proxy::app_client_builder()
         .user_agent("dsh-desktop-tauriapp")
         .build()
         .map_err(|e| format!("HTTP 客户端构建失败：{e}"))?;
@@ -297,13 +298,16 @@ fn pnpm_add_runtime(
     }
     let joined = std::env::join_paths(&paths).map_err(|e| e.to_string())?;
 
-    let mut child = Command::new(node)
-        .arg(pnpm_cjs)
+    let mut cmd = Command::new(node);
+    cmd.arg(pnpm_cjs)
         .args(["add", &format!("{NPM_PACKAGE}@{version}")])
         .current_dir(dst)
         .env("PATH", &joined)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // #108：pnpm 拉依赖的网络请求同样走设置页代理（与 dsh 子进程同款注入）
+    crate::network::proxy::inject_proxy_env(&mut cmd);
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("pnpm 执行失败：{e}"))?;
     let stderr_handle = child.stderr.take();

@@ -76,7 +76,7 @@ pub(crate) async fn run_url_transfer(app: AppHandle, task_id: u64, url: String, 
         }
     };
 
-    let client = match reqwest::Client::builder()
+    let client = match crate::network::proxy::app_client_builder()
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(60))
         .build()

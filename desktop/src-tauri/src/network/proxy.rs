@@ -547,6 +547,36 @@ pub fn inject_proxy_env(cmd: &mut Command) {
     apply_proxy_env(cmd, &proxy);
 }
 
+/// #108：桌面壳自身 HTTP 出站（版本目录/下载传输等）共享的客户端构建——
+/// 复用 resolved_proxy_env（manual/system/off 全语义，URL 已含凭据）映射 reqwest 代理；
+/// 未配置/off 保持 reqwest 默认（进程 env 兜底）。调用方在 builder 上追加自身超时等设置。
+pub fn app_client_builder() -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder();
+    let settings = load_desktop_settings();
+    let Some(proxy) = resolved_proxy_env(&settings) else {
+        return builder;
+    };
+    for p in proxies_from_env(&proxy) {
+        builder = builder.proxy(p);
+    }
+    builder
+}
+
+/// ProxyEnv → reqwest 代理列表（http/https/all 各自映射；纯函数供单测）。
+fn proxies_from_env(proxy: &ProxyEnv) -> Vec<reqwest::Proxy> {
+    let mut out = Vec::new();
+    if let Some(p) = proxy.http.as_deref().and_then(|u| reqwest::Proxy::http(u).ok()) {
+        out.push(p);
+    }
+    if let Some(p) = proxy.https.as_deref().and_then(|u| reqwest::Proxy::https(u).ok()) {
+        out.push(p);
+    }
+    if let Some(p) = proxy.all.as_deref().and_then(|u| reqwest::Proxy::all(u).ok()) {
+        out.push(p);
+    }
+    out
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -563,6 +593,20 @@ mod tests {
     let mut unknown = DesktopSettings::default();
     unknown.proxy_mode = Some("direct".into());
     assert!(resolved_proxy_env(&unknown).is_none());
+  }
+
+  #[test]
+  fn proxies_from_env_maps_scheme_entries() {
+    // #108：http/https/all 三槽各自映射，None 槽跳过；全空（off/未配置）→ 空，
+    // app_client_builder 保持 reqwest 默认（进程 env 兜底）。
+    let env = ProxyEnv {
+      http: Some("http://p:1".into()),
+      https: None,
+      all: Some("socks5://p:2".into()),
+      no_proxy: String::new(),
+    };
+    assert_eq!(proxies_from_env(&env).len(), 2);
+    assert!(proxies_from_env(&ProxyEnv::default()).is_empty());
   }
 
   #[test]
