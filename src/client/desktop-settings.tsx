@@ -235,12 +235,14 @@ function PfBtn({
   onClick,
   children,
   style,
+  title,
 }: {
   variant?: 'primary' | 'ghost' | 'danger'
   disabled?: boolean
   onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void
   children: React.ReactNode
   style?: React.CSSProperties
+  title?: string
 }): React.ReactElement {
   const baseStyle =
     variant === 'primary' ? BTN_PRIMARY_STYLE : variant === 'ghost' ? BTN_GHOST_STYLE : BTN_DANGER_STYLE
@@ -250,6 +252,7 @@ function PfBtn({
       type="button"
       className={cls}
       disabled={disabled}
+      title={title}
       onClick={onClick}
       style={{ ...baseStyle, ...(style ?? {}) }}
     >
@@ -768,6 +771,17 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((err) => setMsg({ ok: false, text: `切换失败：${String(err)}` }))
   }
 
+  const handleRemoveRuntime = (version: string): void => {
+    // #104：卸载已下载运行时，后端 remove_runtime（#95 已有）拒绝使用中/内置版本；错误文案可观测。
+    if (!window.confirm(`卸载运行时 dsh ${version}？将删除本地已下载文件，不可恢复。`)) return
+    invoke('remove_runtime', { version })
+      .then(() => {
+        setMsg({ ok: true, text: `已卸载运行时 dsh ${version}` })
+        void refreshRuntimes()
+      })
+      .catch((err) => setMsg({ ok: false, text: `卸载失败：${String(err)}` }))
+  }
+
   const refreshData = useCallback(async (): Promise<void> => {
     try {
       const d = await invoke<DesktopData>('get_desktop_settings_data')
@@ -1167,13 +1181,29 @@ function DesktopSettingsPanel(): React.ReactElement {
                                       : '下载'}
                               </PfBtn>
                             ) : (
-                              <PfBtn
-                                variant="ghost"
-                                disabled={runtimeCatalog.selected === c.version}
-                                onClick={() => handleSwitchRuntime(c.version)}
-                              >
-                                {runtimeCatalog.selected === c.version ? '使用中' : '切换到此版本'}
-                              </PfBtn>
+                              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <PfBtn
+                                  variant="ghost"
+                                  disabled={runtimeCatalog.selected === c.version}
+                                  onClick={() => handleSwitchRuntime(c.version)}
+                                >
+                                  {runtimeCatalog.selected === c.version ? '使用中' : '切换到此版本'}
+                                </PfBtn>
+                                <PfBtn
+                                  variant="danger"
+                                  disabled={runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
+                                  title={
+                                    runtimeCatalog.selected === c.version
+                                      ? '使用中的版本不可卸载，请先切换'
+                                      : c.version === runtimeCatalog.builtin
+                                        ? '内置版本随应用分发，不可卸载'
+                                        : '删除本地已下载的运行时'
+                                  }
+                                  onClick={() => handleRemoveRuntime(c.version)}
+                                >
+                                  卸载
+                                </PfBtn>
+                              </div>
                             )}
                           </div>
                           {downloadState === 'downloading' && (
