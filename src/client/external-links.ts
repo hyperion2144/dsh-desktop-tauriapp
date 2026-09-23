@@ -82,42 +82,45 @@ type DshClientContext = {
   get?: (id: string) => unknown
 }
 
+/** 会话内容区标记（#109×2）：仅此区域内的链接参与侧边栏分流 / 双开抑制。 */
+const CONVERSATION_SELECTOR = '[data-chat-flow],[data-chat-node-key],[data-conversation-scroll]'
+
+/**
+ * 侧边栏可用性（不含锚点区域判定）：desktop profile + ui-chat.linkOpening=sidebar
+ * + 右栏浏览器 tab 存在（#109：判定每次实时执行，dsh 服务可能晚于壳 client 就绪）。
+ */
+function sidebarCapable(ctx: unknown): boolean {
+  if (clientEnv?.profile !== 'desktop') return false
+  if (ctx === undefined || ctx === null) return false
+  const c = ctx as DshClientContext
+  const form = c.configForms?.get?.('ui-chat')
+  if (!form || typeof form.getSnapshot !== 'function') return false
+  if ((form.getSnapshot()?.value?.linkOpening ?? 'sidebar') !== 'sidebar') return false
+  const tabs = (typeof c.get === 'function' ? c.get('sidebarRightTabs') : undefined) as
+    | { get?: (id: string) => unknown }
+    | undefined
+  if (typeof tabs?.get !== 'function' || !tabs.get('browser')) return false
+  return typeof c.sidebarRight?.openTab === 'function'
+}
+
 /**
  * #109：外链路由分流。返回 'sidebar' = 在 dsh 右栏浏览器内打开；'system' = 转系统。
- * 判定（每次点击实时执行，dsh 服务可能晚于壳 client 就绪）：
- * 1) 仅 http/https 可进侧边栏（mailto/tel 恒系统）；
- * 2) 需 dsh 的 ui-chat 设置表单存在（0.1.6 无 → 回退系统，维持现状）；
- * 3) linkOpening === 'sidebar'（dsh 默认）；
- * 4) #109 修正：**仅 desktop profile**（web/手机布局等一律系统打开，壳经 IPC 下发 profile）；
- * 5) #109 修正：锚点位于**会话内容区**（data-chat-flow/data-chat-node-key 等标记内）——
- *    设置弹窗、侧边栏面板、其它插件 UI 的链接一律系统浏览器（与 dsh 自身只路由会话链接的语义对齐）；
- * 6) 右栏浏览器 tab 真实存在。
+ * 判定：http/https + 锚点在会话内容区 + sidebarCapable（详见 sidebarCapable 注释）。
  */
 function decideSidebarRoute(ctx: unknown, anchor: Element, url: string): 'sidebar' | 'system' {
-  // #109 修正 1：仅 desktop profile 参与侧边栏分流（profile 由壳随 environment 下发）
-  if (clientEnv?.profile !== 'desktop') return 'system'
-  // #109 修正 2：仅会话内容区的链接参与分流（设置弹窗/其它插件 UI → 系统浏览器）
-  if (anchor.closest('[data-chat-flow],[data-chat-node-key],[data-conversation-scroll]') === null) {
-    return 'system'
-  }
   let web = false
   try {
     web = /^https?:$/.test(new URL(url).protocol)
   } catch {
     return 'system'
   }
-  if (!web || ctx === undefined || ctx === null) return 'system'
-  const c = ctx as DshClientContext
-  const form = c.configForms?.get?.('ui-chat')
-  if (!form || typeof form.getSnapshot !== 'function') return 'system'
-  if ((form.getSnapshot()?.value?.linkOpening ?? 'sidebar') !== 'sidebar') return 'system'
-  const tabs = (typeof c.get === 'function' ? c.get('sidebarRightTabs') : undefined) as
-    | { get?: (id: string) => unknown }
-    | undefined
-  if (typeof tabs?.get !== 'function' || !tabs.get('browser')) return 'system'
-  if (typeof c.sidebarRight?.openTab !== 'function') return 'system'
-  return 'sidebar'
+  if (!web) return 'system'
+  if (anchor.closest(CONVERSATION_SELECTOR) === null) return 'system'
+  return sidebarCapable(ctx) ? 'sidebar' : 'system'
 }
+
+/** 会话区点击时间戳（每次左键 click 实时更新）——用于抑制同一次点击的重开。 */
+let lastConversationClickAt = 0
 
 /** 侧边栏打开（调用前已由 decideSidebarRoute 确认可用）。 */
 function openInSidebar(ctx: unknown, url: string): void {
@@ -158,7 +161,13 @@ function openInSystem(url: string): void {
 export function installExternalLinkHandler(ctx?: unknown): () => void {
   // #109 修正：安装时异步取一次窗口环境（profile），供侧边栏分流门控（profile 固定 per window）
   refreshClientEnv()
-  /** 命中外部链接锚点则返回 URL（按钮过滤交由调用方）；每次实时探测 Tauri 防安装早于注入。 */
+  /** #109 修正 3：会话区点击探针（先于主 handler 注册、同阶段先执行）——
+   *  平台对 <a target=_blank> 的新窗可能绕过 preventDefault，用它抑制同一次点击的重开。 */
+  const onConversationProbe = (event: MouseEvent): void => {
+    if (event.button !== 0) return
+    const el = event.target as Element | null
+    if (el?.closest?.(CONVERSATION_SELECTOR) != null) lastConversationClickAt = Date.now()
+  }
   /** 命中外部链接锚点则返回锚点与 URL（按钮过滤交由调用方）；实时探测 Tauri 防安装早于注入。 */
   const anchorExternal = (event: MouseEvent): { anchor: Element; url: string } | undefined => {
     if (!tauriInvoke()) return undefined
@@ -203,6 +212,14 @@ export function installExternalLinkHandler(ctx?: unknown): () => void {
   const openOverride: typeof window.open = (url, target, features) => {
     const external = externalUrl(typeof url === 'string' ? url : url?.href)
     if (external && tauriInvoke()) {
+      // #109 修正 3：会话区内点击 + 侧边栏可用（desktop + linkOpening=sidebar + tab 在）时，
+      // dsh 自己会 openTab；而 <a target=_blank> 的平台新窗会绕过 preventDefault 再次请求
+      // window.open —— 抑制，避免「侧边栏 + 系统浏览器」双开。
+      // （#112 的「在浏览器打开」按钮点击不在会话区，不受影响。）
+      if (Date.now() - lastConversationClickAt < 1500 && sidebarCapable(ctx)) {
+        diag('会话内点击的新窗已由侧边栏处理，抑制: ' + external)
+        return null
+      }
       // #112：window.open 是程序化调用（侧边栏「在浏览器打开」按钮、代码内 open）→ 恒系统浏览器；
       // 侧边栏分流仅归左键 click 路径（dsh 自身 sidebar 路由走 openTab，不经 window.open）
       diag('window.open 外链转系统: ' + external)
@@ -211,11 +228,14 @@ export function installExternalLinkHandler(ctx?: unknown): () => void {
     }
     return originalOpen(typeof url === 'string' ? url : url, target, features)
   }
+  // 先于主 handler 注册：同 capture 阶段按注册顺序执行，探针需先记录区域归属
+  document.addEventListener('click', onConversationProbe, true)
 
   document.addEventListener('click', onClick, true)
   document.addEventListener('auxclick', onAuxClick, true)
   window.open = openOverride
   return () => {
+    document.removeEventListener('click', onConversationProbe, true)
     document.removeEventListener('click', onClick, true)
     document.removeEventListener('auxclick', onAuxClick, true)
     if (window.open === openOverride) window.open = originalOpen
