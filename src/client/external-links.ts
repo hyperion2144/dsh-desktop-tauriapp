@@ -6,6 +6,10 @@
  *  - window.open 外部 URL（"在新窗口打开链接"、代码内 open）。
  * 纯浏览器（无 Tauri IPC）不做任何拦截，保留浏览器原生行为。
  * 拦截/成功/失败都会经 log_diag 上报到桌面应用日志，便于排查「点击无反应」。
+ * #109：拦截前尊重 dsh 的「网页链接默认打开方式」（ui-chat.linkOpening，默认 sidebar）：
+ * sidebar 且右栏浏览器 tab 可用 → 在侧边栏浏览器内打开（仅 desktop profile 有该 tab；
+ * web profile/手机布局无 tab 自动回退系统打开）。无 dsh 设置表单（0.1.6）/非 sidebar/
+ * mailto/tel → 维持系统打开。判定每次点击实时执行（dsh 服务可能晚于壳 client 就绪）。
  */
 
 const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
@@ -51,6 +55,49 @@ function externalUrl(href: string | null | undefined): string | undefined {
   return undefined
 }
 
+type DshClientContext = {
+  configForms?: {
+    get?: (ns: string) =>
+      | { getSnapshot?: () => { value?: { linkOpening?: string } } }
+      | undefined
+  }
+  sidebarRight?: { openTab?: (id: string, params: Record<string, unknown>) => void }
+  get?: (id: string) => unknown
+}
+
+/**
+ * #109：外链路由分流。返回 'sidebar' = 在 dsh 右栏浏览器内打开；'system' = 转系统。
+ * 判定（每次点击实时执行，dsh 服务可能晚于壳 client 就绪）：
+ * 1) 仅 http/https 可进侧边栏（mailto/tel 恒系统）；
+ * 2) 需 dsh 的 ui-chat 设置表单存在（0.1.6 无 → 回退系统，维持现状）；
+ * 3) linkOpening === 'sidebar'（dsh 默认）；
+ * 4) 右栏浏览器 tab 真实存在（仅 desktop profile 有；web profile/手机布局无 tab 自动回退）。
+ */
+function decideSidebarRoute(ctx: unknown, url: string): 'sidebar' | 'system' {
+  let web = false
+  try {
+    web = /^https?:$/.test(new URL(url).protocol)
+  } catch {
+    return 'system'
+  }
+  if (!web || ctx === undefined || ctx === null) return 'system'
+  const c = ctx as DshClientContext
+  const form = c.configForms?.get?.('ui-chat')
+  if (!form || typeof form.getSnapshot !== 'function') return 'system'
+  if ((form.getSnapshot()?.value?.linkOpening ?? 'sidebar') !== 'sidebar') return 'system'
+  const tabs = (typeof c.get === 'function' ? c.get('sidebarRightTabs') : undefined) as
+    | { get?: (id: string) => unknown }
+    | undefined
+  if (typeof tabs?.get !== 'function' || !tabs.get('browser')) return 'system'
+  if (typeof c.sidebarRight?.openTab !== 'function') return 'system'
+  return 'sidebar'
+}
+
+/** 侧边栏打开（调用前已由 decideSidebarRoute 确认可用）。 */
+function openInSidebar(ctx: unknown, url: string): void {
+  ;(ctx as DshClientContext).sidebarRight?.openTab?.('browser', { params: { url } })
+}
+
 function openInSystem(url: string): void {
   const invoke = tauriInvoke()
   if (invoke) {
@@ -82,7 +129,7 @@ function openInSystem(url: string): void {
 }
 
 /** 安装全局外链拦截器（点击 + 中键 + window.open 覆盖）；返回卸载函数（页面存活期保持）。 */
-export function installExternalLinkHandler(): () => void {
+export function installExternalLinkHandler(ctx?: unknown): () => void {
   const onClick = (event: MouseEvent): void => {
     // 每次点击实时探测 Tauri，避免安装时早于注入导致永久失效
     if (!tauriInvoke()) return
@@ -95,6 +142,14 @@ export function installExternalLinkHandler(): () => void {
     const url = externalUrl(anchor.getAttribute('href'))
     if (!url) return
     event.preventDefault()
+    // #109：sidebar 模式且右栏浏览器可用 → 侧边栏内打开（desktop profile）；否则系统打开
+    if (decideSidebarRoute(ctx, url) === 'sidebar') {
+      event.preventDefault()
+      event.stopPropagation()
+      diag('外链转侧边栏浏览器: ' + url)
+      openInSidebar(ctx, url)
+      return
+    }
     event.stopPropagation()
     diag('拦截到外链: ' + url)
     openInSystem(url)
@@ -106,6 +161,11 @@ export function installExternalLinkHandler(): () => void {
     const external = externalUrl(typeof url === 'string' ? url : url?.href)
     if (external && tauriInvoke()) {
       diag('window.open 外链: ' + external)
+      if (decideSidebarRoute(ctx, external) === 'sidebar') {
+        diag('window.open 外链转侧边栏浏览器: ' + external)
+        openInSidebar(ctx, external)
+        return null
+      }
       openInSystem(external)
       return null
     }

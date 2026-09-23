@@ -111,7 +111,7 @@ export function apply(ctx: ClientContext): void {
   // WebView 橡皮筋滚动对齐浏览器（禁 rubber-band）
   installNoRubberBand()
   // 桌面 webview（含复用降级/无标记场景）都接管外链打开；纯浏览器无 Tauri IPC 时 no-op
-  installExternalLinkHandler()
+  installExternalLinkHandler(ctx)
   // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
   registerDownloadsTab(ctx)
   // blob:/data: 下载拦截转 IPC（纯浏览器不装）
