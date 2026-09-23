@@ -19,6 +19,8 @@
 - **点号路径设置保存修复**：`save_desktop_settings` 的 merge 把 `profile_ports.desktop` 当字面顶层键 → 反序列化静默丢弃 → Profile 端口保存无效；新增递归写入（含单测）
 - **托盘「切换 Profile（本窗口）」（#117）**：就地切换当前聚焦窗口的 profile（区别于「在新窗口打开」）；不可行时明确提示且不改绑；主窗切换同步并持久化激活 profile；同时移除设置页重复且显示错误的「本地端口」区块
 - 保险丝面板 AI 解读 loading 文案改为显示当前设置的模型（原硬编码 deepseek-v4-flash 与实际路由不一致）
+- **dsh 自带插件卸载/安装报 ERR_PNPM_UNEXPECTED_STORE（#119）**：内置模式下壳给 dsh 的 PATH 是用户登录 shell 的 PATH（含 /opt/homebrew/bin），dsh 的插件管理裸调 `pnpm` 时命中**系统 pnpm**（实测 11.16.0，store/v11），而 profile 的 node_modules 由内置 pnpm（10.34.5，store/v10）安装 → store 大版本不匹配直接拒绝操作。修复：内置模式下把壳的 node/pnpm shim 目录**前置**到 dsh 的 PATH（pnpm 钉回内置 pnpm.cjs），与壳自身调用 pnpm 的做法一致
+- **保险丝面板错误边界**：面板内渲染异常不再整块空白——面板内显示可读错误并把详情写进应用日志（~/.dsh/dsh-desktop-webview.log），便于定位
 - **下载图标兼容 dsh 0.1.7 重命名（#103）**：`IconDownloadOutline16 ?? IconDownloadOutlineRegular` 双名 fallback，修复 0.1.7 下下载按钮消失与 Tab 标题空白
 - **运行时版本卸载入口（#104）**：设置页已下载版本列表加卸载按钮（二次确认；使用中/内置灰置+tooltip），复用 #95 既有 remove_runtime，后端零改动
 - **手机布局包升级 v3.0.1（#105）**：dsh-web-mobile submodule v2.3.0 → v3.0.1（0.1.6/0.1.7 宿管适配、系统返回退出、文件手势、图标跨代兼容、真机修复）
