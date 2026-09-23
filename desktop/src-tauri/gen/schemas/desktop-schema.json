@@ -309,6 +309,12 @@
           "markdownDescription": "下载管理器：读取任务列表快照"
         },
         {
+          "description": "依赖状态（#122）：查询各 profile 的 node_modules 记录的 pnpm 版本与内置 pnpm 是否一致（store 大版本不匹配会导致 dsh 插件操作报 ERR_PNPM_UNEXPECTED_STORE）",
+          "type": "string",
+          "const": "allow-list-profile-dependency-status",
+          "markdownDescription": "依赖状态（#122）：查询各 profile 的 node_modules 记录的 pnpm 版本与内置 pnpm 是否一致（store 大版本不匹配会导致 dsh 插件操作报 ERR_PNPM_UNEXPECTED_STORE）"
+        },
+        {
           "description": "桌面设置面板：list_profile_ports（#90）",
           "type": "string",
           "const": "allow-list-profile-ports",
@@ -385,6 +391,12 @@
           "type": "string",
           "const": "allow-pet-toggle-passthrough",
           "markdownDescription": "允许桌宠切换鼠标穿透"
+        },
+        {
+          "description": "依赖状态（#122）：用内置 pnpm 重建某 profile 的依赖（迁移 store 大版本）；运行中的 profile 会被拒绝",
+          "type": "string",
+          "const": "allow-rebuild-profile-dependencies",
+          "markdownDescription": "依赖状态（#122）：用内置 pnpm 重建某 profile 的依赖（迁移 store 大版本）；运行中的 profile 会被拒绝"
         },
         {
           "description": "桌面设置面板：remove_remote_address",
