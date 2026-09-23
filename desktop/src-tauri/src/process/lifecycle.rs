@@ -363,9 +363,11 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         // #119：shim 目录（内置 node/pnpm）必须**前置**——dsh 的插件管理会裸调 `pnpm`，
         // 若命中用户系统 pnpm（实测 11.16.0，store/v11）而 profile 的 node_modules 是
         // 内置 pnpm（10.34.5，store/v10）装的，会报 ERR_PNPM_UNEXPECTED_STORE，
-        // 导致 dsh 自带的插件卸载/安装全部失败。shim 把 pnpm/node 钉回内置版本。
+        // 导致 dsh 自带的插件卸载/安装全部失败。故把**仅含 pnpm** 的 shim 目录前置：
+        // pnpm 钉回内置（store 大版本一致），但**不劫持 node**——用户项目里的 node 应
+        // 保持登录 PATH 顺序（实测系统 node v26 vs 内置 v24，劫持会改变项目行为）。
         let mut parts: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(shim) = crate::profiles::ensure_node_shim_dir(app) {
+        if let Some(shim) = crate::profiles::ensure_pnpm_shim_dir(app) {
             parts.push(shim);
         }
         let login = recover_login_path();

@@ -454,7 +454,58 @@ fn git_fallback_dirs() -> Vec<std::path::PathBuf> {
 /// 在 app_data/runtime/bin/ 写同名包装脚本并前置 PATH（幂等）。
 pub(crate) fn ensure_node_shim_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let sidecar = crate::runtime::builtin::find_builtin_node()?;
-    let pnpm_cjs = app
+    let pnpm_cjs = pnpm_cjs_path(app)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("runtime")
+        .join("bin");
+    std::fs::create_dir_all(&dir).ok()?;
+    let sidecar_s = sidecar.to_string_lossy().to_string();
+    let pnpm_s = pnpm_cjs.to_string_lossy().to_string();
+    write_shim(
+        &dir,
+        "node",
+        &format!("exec \"{sidecar_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" %*"),
+    )?;
+    write_shim(
+        &dir,
+        "pnpm",
+        &format!("exec \"{sidecar_s}\" \"{pnpm_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" \"{pnpm_s}\" %*"),
+    )?;
+    Some(dir)
+}
+
+/// 仅 pnpm 的 shim 目录（#119 修正）：dsh 的插件子进程裸调 `pnpm` 必须命中内置 pnpm
+/// （与 profile 的 node_modules/store 大版本一致），但**不劫持** `node`——用户项目里的
+/// node 应保持登录 PATH 顺序（实测系统 node v26 vs 内置 v24，劫持会改变项目行为）。
+pub(crate) fn ensure_pnpm_shim_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let sidecar = crate::runtime::builtin::find_builtin_node()?;
+    let pnpm_cjs = pnpm_cjs_path(app)?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("runtime")
+        .join("bin-pnpm");
+    std::fs::create_dir_all(&dir).ok()?;
+    let sidecar_s = sidecar.to_string_lossy().to_string();
+    let pnpm_s = pnpm_cjs.to_string_lossy().to_string();
+    write_shim(
+        &dir,
+        "pnpm",
+        &format!("exec \"{sidecar_s}\" \"{pnpm_s}\" \"$@\""),
+        &format!("\"{sidecar_s}\" \"{pnpm_s}\" %*"),
+    )?;
+    Some(dir)
+}
+
+/// pnpm 的包内入口（resources/dsh/node_modules/pnpm/bin/pnpm.cjs）。
+fn pnpm_cjs_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let p = app
         .path()
         .resource_dir()
         .ok()?
@@ -463,49 +514,40 @@ pub(crate) fn ensure_node_shim_dir(app: &tauri::AppHandle) -> Option<std::path::
         .join("pnpm")
         .join("bin")
         .join("pnpm.cjs");
-    if !pnpm_cjs.is_file() {
-        return None;
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
     }
-    let dir = app
-        .path()
-        .app_data_dir()
-        .ok()?
-        .join("runtime")
-        .join("bin");
-    std::fs::create_dir_all(&dir).ok()?;
-    let scripts: Vec<(std::path::PathBuf, String, String)> = vec![
-        (
-            dir.join(if cfg!(windows) { "node.cmd" } else { "node" }),
-            format!("exec \"{}\" \"$@\"", sidecar.to_string_lossy()),
-            format!("\"{}\" %*", sidecar.to_string_lossy()),
-        ),
-        (
-            dir.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" }),
-            format!(
-                "exec \"{}\" \"{}\" \"$@\"",
-                sidecar.to_string_lossy(),
-                pnpm_cjs.to_string_lossy()
-            ),
-            format!("\"{}\" \"{}\" %*", sidecar.to_string_lossy(), pnpm_cjs.to_string_lossy()),
-        ),
-    ];
-    for (path, unix_body, win_body) in scripts {
-        #[cfg(unix)]
-        let content = format!("#!/bin/sh\n{unix_body}\n");
-        #[cfg(windows)]
-        let content = format!("@echo off\r\n{win_body}\r\n");
-        let need = std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str());
-        if need {
-            std::fs::write(&path, content).ok()?; }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
-        }
-    }
-    Some(dir)
 }
 
+/// 写 shim 脚本（unix `#!/bin/sh` / windows `.cmd`）：幂等 + 可执行位。
+fn write_shim(
+    dir: &std::path::Path,
+    name: &str,
+    unix_body: &str,
+    win_body: &str,
+) -> Option<()> {
+    let file = if cfg!(windows) {
+        format!("{name}.cmd")
+    } else {
+        name.to_string()
+    };
+    let path = dir.join(file);
+    #[cfg(unix)]
+    let content = format!("#!/bin/sh\n{unix_body}\n");
+    #[cfg(windows)]
+    let content = format!("@echo off\r\n{win_body}\r\n");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
+        std::fs::write(&path, content).ok()?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+    Some(())
+}
 /// 对齐版本号（纯版本，无包名前缀）：
 /// 1) 运行时树内有该包（如 dsh 本体依赖）→ 树内实际版本；
 /// 2) 树内没有（dsh-base/dsh-web-app 等 profile 发行插件，与 dsh 同版本发布）→ 运行时 dsh 版本号。
