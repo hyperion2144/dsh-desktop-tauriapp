@@ -7,7 +7,10 @@
 // IPC 通道，event.listen 不可用；tab 打开时 600ms 轮询，空闲降频）。
 // 主题只用 --dsw-alias-* 变量（带回退），禁 hash 类名（仓库血泪坑 #8）。
 import type { ClientContext } from './ctx-types.ts'
-import { Button, IconDownloadOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconDownloadOutline16, IconDownloadOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+// #103：dsh 0.1.7 将图标导出 IconDownloadOutline16 重命名为 IconDownloadOutlineRegular；
+// CJS 产物（require）下不存在的命名导出为 undefined，?? 兼容两代运行时。
+const DownloadIcon = IconDownloadOutline16 ?? IconDownloadOutlineRegular
 import React, { useEffect, useRef, useState } from 'react'
 
 /** 与 Rust download::model::DownloadTask 对齐（serde camelCase）。 */
@@ -221,7 +224,7 @@ function TextButton({ children, onClick }: { children: React.ReactNode; onClick:
 function DownloadsTabTitle(): React.ReactElement {
   return (
     <>
-      <IconDownloadOutline16 />
+      <DownloadIcon />
       <span style={{ marginLeft: 4 }}>下载</span>
     </>
   )
@@ -235,7 +238,7 @@ function DownloadsHeaderButton(): React.ReactElement {
     <Button
       variant="ghost" /* 常态透明、hover 才亮；toolbar 变体常态自带 tool-bar-fill 底色（实测即『一进来就是按下效果』的来源） */
       size="sm"
-      icon={<IconDownloadOutline16 />}
+      icon={<DownloadIcon />}
       title="下载管理器"
       aria-label="下载管理器"
       onClick={() => {
@@ -285,7 +288,7 @@ export function registerDownloadsTab(ctx: ClientContext): void {
             order: 30,
             title: () => '下载',
             description: () => '桌面壳下载管理器：进度、暂停/恢复、并行与历史',
-            icon: IconDownloadOutline16,
+            icon: DownloadIcon,
           },
         ],
       }))
