@@ -306,8 +306,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // dsh 服务地址
   const [newRemoteUrl, setNewRemoteUrl] = useState('')
 
-  // 本地端口
-  const [portDraft, setPortDraft] = useState('')
 
   // 下载
   const [concurrencyInput, setConcurrencyInput] = useState<string>('3')
@@ -627,23 +625,6 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((e) => setProfilePortBoxNote(`保存失败：${String(e)}`))
   }
 
-  const handleSavePort = (): void => {
-    const port = Number(portDraft)
-    if (!portDraft || Number.isNaN(port) || port < 1 || port > 65535) {
-      setMsg({ ok: false, text: '请输入 1-65535 的有效端口' })
-      return
-    }
-    void (async () => {
-      try {
-        await nsSave({ port })
-        setPortDraft('')
-        setMsg({ ok: true, text: `端口已改为 ${port}；重启 dsh 后生效。` })
-      } catch (err) {
-        setMsg({ ok: false, text: `设置端口失败：${String(err)}` })
-      }
-      await refreshData()
-    })()
-  }
 
   const handleSaveConcurrency = (): void => {
     const v = Math.max(1, Math.min(32, parseInt(concurrencyInput, 10) || 3))
@@ -1293,21 +1274,6 @@ function DesktopSettingsPanel(): React.ReactElement {
               </>
           )}
         </div>
-      </SectionBox>
-
-      {/* ── 本地端口 ── */}
-      <SectionBox title="本地端口">
-        <div style={ROW_STYLE}>
-          <input
-            placeholder={`当前 ${desktop.port}`}
-            style={{ ...INPUT_BASE_STYLE, width: 140 }}
-            data-desktop-settings="port"
-            value={portDraft}
-            onChange={(e) => setPortDraft(e.target.value.trim())}
-          />
-          <PfBtn variant="ghost" onClick={handleSavePort}>保存端口</PfBtn>
-        </div>
-        <div style={NOTE_STYLE}>改动后需重启 dsh 生效（可用托盘「重启 dsh 服务」）。</div>
       </SectionBox>
 
       {/* ── 下载（#72）── */}

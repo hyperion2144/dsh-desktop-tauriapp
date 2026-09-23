@@ -96,17 +96,20 @@ pub(crate) fn get_desktop_client_environment(
     window: tauri::WebviewWindow,
     state: tauri::State<DshState>,
 ) -> serde_json::Value {
-    // #109 追加：窗口所属 profile（外壳侧边栏分流只在 desktop profile 生效）。
-    // 主窗 label=main → 激活/待定 profile；次窗 label=profile-<name>。
+    // #109/#117：窗口所属 profile——先查绑定表（就地切换后 label 不再权威），
+    // 再回落 label 约定（profile-<name>），最后用激活/待定 profile（主窗）。
     let label = window.label().to_string();
-    let profile = match label.strip_prefix("profile-") {
-        Some(name) => name.to_string(),
-        None => state
-            .pending_active_profile
-            .lock()
-            .unwrap()
-            .clone()
-            .unwrap_or_else(crate::settings::configured_profile),
+    let profile = match state.profile_of_window(&label) {
+        Some(bound) => bound,
+        None => match label.strip_prefix("profile-") {
+            Some(name) => name.to_string(),
+            None => state
+                .pending_active_profile
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(crate::settings::configured_profile),
+        },
     };
     let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
     serde_json::json!({

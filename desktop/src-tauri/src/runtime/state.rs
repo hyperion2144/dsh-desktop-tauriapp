@@ -150,6 +150,17 @@ impl DshState {
         self.windows.lock().unwrap().remove(profile);
     }
 
+    /// 反查窗口 label 当前绑定的 profile（#117：支持「在本窗口切换 profile」后
+    /// 窗口 label 与 profile 不再一一对应，环境下发/托盘标记必须以此为准）。
+    pub(crate) fn profile_of_window(&self, label: &str) -> Option<String> {
+        self.windows
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, l)| l.as_str() == label)
+            .map(|(p, _)| p.clone())
+    }
+
     /// 取 per-profile web token（克隆语义；导航轮询反复取用）。
     pub(crate) fn web_token_for(&self, profile: &str) -> Option<String> {
         self.web_tokens.lock().unwrap().get(profile).cloned()
