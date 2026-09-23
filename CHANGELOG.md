@@ -2,9 +2,13 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
-## 未发布
+## 未发布（分支验证中，待实机确认后随下版发布）
 
-（无——当前主干即 v0.9.1 覆盖重发内容，见下）
+- **AI 解读路由修复（#96）**：dsh 目录 provider（如 minimax-cn）的解读改由 dsh 进程内 llm 服务发起（宿主新 RPC `/dsh-desktop-fuse-explain`）；custom 仍走壳 Rust；其它 provider 直达 Rust 时明确报错不再静默错路由
+- **系统代理模式隐藏 no_proxy 输入（#102）**：system 模式下后端读系统设置，编辑无效故隐藏并加来源说明；凭证两模式都生效（拼入代理 URL）保持可编辑
+- **下载图标兼容 dsh 0.1.7 重命名（#103）**：`IconDownloadOutline16 ?? IconDownloadOutlineRegular` 双名 fallback，修复 0.1.7 下下载按钮消失与 Tab 标题空白
+- **运行时版本卸载入口（#104）**：设置页已下载版本列表加卸载按钮（二次确认；使用中/内置灰置+tooltip），复用 #95 既有 remove_runtime，后端零改动
+- **手机布局包升级 v3.0.1（#105）**：dsh-web-mobile submodule v2.3.0 → v3.0.1（0.1.6/0.1.7 宿管适配、系统返回退出、文件手势、图标跨代兼容、真机修复）
 
 
 ## 已发布
