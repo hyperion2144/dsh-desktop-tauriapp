@@ -280,6 +280,15 @@ pub fn run() {
                 }
                 _ => true,
             })
+            // 新窗请求（window.open / <a target=_blank>）→ 系统浏览器，应用内不开新窗
+            // （对齐 dsh 官方 Electron 桌面 setWindowOpenHandler；见 nav_guard 模块注释）
+            .on_new_window(|url, _| {
+                if crate::ui::nav_guard::new_window_guard(&url) {
+                    tauri::webview::NewWindowResponse::Allow
+                } else {
+                    tauri::webview::NewWindowResponse::Deny
+                }
+            })
             .build();
             if let Err(e) = main_window {
                 log::error!("[main] 主窗口创建失败：{e}");

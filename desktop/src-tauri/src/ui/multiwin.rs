@@ -204,6 +204,14 @@ fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
                 false
             }
             _ => true,
+        })
+        // 新窗请求同主窗：系统浏览器，应用内不开新窗（nav_guard 模块注释）
+        .on_new_window(|url, _| {
+            if crate::ui::nav_guard::new_window_guard(&url) {
+                tauri::webview::NewWindowResponse::Allow
+            } else {
+                tauri::webview::NewWindowResponse::Deny
+            }
         });
     if let Err(e) = build.build() {
         log::error!("[multiwin] 建窗失败（{label}）：{e}");

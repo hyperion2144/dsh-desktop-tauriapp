@@ -8,10 +8,10 @@
 - **系统代理模式隐藏 no_proxy 输入（#102）**：system 模式下后端读系统设置，编辑无效故隐藏并加来源说明；凭证两模式都生效（拼入代理 URL）保持可编辑
 - **目录拉取失败降级（#107 + 补）**：目录拉取失败时不再清空列表——已下载版本仍可见/可切换/可卸载并显示失败提示；**降级列表同时纳入内置版本**（原先拉取失败时内置行消失，无法切回内置）
 - **壳侧网络统一走代理（#108）**：运行时目录拉取、运行时下载（pnpm 子进程）、应用文件下载均经 `app_client_builder`（系统/手动代理与凭证一致），修复公司代理下 401
-- **外部链接分流（#109，含三次修正）**：会话内链接按 dsh 的 linkOpening 分流到右栏浏览器；**仅 desktop profile**（壳经 environment 下发窗口真实 profile，并支持就地切换后按绑定表反查）；**仅会话内容区**（设置弹窗/面板/其它插件 UI 一律系统浏览器）；**抑制同一次点击的双开**（平台 `target=_blank` 新窗绕过 preventDefault 时不再同时弹系统浏览器）
+- **链接处理回归官方语义（#109 收尾，方案 A）**：**删除 client 侧全部自创外链逻辑**（`external-links.ts` 整文件：click/中键 capture、window.open 覆盖、双开抑制、profile/区域门控、会话区探针）——会话内链接的侧边栏路由本就是 **dsh 自身**做的（chat openExternalLink → sidebarRight.openTab），宿主不插手。壳只守两条边界（对齐 dsh 官方 Electron 桌面 `apps/desktop/src/main.ts:210-281`）：**新窗请求（window.open / target=_blank）→ 系统浏览器 + 应用内不开新窗**；**异源顶层导航 → 阻止**（官方为“阻止+系统浏览器”，按用户要求只阻止，避免 frame-busting 把用户甩走）。一并修掉自创层带来的误拦（web profile / 设置弹窗）、双开、解锁沙箱被甩到浏览器等一串问题
 - **卸载运行时不再冻结界面（#110）**：`remove_runtime` 改 async + spawn_blocking；卸载中按钮禁用并显示「卸载中…」
-- **中键点击外链恒走系统浏览器（#111）**：与左键分流解耦（中键 = 明确的外部打开意图）
-- **侧边栏「在浏览器打开」恢复（#112）**：window.open 覆盖恒转系统（侧边栏分流仅归左键 click 路径）
+- **中键点击外链 → 系统浏览器（#111）**：现由平台新窗钩子统一接管（不再需要 client 侧独立分支）
+- **侧边栏「在浏览器打开」→ 系统浏览器（#112）**：同上，由新窗钩子接管（原 client window.open 覆盖已随方案 A 移除）
 - **内置版本可直接切换（#113）**：内置行标「内置」，当前使用时显示「使用中」；切内置写 `dsh_runtime: null`
 - **下载/卸载运行时不再触发 dsh 插件 rebuilt（#114）**：dsh 客户端插件 rev = sha1(mtime|ctime|size)，pnpm store 与运行树 hardlink 共享 inode → 下载写 store / 卸载删 link 都会改元数据触发重载白屏。修复：运行时安装用独立 store（`runtimes/.pnpm-store`）+ 卸载改 rename 到 `runtimes/.trash`（真实删除推迟到下次启动）
 - **profile 迁移依赖重建修复（#115）**：①CI=true 下 pnpm 默认 frozen-lockfile 致迁移失败（三处 install 显式 `--no-frozen-lockfile`）②迁移重建 PATH 被 `join_paths` 静默清空致 pnpm 解析 git 依赖报 `spawn git ENOENT`（改 split_paths + git 候选目录兜底）
