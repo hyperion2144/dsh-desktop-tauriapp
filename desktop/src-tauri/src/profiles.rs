@@ -147,12 +147,7 @@ pub(crate) fn pnpm_install_profile(app: &tauri::AppHandle, profile: &str) -> Res
     use std::process::{Command, Stdio};
     let dir = crate::dsh_home().join("profiles").join(profile);
     let node = crate::runtime::builtin::find_builtin_node().ok_or("内置 node 不可用")?;
-    let pnpm = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|r| r.join("dsh").join("node_modules").join("pnpm").join("bin").join("pnpm.cjs"))
-        .ok_or("resource_dir 不可用")?;
+    let pnpm = pnpm_cjs_path(app).ok_or("resource_dir 不可用")?;
     if !pnpm.is_file() {
         return Err("内置 pnpm 不存在".into());
     }
@@ -340,7 +335,7 @@ pub(crate) fn run_profile_plugin_add_auto(
         }
     }
     let root = root
-        .or_else(|| app.path().resource_dir().ok().map(|r| r.join("dsh")))
+        .or_else(|| crate::runtime::paths::resources_dsh_root(app))
         .unwrap_or_default();
     let bin_js = root
         .join("node_modules")
@@ -399,7 +394,7 @@ fn builtin_tree_root(app: &tauri::AppHandle) -> std::path::PathBuf {
             return dir;
         }
     }
-    app.path().resource_dir().map(|r| r.join("dsh")).unwrap_or_default()
+    crate::runtime::paths::resources_dsh_root(app).unwrap_or_default()
 }
 
 /// pwsh 兑底目录探测（#95）：仅 Windows 返回实际存在的候选（PS7 → PS6 → 内置 5.1）；
@@ -479,19 +474,45 @@ pub(crate) fn profile_recorded_pnpm(profile: &str) -> Option<String> {
     None
 }
 
-/// 依赖不一致判定（#122）：node_modules 记录的 pnpm 与内置 pnpm 不同 → 返回
-/// (记录的版本, 内置版本)。store 大版本不同时 dsh 的插件操作会报
-/// ERR_PNPM_UNEXPECTED_STORE（历史上 web profile 可能由系统 pnpm 安装）。
+/// 依赖不一致判定（#122/#124）：node_modules 记录的 pnpm 与内置 pnpm 的**大版本**
+/// 不同 → 返回 (记录的版本, 内置版本)。判据对齐 ERR_PNPM_UNEXPECTED_STORE 的真实机制
+/// （storeDir 路径含 v<major>，小版本差异 store 相同、不触发该错误）；历史上部分
+/// profile 由系统 pnpm 安装，大版本错位时 dsh 插件操作会被拒。
+fn pnpm_major(v: &str) -> &str {
+    v.split('.').next().unwrap_or("")
+}
 pub(crate) fn profile_dependency_mismatch(
     app: &tauri::AppHandle,
     profile: &str,
 ) -> Option<(String, String)> {
     let recorded = profile_recorded_pnpm(profile)?;
     let builtin = builtin_pnpm_version(app)?;
-    if recorded == builtin {
+    // #124：仅比 major（"10" vs "11"）；小版本差异无害（store 同代）不再判不一致。
+    if pnpm_major(&recorded) == pnpm_major(&builtin) {
         None
     } else {
         Some((recorded, builtin))
+    }
+}
+
+#[cfg(test)]
+mod dependency_mismatch_tests {
+    use super::*;
+    /// 纯字符串判据：major 相同（小版本差异）→ 一致；major 不同 → 不一致。
+    fn mismatch_by_major(recorded: &str, builtin: &str) -> bool {
+        pnpm_major(recorded) != pnpm_major(builtin)
+    }
+
+    #[test]
+    fn same_major_minor_diff_is_consistent() {
+        // #124 实拍场景：外部 10.34.4 vs 内置 10.34.5 —— store 同为 v10，不判不一致
+        assert!(!mismatch_by_major("10.34.4", "10.34.5"));
+    }
+
+    #[test]
+    fn different_major_is_mismatch() {
+        assert!(mismatch_by_major("10.34.5", "11.16.0"));
+        assert!(mismatch_by_major("11.16.0", "10.34.5"));
     }
 }
 
@@ -551,11 +572,8 @@ pub(crate) fn ensure_pnpm_shim_dir(app: &tauri::AppHandle) -> Option<std::path::
 
 /// pnpm 的包内入口（resources/dsh/node_modules/pnpm/bin/pnpm.cjs）。
 fn pnpm_cjs_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    let p = app
-        .path()
-        .resource_dir()
-        .ok()?
-        .join("dsh")
+    // #123：归一后的资源根（去 Windows verbatim 前缀，后续作为 spawn 参数/写进 shim）
+    let p = crate::runtime::paths::resources_dsh_root(app)?
         .join("node_modules")
         .join("pnpm")
         .join("bin")
@@ -680,12 +698,7 @@ fn pnpm_direct_add(app: &tauri::AppHandle, profile: &str, pkg: &str) -> Result<(
         .map_err(|e| format!("回写 package.json 失败：{e}"))?;
     // 内置 node + pnpm install
     let node = crate::runtime::builtin::find_builtin_node().ok_or("内置 node 不可用")?;
-    let pnpm = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|r| r.join("dsh").join("node_modules").join("pnpm").join("bin").join("pnpm.cjs"))
-        .ok_or("resource_dir 不可用")?;
+    let pnpm = pnpm_cjs_path(app).ok_or("resource_dir 不可用")?;
     if !pnpm.is_file() {
         return Err("内置 pnpm 不存在".into());
     }
@@ -1119,18 +1132,7 @@ async fn migrate_profile_inner(
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_default();
-    let pnpm_cjs = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|r| {
-            r.join("dsh")
-                .join("node_modules")
-                .join("pnpm")
-                .join("bin")
-                .join("pnpm.cjs")
-        })
-        .ok_or_else(|| "resource_dir 不可用".to_string())?;
+    let pnpm_cjs = pnpm_cjs_path(app).ok_or_else(|| "resource_dir 不可用".to_string())?;
     let mut path_parts = vec![];
     if let Some(shim_dir) = ensure_node_shim_dir(app) {
         path_parts.push(shim_dir);

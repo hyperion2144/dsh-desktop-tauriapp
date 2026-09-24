@@ -6,7 +6,14 @@ import { createRequire } from "node:module"
 import { readdirSync } from "node:fs"
 import { join, resolve as pathResolve } from "node:path"
 import { pathToFileURL } from "node:url";
-const [dshLibDir, profile, port, ...rest] = process.argv.slice(2);
+const [rawLibDir, profile, port, ...rest] = process.argv.slice(2);
+// #123 纵深防御：Rust 侧已对 resource_dir 去 Windows verbatim 前缀；
+// 此处兑底归一（\\?\D:\… → D:\…；\\?\UNC\srv → \\srv），防未来新增调用点遗漏。
+const dshLibDir = rawLibDir.startsWith("\\\\?\\\\UNC\\\\")
+  ? "\\\\" + rawLibDir.slice(8)
+  : rawLibDir.startsWith("\\\\?\\\\")
+    ? rawLibDir.slice(4)
+    : rawLibDir;
 if (!dshLibDir || !profile || !port) {
   console.error("usage: node dsh-launcher.mjs <dshLibDir> <profile> <port> [--patch <path>...]");
   process.exit(2);
@@ -50,8 +57,10 @@ for (const c of candidates) {
   try {
     const m = await import(pathToFileURL(c).href);
     if (typeof m.runProfile === "function") { runProfile = m.runProfile; break; }
-  } catch {}
-}
+  } catch (e) {
+    // #123：真实失败原因必须浮出（此前空 catch 吞错，排障只能看到末端的 not found）
+    console.error(`[dsh-launcher] import 候选失败 ${c}: ${e?.message ?? e}`);
+  }
 if (!runProfile) throw new Error(`dsh-launcher: runProfile not found in ${dshLibDir}`);
 
 // 3) 与 dsh CLI bin.js case "profile" 完全一致的调用契约

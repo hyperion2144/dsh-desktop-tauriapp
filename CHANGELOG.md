@@ -2,6 +2,11 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
+## 未发布
+
+- **Windows 内置运行时启动失败修复（#123，发布阻塞级）**：v0.9.3 在 Windows 上内置模式完全不可用——Tauri 的 `resource_dir()` 返回带 `\\?\\` verbatim 前缀的扩展路径，原样传给 dsh-launcher.mjs 后 `pathToFileURL` 生成无效 URL，所有 `profile-boot*.js` 候选 import 静默失败（空 catch 吞错）→ `runProfile not found`。修复：①新增 `runtime/paths.rs` 统一归一入口（`deverbatim` 去 `\\?\\`/`\\?\\UNC\\` 前缀；`resources_dir` / `resources_dsh_root`）②全部 10+ 个把资源路径传给 Node/子进程的消费点接入（launcher 链路、pnpm shim/cjs 三处、bin.js 定位两处、运行时下载安装、bundle 补链、内嵌插件目录三处），顺带消除三处内联重复统一走 `pnpm_cjs_path` ③launcher.mjs 入口纵深防御归一（Rust 侧已归一，兑底防新增调用点遗漏）④候选 import 空 catch 改为打印真实失败原因（本次排障最大摩擦点就是错误被吞）⑤新增 3 个 deverbatim 单测；cargo 113 全绿。macOS 不受影响（无此前缀概念，归一为直通）
+- **启动时依赖自动重建改为仅提示（#124）**：#122 引入的启动后台自动重建在实际环境不可靠且不必要（外部 pnpm 与内置只差小版本时也触发；重建链路在某些平台问题下不生效则每次启动重复）。修复：①启动块删除自动重建，大版本不一致时仅弹提示（引导去设置页「依赖状态」手动重建，入口 #122 已有）②不一致判据由精确版本放宽为 pnpm **大版本**——对齐 ERR_PNPM_UNEXPECTED_STORE 的真实机制（storeDir 含 v<major>，小版本差异 store 同代、根本不触发该错误），小版本差异不再提示不再重建；附 major 判据单测
+
 ## 已发布
 
 ### v0.9.3（2026-09-23）
