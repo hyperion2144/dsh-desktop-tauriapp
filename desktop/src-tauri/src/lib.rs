@@ -253,9 +253,10 @@ pub fn run() {
             // #114：清空运行时回收站（卸载延迟删除的落地）——须在 dsh spawn 之前，
             // 此刻无运行中实例依赖这些 inode（避免硬 link ctime 变化触发插件 rebuilt）
             crate::runtime::registry::purge_trash(app.handle());
-            // #122：后台检查各 profile 的依赖 store 是否与内置 pnpm 一致（历史上某些
-            // profile 由系统 pnpm 安装，store 大版本不同会让 dsh 的插件操作报
-            // ERR_PNPM_UNEXPECTED_STORE）；不一致且未运行 → 用内置 pnpm 自动重建一次。
+            // #122/#124：后台检查各 profile 的依赖 store 是否与内置 pnpm 大版本一致
+            // （不一致时 dsh 的插件操作会报 ERR_PNPM_UNEXPECTED_STORE）。仅提示、不自动重建
+            // （#124 拍板：重建手动化——自动重建在小版本噪音下不可靠且不必要，
+            // 手动入口见设置页「依赖状态」）。
             {
                 let bg = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -266,30 +267,14 @@ pub fn run() {
                             else {
                                 continue;
                             };
-                            let port = crate::settings::port_for_profile(&p.name);
-                            if crate::process::lifecycle::port_open(port) {
-                                crate::network::notify::show_notification(
-                                    &bg,
-                                    "依赖需重建",
-                                    &format!(
-                                        "{} 的依赖由 pnpm {recorded} 安装（内置 {builtin}），该 profile 正在运行未自动重建；停止后可在设置页「依赖状态」重建。",
-                                        p.name
-                                    ),
-                                );
-                                continue;
-                            }
-                            match crate::profiles::pnpm_install_profile(&bg, &p.name) {
-                                Ok(()) => crate::network::notify::show_notification(
-                                    &bg,
-                                    "依赖已重建",
-                                    &format!("{} 的依赖已按内置 pnpm {builtin} 重建（原 {recorded}），重启该 profile 生效。", p.name),
+                            crate::network::notify::show_notification(
+                                &bg,
+                                "依赖需重建",
+                                &format!(
+                                    "{} 的依赖由 pnpm {recorded} 安装（内置 {builtin}），如遇插件安装报错请在设置页「依赖状态」手动重建。",
+                                    p.name
                                 ),
-                                Err(e) => crate::network::notify::show_notification(
-                                    &bg,
-                                    "依赖重建失败",
-                                    &format!("{}：{e}", p.name),
-                                ),
-                            }
+                            );
                         }
                     })
                     .await;

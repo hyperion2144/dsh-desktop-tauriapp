@@ -22,8 +22,8 @@ pub(crate) fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
             return Some(p);
         }
     }
-    // 打包内嵌副本：resource_dir 已按平台归一为真实资源目录
-    if let Ok(res_dir) = app.path().resource_dir() {
+    // 打包内嵌副本（#123：归一去 Windows verbatim 前缀，路径后续进 Node 解析）
+    if let Some(res_dir) = crate::runtime::paths::resources_dir(app) {
         let embedded = res_dir.join("plugins/dsh-desktop-tauriapp");
         if embedded.join("package.json").exists() {
             log::info!("使用内嵌插件包：{}", embedded.display());
@@ -78,7 +78,7 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
 /// 定位手机访问插件包目录（dsh-mobile-access / dsh-mobile-nav）：
 /// 优先打包内嵌副本 resource_dir/plugins/<name>，回退开发仓库 mobile/<rel>。
 pub(crate) fn mobile_package_dir(app: &tauri::AppHandle, name: &str, rel: &str) -> Option<PathBuf> {
-    if let Ok(res_dir) = app.path().resource_dir() {
+    if let Some(res_dir) = crate::runtime::paths::resources_dir(app) {
         let embedded = res_dir.join("plugins").join(name);
         if embedded.join("package.json").exists() {
             return Some(embedded);
@@ -190,7 +190,7 @@ pub(crate) fn heal_profile_bundles(app: &tauri::AppHandle, profile: &str) {
     let Ok(text) = std::fs::read_to_string(&manifest) else { return };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return };
     let Some(bundles) = value["dsh"]["profile"]["bundles"].as_array() else { return };
-    let Some(builtin_nm) = app.path().resource_dir().ok().map(|r| r.join("dsh").join("node_modules")) else { return };
+    let Some(builtin_nm) = crate::runtime::paths::resources_dsh_root(app).map(|r| r.join("node_modules")) else { return };
     let Some(external_nm) = external_install_node_modules() else {
         log::info!("[heal] 无外部 dsh 安装树，跳过 bundle 补链");
         return;

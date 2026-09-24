@@ -146,7 +146,7 @@ pub(crate) fn dsh_version_in_root(root: &std::path::Path) -> Option<String> {
 
 /// 内置树版本号（resources/dsh）。
 pub(crate) fn builtin_version(app: &tauri::AppHandle) -> Option<String> {
-    dsh_version_in_root(&app.path().resource_dir().ok()?.join("dsh"))
+    dsh_version_in_root(&crate::runtime::paths::resources_dsh_root(app)?)
 }
 
 /// 选中运行时的实际版本（#95 显示修复）：settings.dsh_runtime 指向的树有效则返回其版本，
@@ -431,13 +431,10 @@ fn install_via_pnpm(app: &tauri::AppHandle, version: &str) -> Result<(), String>
     let outcome = (|| -> Result<(), String> {
         let node = crate::runtime::builtin::find_builtin_node()
             .ok_or_else(|| "内置 node 不可用".to_string())?;
-        let pnpm_cjs = app
-            .path()
-            .resource_dir()
-            .ok()
+        // #123：归一后的资源根（去 Windows verbatim 前缀）再拼 pnpm 入口
+        let pnpm_cjs = crate::runtime::paths::resources_dsh_root(app)
             .map(|r| {
-                r.join("dsh")
-                    .join("node_modules")
+                r.join("node_modules")
                     .join("pnpm")
                     .join("bin")
                     .join("pnpm.cjs")
