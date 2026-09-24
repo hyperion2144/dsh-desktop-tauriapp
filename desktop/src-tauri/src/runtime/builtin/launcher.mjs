@@ -61,6 +61,7 @@ for (const c of candidates) {
     // #123：真实失败原因必须浮出（此前空 catch 吞错，排障只能看到末端的 not found）
     console.error(`[dsh-launcher] import 候选失败 ${c}: ${e?.message ?? e}`);
   }
+}
 if (!runProfile) throw new Error(`dsh-launcher: runProfile not found in ${dshLibDir}`);
 
 // 3) 与 dsh CLI bin.js case "profile" 完全一致的调用契约
