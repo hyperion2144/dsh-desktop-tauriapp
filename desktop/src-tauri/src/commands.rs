@@ -969,12 +969,7 @@ pub(crate) async fn get_dsh_source(app: tauri::AppHandle) -> serde_json::Value {
 /// get_dsh_source 的阻塞实现：读内置树 package.json / spawn dsh --version / TCP 探活，
 /// 只允许经 spawn_blocking 在阻塞线程池运行，禁止直接在主线程调用。
 fn get_dsh_source_blocking(app: tauri::AppHandle) -> serde_json::Value {
-    use crate::runtime::builtin::DshMode;
-    let mode = crate::runtime::builtin::configured_dsh_mode();
-    let mode_str = match mode {
-        DshMode::Builtin => "builtin",
-        DshMode::External => "external",
-    };
+    let mode_str = crate::runtime::builtin::configured_dsh_mode().as_str();
     let builtin = crate::runtime::builtin::builtin_lib_info(&app)
         .map(|(lib, version)| serde_json::json!({ "lib": lib.display().to_string(), "dsh_version": version }))
         .unwrap_or(serde_json::Value::Null);

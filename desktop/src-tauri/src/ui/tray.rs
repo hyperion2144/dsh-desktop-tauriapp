@@ -13,6 +13,7 @@ use tauri::{
 };
 
 use crate::runtime::state::{DshState, MODE_ADVANCED, MODE_COMPAT};
+use crate::runtime::builtin::DshMode;
 use crate::runtime::error::SpawnError;
 use crate::process::lifecycle::spawn_dsh;
 use crate::network::web_token::clear_web_token;
@@ -92,6 +93,9 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         selected.as_deref(),
         catalog.as_deref(),
         dl.as_deref(),
+        // #126：来源决定 ● 落点；外部可用性决定是否列出「外部 dsh」条目
+        crate::runtime::builtin::configured_dsh_mode(),
+        crate::runtime::builtin::find_external_bin().is_some(),
     ) {
         rsub = rsub.text(&id, &text);
     }
@@ -162,14 +166,15 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 let label = crate::ui::multiwin::focused_window_label(app);
                 crate::ui::multiwin::switch_profile_in_window(app, &label, &name);
             }
-            "runtime-builtin" => switch_runtime(app, None),
+            "runtime-builtin" => switch_runtime(app, None, DshMode::Builtin),
+            "runtime-external" => switch_runtime(app, None, DshMode::External),
             "runtime-more" => {
                 spawn_fetch_catalog(app);
                 show_main(app);
             }
             id if id.starts_with("runtime-switch-") => {
                 let ver = id.strip_prefix("runtime-switch-").unwrap_or("").to_string();
-                switch_runtime(app, Some(&ver));
+                switch_runtime(app, Some(&ver), DshMode::Builtin);
             }
             id if id.starts_with("runtime-fetch-") => {
                 let ver = id.strip_prefix("runtime-fetch-").unwrap_or("").to_string();
@@ -374,19 +379,29 @@ pub fn toggle_desktop_mode(app: &AppHandle) {
     restart_dsh_in_mode(app, next, None);
 }
 
-/// 托盘切换运行时（#98）：保存 dsh_runtime（None=内置）+ 钉回 builtin 模式（对齐设置页
-/// 语义：external 模式下切版本无意义），随后重启 dsh 生效；重启流程尾部会刷新托盘。
-pub fn switch_runtime(app: &AppHandle, version: Option<&str>) {
+/// 托盘切换运行时（#98 / #126）：保存来源（内置 / 外部）+ 内置来源下的版本选择，
+/// 随后重启 dsh 生效；重启流程尾部会刷新托盘。
+/// - `version`：内置来源下选中的已下载版本（None = 随包内置树）；来源为 external 时忽略
+/// - `mode`：目标来源（#126 D1：切到 external 不动 dsh_runtime，切回内置可恢复上次选择）
+pub fn switch_runtime(app: &AppHandle, version: Option<&str>, mode: DshMode) {
     let mut s = crate::settings::load_desktop_settings();
-    s.dsh_runtime = version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-    s.dsh_mode = Some("builtin".into());
+    if mode == DshMode::Builtin {
+        s.dsh_runtime = version.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    }
+    s.dsh_mode = Some(mode.as_str().into());
     if let Err(e) = crate::settings::save_desktop_settings(&s) {
         log::error!("[tray] 保存运行时设置失败：{e}");
         show_notification(app, "运行时切换失败", &e);
         return;
     }
-    let label = s.dsh_runtime.clone().unwrap_or_else(|| "内置版本".into());
-    show_notification(app, "运行时已切换", &format!("dsh {label}，正在重启服务…"));
+    // 文案：外部来源没有版本号，直接用来源名；内置来源沿用版本号 /「内置版本」
+    let label = match mode {
+        DshMode::External => "外部 dsh".to_string(),
+        DshMode::Builtin => {
+            format!("dsh {}", s.dsh_runtime.clone().unwrap_or_else(|| "内置版本".into()))
+        }
+    };
+    show_notification(app, "运行时已切换", &format!("{label}，正在重启服务…"));
     restart_dsh(app);
     // 重启完成后再补一条终态（用户实测反馈：点击后不知道啥时候成功/重启）
     notify_when_ready(app, label);
@@ -422,7 +437,7 @@ fn fetch_runtime_and_switch(app: &AppHandle, version: String) {
                     },
                 );
                 refresh_tray_mode(&handle);
-                switch_runtime(&handle, Some(&version));
+                switch_runtime(&handle, Some(&version), DshMode::Builtin);
             }
             Err(e) => {
                 log::error!("[tray] 运行时 {version} 下载失败：{e}");
@@ -501,42 +516,60 @@ fn notify_when_ready(app: &AppHandle, label: String) {
                 continue;
             }
             if seen && state.status.load(Ordering::SeqCst) == crate::runtime::state::STATUS_READY {
-                show_notification(&handle, "运行时切换完成", &format!("✅ dsh {label} 已启动"));
+                show_notification(&handle, "运行时切换完成", &format!("✅ {label} 已启动"));
                 return;
             }
         }
         log::warn!("[tray] 等待运行时 {label} 就绪超时（90s），放弃完成通知");
     });
 }
+
+/// 单选标记（#126）：● 当前生效 / ○ 其余。
+fn radio(on: bool) -> &'static str {
+    if on { "● " } else { "○ " }
+}
 /// 生成「运行时版本」子菜单条目（纯函数，单测锁定语义）。
-/// 返回 (id, text)：内置项 + 已装项（● 当前选中 / ○ 其余，与内置同号去重）
+/// 返回 (id, text)：内置项 +「外部 dsh」项（#126：与内置同级单选，探测不到就不列）
+/// + 已装项（● 当前选中 / ○ 其余，与内置同号去重）
 /// + 目录未装项（↓ 下载并切换，至多 5 条，下载中标注）。
+/// `mode` 为当前来源：external 时 ● 只落外部项，内置/已装项一律 ○
+/// （#126 D1：external 下 dsh_runtime 仍保留，只是不生效）。
 pub(crate) fn runtime_menu_items(
     builtin: Option<&str>,
     installed: &[crate::runtime::registry::InstalledRuntime],
     selected: Option<&str>,
     catalog: Option<&[(String, String)]>,
     downloading: Option<&str>,
+    mode: DshMode,
+    external_available: bool,
 ) -> Vec<(String, String)> {
     let mut items = Vec::new();
     let sel = selected.filter(|s| !s.is_empty());
-    let builtin_on = sel.is_none() || sel == builtin;
+    let external_on = mode == DshMode::External;
+    let builtin_on = !external_on && (sel.is_none() || sel == builtin);
     let builtin_label = match builtin {
         Some(v) => format!("内置 {v}（随安装包）"),
         None => "内置（随安装包，版本未知）".to_string()
     };
     items.push((
         "runtime-builtin".into(),
-        format!("{}{builtin_label}", if builtin_on { "● " } else { "○ " }),
+        format!("{}{builtin_label}", radio(builtin_on)),
     ));
+    // #126：外部 dsh 就是运行时列表里的又一个条目——与已下载版本一样「存在才列出」
+    if external_available {
+        items.push((
+            "runtime-external".into(),
+            format!("{}外部 dsh（DSH_BIN / PATH）", radio(external_on)),
+        ));
+    }
     for inst in installed {
         if Some(inst.version.as_str()) == builtin {
             continue;
         }
-        let on = sel == Some(inst.version.as_str());
+        let on = !external_on && sel == Some(inst.version.as_str());
         items.push((
             format!("runtime-switch-{}", inst.version),
-            format!("{}{}", if on { "● " } else { "○ " }, inst.version),
+            format!("{}{}", radio(on), inst.version),
         ));
     }
     if let Some(cats) = catalog {
@@ -562,15 +595,27 @@ pub(crate) fn runtime_menu_items(
 #[cfg(test)]
 mod tests {
     use super::runtime_menu_items;
+    use crate::runtime::builtin::DshMode;
     use crate::runtime::registry::InstalledRuntime;
 
     fn inst(ver: &str) -> InstalledRuntime {
         InstalledRuntime { version: ver.into(), source: "github".into(), installed_at: 0 }
     }
 
+    /// 既有语义的便利构造：内置来源 + 探测不到外部 dsh（等价于 #126 之前的调用形态）
+    fn menu(
+        builtin: Option<&str>,
+        installed: &[InstalledRuntime],
+        selected: Option<&str>,
+        catalog: Option<&[(String, String)]>,
+        downloading: Option<&str>,
+    ) -> Vec<(String, String)> {
+        runtime_menu_items(builtin, installed, selected, catalog, downloading, DshMode::Builtin, false)
+    }
+
     #[test]
     fn builtin_default_when_no_selection() {
-        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], None, None, None);
+        let items = menu(Some("0.1.6"), &[inst("0.1.7")], None, None, None);
         assert_eq!(items[0].0, "runtime-builtin");
         assert!(items[0].1.contains("● 内置 0.1.6"));
         assert!(items[1].1.starts_with("○ 0.1.7"));
@@ -579,7 +624,7 @@ mod tests {
 
     #[test]
     fn installed_selection_marks_radio() {
-        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], Some("0.1.7"), None, None);
+        let items = menu(Some("0.1.6"), &[inst("0.1.7")], Some("0.1.7"), None, None);
         assert!(items[0].1.starts_with("○"));
         assert!(items[1].1.starts_with("● 0.1.7"));
     }
@@ -590,7 +635,7 @@ mod tests {
         let vers = ["0.1.6", "0.1.7", "0.2.0", "0.2.1", "0.2.2", "0.2.3", "0.2.4", "0.3.0"];
         let cats: Vec<(String, String)> =
             vers.iter().map(|v| (v.to_string(), "latest".into())).collect();
-        let items = runtime_menu_items(Some("0.1.6"), &[inst("0.1.7")], None, Some(&cats), None);
+        let items = menu(Some("0.1.6"), &[inst("0.1.7")], None, Some(&cats), None);
         let fetch: Vec<_> = items.iter().filter(|(id, _)| id.starts_with("runtime-fetch-")).collect();
         assert_eq!(fetch.len(), 5, "未装目录项应截为 5 条：{items:?}");
         assert!(!fetch.iter().any(|(id, _)| id.contains("0.3.0")), "第 6 条应被截断");
@@ -599,8 +644,94 @@ mod tests {
     #[test]
     fn downloading_version_annotated() {
         let cats = vec![("0.2.0".to_string(), "alpha".to_string())];
-        let items = runtime_menu_items(None, &[], None, Some(&cats), Some("0.2.0"));
+        let items = menu(None, &[], None, Some(&cats), Some("0.2.0"));
         assert!(items[1].1.contains("下载中"));
         assert!(items[1].1.contains("alpha"));
+    }
+
+    // ── #126：外部 dsh 作为运行时列表里的同级条目 ──
+
+    #[test]
+    fn external_item_listed_only_when_available() {
+        let absent =
+            runtime_menu_items(Some("0.1.6"), &[], None, None, None, DshMode::Builtin, false);
+        assert!(
+            !absent.iter().any(|(id, _)| id == "runtime-external"),
+            "探测不到外部 dsh 时不应列出该条目：{absent:?}"
+        );
+
+        let present =
+            runtime_menu_items(Some("0.1.6"), &[], None, None, None, DshMode::Builtin, true);
+        assert_eq!(present[0].0, "runtime-builtin");
+        assert_eq!(present[1].0, "runtime-external", "外部条目紧跟内置条目：{present:?}");
+        assert!(
+            present[1].1.starts_with("○ 外部 dsh"),
+            "内置来源下外部应未选中：{:?}",
+            present[1]
+        );
+    }
+
+    #[test]
+    fn external_mode_moves_radio_and_clears_builtin() {
+        // #126 D1：external 来源下 dsh_runtime 仍保留（切回可恢复），但 ● 只落外部条目
+        let items = runtime_menu_items(
+            Some("0.1.6"),
+            &[inst("0.1.7")],
+            Some("0.1.7"),
+            None,
+            None,
+            DshMode::External,
+            true,
+        );
+        let ext = items
+            .iter()
+            .find(|(id, _)| id == "runtime-external")
+            .expect("应有外部条目");
+        assert!(ext.1.starts_with("● 外部 dsh"), "external 来源应选中外部条目：{ext:?}");
+        assert!(
+            items[0].1.starts_with("○ "),
+            "external 来源下内置不应带 ●：{:?}",
+            items[0]
+        );
+        let inst_item = items
+            .iter()
+            .find(|(id, _)| id == "runtime-switch-0.1.7")
+            .expect("应有已装条目");
+        assert!(
+            inst_item.1.starts_with("○ "),
+            "external 来源下已下载版本不应带 ●：{inst_item:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_mode_ignores_external_radio() {
+        let items =
+            runtime_menu_items(Some("0.1.6"), &[], None, None, None, DshMode::Builtin, true);
+        assert!(items[0].1.contains("● 内置 0.1.6"));
+        assert!(items[1].1.starts_with("○ 外部 dsh"));
+    }
+
+    #[test]
+    fn external_mode_without_external_bin_shows_no_radio() {
+        // #126 D3+D4：来源是 external 但探测不到外部 dsh —— 外部条目不列，
+        // 内置/已装也不带 ●（不谎报「内置已选中」）；用户可点内置切回。
+        let items = runtime_menu_items(
+            Some("0.1.6"),
+            &[inst("0.1.7")],
+            Some("0.1.7"),
+            None,
+            None,
+            DshMode::External,
+            false,
+        );
+        assert!(
+            !items.iter().any(|(id, _)| id == "runtime-external"),
+            "探测不到外部 dsh 时不应列出该条目：{items:?}"
+        );
+        assert!(
+            !items.iter().any(|(text, _)| text.starts_with("● ")),
+            "无生效条目时不应有任何 ●：{items:?}"
+        );
+        assert!(items[0].1.starts_with("○ 内置"), "内置应为 ○：{:?}", items[0]);
     }
 }
