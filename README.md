@@ -3,107 +3,107 @@
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
 [![npm](https://img.shields.io/npm/v/dsh-desktop-tauriapp)](https://www.npmjs.com/package/dsh-desktop-tauriapp)
 
-> 主人好呀～ 这是 **DeepSeek Harness Desktop** 桌面客户端仓库，把 DeepSeek Harness Web GUI 封装成 macOS/Windows 桌面应用。一键启动、托盘常驻、退出自动回收子进程。
-> 一键安装：`dsh plugin add dsh-desktop-tauriapp`（npm）或 `dsh plugin add github:hyperion2144/dsh-desktop-tauriapp`（GitHub），主人家的 agent 就学会「把 DSH 封装成桌面应用」的手艺了呢～
+> 主人好呀～ 这是 **DeepSeek Harness Desktop**：把 DeepSeek Harness 的 Web GUI 封装成 macOS / Windows 桌面应用——**内置运行时开箱即用**（无需自己装 Node 和 dsh）、托盘常驻、多 profile 多窗口、退出自动回收子进程。
+> 一键安装：`dsh plugin add dsh-desktop-tauriapp`（npm）或 `dsh plugin add github:hyperion2144/dsh-desktop-tauriapp`（GitHub）。
 
 > **来源与致谢**：本仓库 fork 自 [happpsee/dsh-desktop-app](https://github.com/happpsee/dsh-desktop-app)，现由 [hyperion2144/dsh-desktop-tauriapp](https://github.com/hyperion2144/dsh-desktop-tauriapp) 独立演进维护；感谢原作者的开创性工作。
 
-这个仓库把 DeepSeek Harness 做成桌面端（macOS + Windows 双平台），主要看点：
+## 主要看点
 
-1. **Windows 无管理员工具链方案**：无 VS Build Tools 也能构建 Tauri 2（xwin + rust-lld + clang-cl + 真 rc.exe），全部用户级安装，附配置模板与脚本
-2. **国内镜像哨兵机制**：rustup/cargo/npm/GitHub/NSIS 全套镜像 + subagent 超时判定，Windows 新环境不再卡外网
-3. **真机实测审计报告**：Win11 无管理员逐条实测 + 20 条修订清单（docs/）
+1. **内置运行时，零前置依赖**：Node sidecar + dsh 依赖树随安装包分发，双击即用；也可随时切换到自己装的外部 `dsh`
+2. **多 profile、多窗口**：每个 profile 独立端口与实例，托盘一键开新窗 / 就地切换；手机访问经 lane 反代跟随焦点窗口
+3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、鲸鱼娘桌宠、下载管理器、插件保险丝
+4. **国内网络友好**：rustup / cargo / npm / GitHub / NSIS 全套镜像配置与「哨兵」超时判定，Windows 无管理员工具链方案（见 [skill/](skill/) 与 [docs/](docs/)）
 
-桌面壳本身（`desktop/`，macOS + Windows 双平台，托盘常驻 / 单实例 / 子进程回收 / 任务完成通知 / macOS Overlay 标题栏）作为可运行参考实现。
+## 安装
 
-## 命名
+### 直接下载（推荐）
 
-- 应用展示名：**DeepSeek Harness Desktop**（与已安装的 `DeepSeek Harness.app` 保持一致）
-- 技术标识：ASCII 的 `dsh-desktop-tauriapp` / `dsh-desktop-tauriapp` / `com.arcreel.dsh-desktop-tauriapp`
-- 应用图标：复用已安装的 `DeepSeek Harness.app` 的 `icon.icns`（保真度最高的 macOS icns）
-- 应用内左上角图标：保留 DSH Web GUI 原始样式；桌面 chrome（拖拽区/状态条/窗口按钮）由内置 `dsh-desktop-tauriapp` 插件的 client 提供——应用启动时把插件经 `--patch` 注入 dsh web profile（实体挂共享模块池，不写 profile bundles），窗口加载 URL 带 `dsh-desktop-tauriapp-mode=advanced&dsh-desktop-tauriapp-platform=<平台>` 标记，插件 client 在标准布局内注入局部拖拽区/状态条（不禁用 stock ui-layout）；普通浏览器访问不激活、不受影响
+从 [Releases](../../releases) 下载对应平台安装包：
 
-## 特性
+| 平台 | 产物 |
+|---|---|
+| macOS（Apple Silicon） | `DeepSeek.Harness.Desktop_<版本>_aarch64.dmg` |
+| Windows | `DeepSeek.Harness.Desktop_<版本>_x64_zh-CN.msi`（或 `_x64-setup.exe`） |
 
-- **一键启动**：双击 app → 探测本地 dsh web（默认 127.0.0.1:3080，端口可在托盘「本地端口…」
-  修改，`DSH_DESKTOP_PORT` 环境变量优先；`dsh` 升级后默认会打开系统浏览器，桌面壳 spawn 时带
-  `--no-open` 关闭）。空闲则由本应用按配置的 profile/端口拉起实例并直接启用桌面 chrome；
-  已有实例时，启动页弹「兼容/高级」模式选择：
-  - **兼容模式**：复用外部实例、标准布局、系统原生标题栏（不启用桌面 chrome，浏览器不影响）
-  - **高级模式**：先停用占用端口的现有 dsh（含外部/终端进程），再按配置拉起桌面壳实例、
-    启用完整桌面 chrome
-  退出只回收自己拉起的实例
-- **进程守护（0.6.0）**：连接级健康探测（TCP 连不上才判异常），异常自动回启动页并重建；自愈 3 次
-  封顶、自动重启冷却 60s；复用外部实例/远程只提示不代拉。侧边栏底部整行状态条实时显示运行状态
-  （重启走托盘，状态条不承担点击）
-- **托盘三件套（0.6.0）**：`Profile ▸` 二级菜单（扫描/切换/新建）、`dsh 服务地址 ▸`（本地/
-  远程列表/新增/删除）、「本地端口…」；配置持久化于 `$DSH_HOME/settings.yaml` 的
-  `dsh-desktop-tauriapp:` 键（只读写该键，其余内容不动）
-- **远程 dsh（0.6.0）**：可切换到任意远程 dsh 地址；高级模式需要远程已安装本插件，缺则提示建议
-  切兼容模式；远程只做可达性检测、不代拉不重启
-- **托盘常驻**：关闭窗口仅隐藏（首次有通知提示），托盘左键唤起、菜单退出；
-  拦截 Cmd+Q 防误退
-- **托盘「重启 dsh 服务」**：会停掉当前占用端口的实例（含复用的外部实例，例如终端/浏览器
-  起的 dsh web），再按当前配置（profile/端口/本地或远程）重建服务；远程模式下则重新导航远程页面
-- **进程回收**：只回收本次启动 spawn 的 dsh 子进程，stdout/stderr 落盘日志
-- **单实例**：重复双击聚焦已有窗口，不会拉起第二个服务
-- **窗口状态记忆**：位置与大小自动恢复
-- **桌面 chrome（插件式，参考 dsh-plugin-desktop 实现）**：由内置 `dsh-desktop-tauriapp` 插件 client（`src/client/`，构建产物 `lib/client.js`）在标准布局内**局部注入**（不禁用 stock ui-layout）——macOS `titleBarStyle: Overlay` 保留原生红绿灯 + 侧栏区域拖拽；Windows/Linux 用 `decorations:false` 隐藏系统标题栏，中间 header 区域自绘 caption 行 + 最小化/最大化/关闭按钮；布局/配色全部跟随主题 token，无硬编码；另注入设置弹窗 tab 列滚动等样式修复（稳定标记定位，不依赖 hash 类名）
-- **插件注入（--patch 方式）**：应用启动（需拉起 dsh 时）把内置插件实体的符号链接挂入共享模块池
-  `$DSH_HOME/profiles/node_modules`（Windows 退化为实体复制），并迁移历史 `plugin add` 写入的
-  profile bundle 注册；spawn 时传 `--patch` 注入清单（包名行）——不写 profile bundles、不禁用
-  stock ui-layout，浏览器 GUI 不受影响
-- **内嵌插件跨平台路径**：`dsh-desktop-tauriapp` 打包时经 `bundle.resources` 内嵌进安装包——
-  macOS 落在 `Contents/Resources/dsh-desktop-tauriapp`、Windows 落在可执行文件所在安装目录、
-  Linux 落在 `/usr/lib/<应用>`（deb）或 AppImage 挂载点；运行时统一用 `app.path().resource_dir()`
-  解析真实位置，安装目录不在 /Applications 也不受影响。
-- **鲸鱼娘桌宠**：透明置顶无边框小窗，纯 CSS 呼吸/漂浮动画 + 椭圆阴影；拖拽移动
-  （4px 阈值区分点击）、左键唤起主窗、右键菜单（穿透开关/隐藏/退出）、任务完成
-  弹气泡；位置记忆（多屏钳位 + 拖拽防抖）；托盘「显示/隐藏桌宠」开关
-- **任务完成通知**：注入 JS 监听运行中标记（`data-state="ongoing"`）的"忙碌→空闲"
-  翻转，任务结束时 Dock 角标 +1；窗口失焦/隐藏时弹系统通知并跳 Dock（前台不打扰），
-  回到窗口自动清零；通知桥内置 CORS 预检应答（跨源 fetch 不再被浏览器拦截）
-- **三平台通知权限**：启动时 best-effort 申请/确认系统通知权限（macOS UNUserNotificationCenter /
-  Windows Toast / Linux dbus），所有系统通知的发送结果统一落日志，便于排查"通知不生效"
-- **外链默认浏览器打开**：webview 里任意位置的 http(s)/mailto/tel 链接（对话内、设置页等），
-  由插件 client 拦截并转交系统默认浏览器（Tauri 命令 `open_external`），同时覆盖 `window.open`
-  （"在新窗口打开链接"等）；纯浏览器页面不做任何拦截
-- **启动控制台**：加载页实时显示 `dsh web` 子进程的 stdout/stderr（原生侧 emit
-  `dsh-console` 事件到页面），控制台样式输出框支持展开/收起/清空，启动失败时可直接看到原因
-- **健壮定位**：Finder/资源管理器启动的 GUI 应用没有终端 PATH，内置
-  nvm/npm-global/npx/Homebrew/非标准盘符等多级兜底探测（Windows 分支用
-  `node + bin.js` 直跑，规避 dsh.cmd shim 与黑窗闪现）
-- **国内镜像优先**：skill 内置 rustup/cargo/npm/GitHub/NSIS 全套国内源配置，
-  以及"subagent 哨兵"下载时长判定机制（Windows 无管理员环境的完整替代工具链
-  方案见 docs/windows-build-notes.md）
-
-## 仓库结构
-
-```
-skill/     Claude/DSH 兼容技能包（SKILL.md + resources/ 参考实现 + Windows 实战笔记）
-desktop/   Tauri 2 项目源码（macOS + Windows，cfg 双平台分支）
-docs/      Windows 实测审计报告与构建笔记
-```
-
-## 快速开始
-
-### 直接安装（macOS）
-
-1. 确保已装 dsh：`npm i -g @deepseek-ai/dsh`
-2. 从 [Releases](../../releases) 下载 `Deepseek-Harness_*.dmg`，拖入应用程序
-3. 双击「DeepSeek Harness Desktop」；托盘菜单可退出
+macOS 首次打开若非公证版本，需右键「打开」；Windows 网络下载的 exe 可能触发 SmartScreen 提示（本地构建不触发）。
 
 ### 从源码构建
 
 ```bash
-cd desktop
-pnpm install
-pnpm tauri build   # macOS 出 .app/.dmg；Windows 出 .msi/.exe
+npm run build:client        # 先构建插件 client（lib/client.js）
+cd desktop && npm install
+npm run build               # 等价 tauri build：macOS 出 .app/.dmg，Windows 出 .msi/.exe
 ```
 
-构建细节、平台差异与验收清单见 [skill/SKILL.md](skill/SKILL.md)。
+内置 dsh 运行时由 `desktop/scripts/prepare-builtin-runtime.mjs` 准备（版本在脚本顶部 `BUILTIN_DSH_VERSION` 精确 pin，pnpm 亦精确 pin；本地与 CI 一致可复现）：
 
-### 移动端壳（Android / iOS / 鸿蒙）
+```bash
+node desktop/scripts/prepare-builtin-runtime.mjs --variant latest   # 装内置依赖树 + Node sidecar
+node desktop/scripts/prepare-builtin-runtime.mjs --variant latest --skip-node   # 只重装依赖树
+```
+
+发布链：提交 → 三处升版本（`package.json` / `desktop/src-tauri/tauri.conf.json` / `desktop/src-tauri/Cargo.toml`）→ `git tag vX.Y.Z && git push` → CI 双平台构建并出 draft release → `gh release edit vX.Y.Z --draft=false --latest`。
+
+### 作为 DSH 插件 / 技能使用
+
+```bash
+# DSH 插件（npm / GitHub）
+dsh plugin add dsh-desktop-tauriapp
+dsh plugin add github:hyperion2144/dsh-desktop-tauriapp
+
+# 技能包（Claude Code / Claude Agent 兼容格式）
+cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
+# DSH：复制到所运行 profile 的 skills 目录后加载 dsh-desktop-tauriapp 技能
+```
+
+## 特性
+
+### 运行时与进程
+
+- **内置运行时（默认）**：Node 24 sidecar + dsh 依赖树随包分发，经内部 API 代码路径启动（不走 CLI）；也可切换外部 dsh CLI（`DSH_BIN` → PATH → npm 全局）
+- **运行时版本管理**：应用内下载 / 切换 / 卸载 dsh 运行时版本（目录源可配 github / npm）；托盘「运行时版本」子菜单——已装点击即切，未装点击 = 下载→自动切换，全程系统通知反馈；内置版本可直接切回
+- **进程守护**：连接级健康探测（TCP 连不上才判异常），异常自动回启动页重建，自愈 3 次封顶、冷却 60s；复用外部实例/远程只提示不代拉
+- **单实例 + 窗口状态记忆 + 退出回收**：重复双击聚焦已有窗口；位置大小自动恢复；只回收本次 spawn 的子进程，stdout/stderr 落盘日志
+
+### 多 profile 与多窗口
+
+- **per-profile 端口**：`web=3080`、`desktop=3081`，其余散列分配并持久化；设置页可改
+- **全新安装默认 `desktop` profile**（存量用户保持 `web`）；`desktop` 非 dsh 出厂模板，经 `--from-default-profile` 初始化
+- **托盘 Profile 分组**：聚焦已有窗口 / 在新窗口打开 / **就地切换本窗口的 profile** / 新建 / 全量迁移 A→B（排除锁与临时文件、符号链接感知、覆盖前备份）
+- **lane 反代跟随焦点窗口**：3091 稳定接入点指向焦点实例，手机侧零改动
+
+### 桌面化体验
+
+- **桌面 chrome（插件式局部注入）**：由内置插件的 client 在标准布局内注入局部拖拽区/状态条（不禁用 stock ui-layout）——macOS 用 `titleBarStyle: Overlay` 保留原生红绿灯；Windows 用 `decorations: false` 自绘标题栏按钮；配色随主题 token
+- **托盘常驻**：关闭窗口仅隐藏，托盘左键唤起、菜单退出，拦截 Cmd+Q 防误退；托盘含「重启 dsh 服务」「切换 Profile（本窗口）」「运行时版本」「dsh 服务地址」「本地端口…」「显示/隐藏桌宠」
+- **任务完成通知**：监听会话「忙碌→空闲」翻转，结束时 Dock 角标 +1；窗口失焦时弹系统通知（前台不打扰），回窗口自动清零；三平台通知权限 best-effort 申请并统一落日志
+- **鲸鱼娘桌宠**：透明置顶无边框小窗（纯 CSS 动画）、拖拽移动、左键唤起主窗、右键菜单（穿透/隐藏/退出）、任务完成弹气泡、位置记忆（多屏钳位）
+- **外链策略（对齐 dsh 官方桌面语义）**：新窗请求（`window.open` / `target=_blank`）→ 系统默认浏览器（应用内不开新窗）；异源顶层导航 → 阻止；`mailto:` / `tel:` → 系统。会话内链接的路由由 dsh 自己做（侧边栏/新标签），宿主不插手
+- **下载管理器**：blob/data 下载拦截 + 管理 Tab（分块写入、进度、完成通知）
+- **启动控制台**：加载页实时显示 dsh 子进程 stdout/stderr，可展开/收起/清空，启动失败直接看原因
+- **系统代理**：system 模式读系统设置（含凭证），manual 模式手填；壳侧所有网络（目录拉取、运行时下载、文件下载）统一走代理
+- **健壮定位**：Finder/资源管理器启动的 GUI 无终端 PATH，内置 nvm / npm-global / npx / Homebrew / 非标准盘符多级兜底探测
+
+### 设置与维护
+
+- **设置页区块**：dsh 来源（内置/外部，切换立即接管）· dsh 服务地址（本地/远程）· Profile · Profile 端口 · 迁移 Profile · dsh 运行时（下载/切换/卸载）· 下载 · 代理设置 · **依赖状态** · 手机访问
+- **依赖状态自检与一键重建**：dsh 的插件安装/卸载由内置 pnpm 执行，其 store 大版本必须与 profile 的 `node_modules` 一致；面板列出各 profile 记录的 pnpm / 内置版本 / 是否需重建（运行中禁重建），壳启动时后台检查并自动重建不一致且未运行的 profile
+- **插件保险丝**：隔离名单 / 可修复判定 / 修复 / 失败解读（AI 解读带超时看门狗，不会无限 loading）
+- **诊断**：webview 控制台镜像到 `$DSH_HOME/dsh-desktop-webview.log`，应用日志在 `~/Library/Logs/com.arcreel.dsh-desktop-tauriapp/`
+
+## 仓库结构
+
+```
+src/client/   本仓库作为 dsh 插件的浏览器半区（esbuild → lib/client.js）
+desktop/      Tauri 2 桌面壳（Rust，macOS + Windows）；scripts/ 含运行时准备与验收脚本
+mobile/       手机访问（dsh-mobile-access 服务 + Expo 原生壳 + 鸿蒙骨架）
+skill/        Claude/DSH 兼容技能包（SKILL.md + resources/ + Windows 实战笔记）
+docs/         设计与审计文档（含 Windows 无管理员实测报告）
+lib/          插件 client 构建产物（随包分发）
+```
+
+## 移动端壳（Android / iOS / 鸿蒙）
 
 仓库 `mobile/` 下有手机访问壳（配对桌面 dsh 后进入 WebView 使用）：
 
@@ -129,18 +129,11 @@ xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Relea
 # 打包 Payload/DeepSeek.app → DeepSeek.ipa
 ```
 
-### 作为技能使用
-
-```bash
-cp -r skill ~/.claude/skills/dsh-desktop-tauriapp   # Claude Code / Claude Agent
-# DSH：复制到所运行 profile 的 skills 目录后加载 dsh-desktop-tauriapp 技能
-```
-
 ## 平台实测状态
 
 | 平台 | 状态 |
 |------|------|
-| macOS | ✅ 实测（三条验收路径全绿） |
+| macOS | ✅ 实测（内置/外部/受限 PATH 三条验收路径全绿） |
 | Windows | ✅ 实测（Win11 无管理员环境完整构建+打包+验收，见 [docs/windows-audit-report.md](docs/windows-audit-report.md)） |
 | Android | ✅ 实测（模拟器 + 真机安装运行） |
 | iOS/iPad | ✅ 实测（模拟器 + AltStore 侧载） |
@@ -149,16 +142,14 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp   # Claude Code / Claude Agent
 ## 许可
 
 - 代码与文档：**MIT**（见 [LICENSE](LICENSE)）
-- 应用图标来源：`/Applications/DeepSeek Harness.app/Contents/Resources/icon.icns`（已安装的桌面客户端原图，复用以保证图标一致）
-- 鲸鱼娘素材：CC BY-NC-SA 4.0 非商用素材仍随仓库保留（`skill/resources/whale-girl-LICENSE.txt`），如有启用可作为品牌辅助素材
+- 应用图标来源：`/Applications/DeepSeek Harness.app/Contents/Resources/icon.icns`（复用已安装客户端原图以保证一致）
+- 鲸鱼娘素材：CC BY-NC-SA 4.0 非商用素材随仓库保留（`skill/resources/whale-girl-LICENSE.txt`）
 - 另请注意：DeepSeek 鲸鱼为官方商标，本应用是非官方客户端
 
 ## 已知限制
 
-- 任务完成通知仍为 DOM 启发式（`data-state` 运行中标记），分不清成功/失败/被停、
-  拿不到标题/token；权威信号 `turn/end` 的语义化升级方案见 docs/next-tasks.md
-- 桌宠：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常，需真机双验）；
-  macOS 置顶仅 Floating 级、盖不过全屏应用；macOS Cmd+Tab 会出现桌宠条目
-  （`skipTaskbar` 仅 Windows 生效）；任务通知首次弹出需在系统设置授予通知权限
-- 未签名分发：Windows 网络下载的 exe 会触发 SmartScreen 提示（本地构建不触发）；
-  macOS 非公证 app 需右键打开
+- **任务完成通知**为 DOM 启发式（监听 `data-state` 运行中标记），分不清成功/失败/被停，拿不到标题与 token；权威信号的语义化升级见 docs/
+- **桌宠**：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常）；置顶仅 Floating 级、盖不过全屏应用；Cmd+Tab 会出现桌宠条目（`skipTaskbar` 仅 Windows 生效）
+- **未签名分发**：macOS 非公证包需右键打开（`xattr -cr "/Applications/DeepSeek Harness Desktop.app"` 可解）；Windows 网络下载的 exe 触发 SmartScreen
+- **安装包体积**：内置运行时（Node 24 + dsh 依赖树）使 macOS dmg 约 200 MB 量级，Windows msi 约 240 MB
+- **侧边栏浏览器**：dsh 官方按 profile 名开关（仅 `desktop` profile 默认启用）；web profile 需在自己的 `cordis.patch.yml` 里 opt-in，且以 iframe 模式工作。宿主的独立 webview guest 方案见 [#118](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/118)
