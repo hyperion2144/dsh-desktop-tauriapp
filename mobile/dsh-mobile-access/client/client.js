@@ -2038,7 +2038,7 @@ function MobileAccessPanel() {
       },
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { fontSize: 15, fontWeight: 600 }, children: "\u8FDC\u7A0B\u8BBF\u95EE" }),
-        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cssVars.text2, fontSize: 13 }, children: "\u4E09\u4E2A\u901A\u9053\u72EC\u7ACB\u7EF4\u62A4\u914D\u5BF9\u4E8C\u7EF4\u7801\uFF1A\u626B\u7801/\u6253\u5F00\u94FE\u63A5\u5373\u53EF\u914D\u5BF9\uFF08\u4E00\u6B21\u6027\u4EE4\u724C + \u4F1A\u8BDD Cookie\uFF09\u3002" }),
+        /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", { style: { color: cssVars.text2, fontSize: 13 }, children: "\u4E09\u4E2A\u901A\u9053\u72EC\u7ACB\u7EF4\u62A4\u914D\u5BF9\u4E8C\u7EF4\u7801\uFF1A\u626B\u7801/\u6253\u5F00\u94FE\u63A5\u5373\u53EF\u914D\u5BF9\uFF08\u4E00\u6B21\u6027\u4EE4\u724C + \u4F1A\u8BDD Cookie\uFF09\u3002\u6B64\u9875\u9762\u4F9B\u624B\u673A/\u5176\u5B83\u8BBE\u5907\u8FDE\u63A5\u672C\u673A\uFF1B\u82E5\u8981\u5207\u6362\u684C\u9762\u58F3\u81EA\u8EAB\u8FDE\u63A5\u7684 dsh \u670D\u52A1\u6765\u6E90\uFF0C\u8BF7\u7528\u684C\u9762\u8BBE\u7F6E\u7684\u300Cdsh \u670D\u52A1\u5730\u5740\u300D\u3002" }),
         /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
           ChannelCard,
           {

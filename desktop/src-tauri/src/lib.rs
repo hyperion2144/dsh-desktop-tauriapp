@@ -313,6 +313,28 @@ pub fn run() {
             // 托盘 + 桌宠在任何路径都需要，提前到 profile 选择之前
             build_tray(app)?;
             setup_pet(app.handle());
+            // 申请系统通知权限（macOS 弹授权窗；Windows/Linux 幂等确认）。
+            // 放在任何 .show() 之前，best-effort 不阻塞启动。
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                request_notification_permission(&handle);
+            });
+            // #136 远程模式：服务来源是远程 dsh——冷启动不认领端口、不 spawn 本地，
+            // 直接导航远程页面（对齐手机端「远程=直连」语义）。profile 健康/修复检查、
+            // 端口认领等本地概念全部跳过（全新机器也可直连远程）；标题栏/测试钩子/
+            // 守护器等公共段照常执行（守护器按 remote_addr 走 probe_remote）。
+            let startup_remote_addr = load_desktop_settings().remote_addr;
+            if let Some(addr) = startup_remote_addr.clone() {
+                log::info!(
+                    "[startup] 远程模式：跳过本地实例拉起，直接导航远程 {}",
+                    crate::network::remote::remote_display(&addr)
+                );
+                app.state::<DshState>()
+                    .mode
+                    .store(MODE_ADVANCED, Ordering::SeqCst);
+                crate::network::remote::navigate_remote(app.handle(), &addr, true);
+            }
+            if startup_remote_addr.is_none() {
             // 存量安装 + active_profile 未设 / profile 不完整 → 注入脚本到加载页处理
             let needs_profile_selection = !fresh_install
                 && load_desktop_settings().active_profile.as_ref().map_or(true, |s| s.is_empty());
@@ -335,12 +357,6 @@ pub fn run() {
                     }
                 }
             }
-            // 申请系统通知权限（macOS 弹授权窗；Windows/Linux 幂等确认）。
-            // 放在任何 .show() 之前，best-effort 不阻塞启动。
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                request_notification_permission(&handle);
-            });
             // 认领判定（#86）：端口有监听不再盲目复用——台账确认是本 profile 的实例、
             // 或落在 web 的 legacy 端口（外部 dsh 兼容）才复用；陌生占用者明确报错不代拉。
             let claim = crate::runtime::instances::decide_claim(
@@ -439,6 +455,7 @@ pub fn run() {
                     }
                 });
             }
+            }
             // 窗口拖动完全交由 dsh-desktop-tauriapp 插件的 client 端（root slot 里的
             // AdvancedFrame）渲染拖拽区并挂 data-tauri-drag-region；这里不再注入
             // 任何脚本，也不再使用 movableByWindowBackground（那会让整窗可拖）。
@@ -449,8 +466,10 @@ pub fn run() {
             // 复用外部实例阶段（尚未选模式）保持系统原生标题栏。
             apply_titlebar(
                 app.handle(),
-                state.spawned_this_run.load(Ordering::SeqCst)
-                    && state.mode.load(Ordering::SeqCst) == MODE_ADVANCED,
+                app.state::<DshState>()
+                    .spawned_this_run
+                    .load(Ordering::SeqCst)
+                    && app.state::<DshState>().mode.load(Ordering::SeqCst) == MODE_ADVANCED,
             );
             // 测试钩子：DSH_DESKTOP_AUTO_QUIT=1 时延迟自动退出（模拟托盘退出，验证子进程回收）
             if std::env::var("DSH_DESKTOP_AUTO_QUIT").as_deref() == Ok("1") {

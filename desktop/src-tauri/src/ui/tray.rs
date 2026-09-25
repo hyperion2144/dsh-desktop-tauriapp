@@ -23,8 +23,7 @@ use crate::{
     stop_port_owner, wait_ready_and_navigate,
     STATUS_STARTING,
 };
-use crate::settings::{configured_profile, port_for_profile};
-
+use crate::settings::{configured_profile, load_desktop_settings, port_for_profile};
 /// 托盘运行时目录缓存（build_tray 后异步拉取；static 免动 DshState 三处构造点）。
 /// (version, channel) 列表；None = 尚未拉取过（菜单仅显示本地 内置+已装 部分）。
 static RUNTIME_CATALOG: std::sync::Mutex<Option<Vec<(String, String)>>> =
@@ -272,6 +271,21 @@ pub fn navigate_to_loading(app: &AppHandle) {
 /// 通知服务器在 setup 阶段就已启动并常驻，重启时复用同一端口/token。
 pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: Option<&str>) {
     let profile_override = profile_override.map(|s| s.to_string());
+    // #136 远程模式：服务来源是远程 dsh——不 kill/不 spawn 本地实例，
+    // 回加载页稍作停留后直接导航远程（与冷启动远程路径同语义）。
+    // 切回本地（remote_addr=None）后自然恢复原有本地重启流程。
+    if let Some(addr) = load_desktop_settings().remote_addr {
+        log::info!("[restart] 远程模式：回到加载页并导航远程（不拉本地实例）");
+        set_status(app, STATUS_STARTING, "启动中（远程）");
+        let handle = app.clone();
+        tauri::async_runtime::spawn(async move {
+            navigate_to_loading(&handle);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::network::remote::navigate_remote(&handle, &addr, target_mode == MODE_ADVANCED);
+            refresh_tray_mode(&handle);
+        });
+        return;
+    }
     let mode_name = if target_mode == MODE_ADVANCED { "高级" } else { "兼容" };
     log::info!("[restart] 进入{mode_name}模式：回到加载页并重启 dsh 服务");
     log::logger().flush();

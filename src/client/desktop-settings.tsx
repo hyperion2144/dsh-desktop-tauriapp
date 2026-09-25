@@ -1017,6 +1017,9 @@ function DesktopSettingsPanel(): React.ReactElement {
         <div style={NOTE_STYLE}>
           选择远程地址后立即按当前模式重启 dsh；新增/删除仅改列表，重启后生效。
         </div>
+        <div style={NOTE_STYLE}>
+          此处的地址是桌面壳连接的 dsh 服务来源（壳将直连该地址，不再拉起本地服务）；若要给手机/其它设备连接本机，请用「手机访问 → 远程访问」。
+        </div>
       </SectionBox>
 
       {/* ── Profile ── */}
