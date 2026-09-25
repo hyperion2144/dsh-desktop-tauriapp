@@ -3,7 +3,6 @@
 //! 应用层错误统一用 `anyhow::Result`（命令处理等）；
 //! 领域层错误用 thiserror 枚举，保留结构化信息供调用方 match。
 
-use crate::runtime::phase::DshPhase;
 
 /// dsh 子进程 spawn 失败。
 #[derive(Debug, Clone, thiserror::Error)]
@@ -53,13 +52,6 @@ pub enum SettingsError {
     IoFailed(String),
 }
 
-/// 状态机非法转换错误。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("非法状态转换：{from:?} → {to:?}")]
-pub struct TransitionError {
-    pub from: DshPhase,
-    pub to: DshPhase,
-}
 
 
 #[cfg(test)]

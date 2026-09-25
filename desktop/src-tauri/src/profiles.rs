@@ -123,7 +123,10 @@ fn write_profile_templates(dir: &std::path::Path, profile: &str) -> Result<(), S
     if !dir.join("pnpm-workspace.yaml").is_file() {
         std::fs::write(
             dir.join("pnpm-workspace.yaml"),
-            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\nallowBuilds:\n  node-pty: true\n  protobufjs: true\n  git-hosted: true\n  cloudflared: true\n  sharp: true\n  ssh2: true\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': true\n  koffi: true\n",
+            format!(
+                "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\n{}",
+                crate::runtime::builtin::PNPM_ALLOW_BUILDS
+            ),
         )
         .map_err(|e| format!("写 pnpm-workspace.yaml 失败：{e}"))?;
     }
@@ -667,7 +670,10 @@ fn pnpm_direct_add(app: &tauri::AppHandle, profile: &str, pkg: &str) -> Result<(
         .map_err(|e| format!("写 package.json 失败：{e}"))?;
         std::fs::write(
             dir.join("pnpm-workspace.yaml"),
-            "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\nallowBuilds:\n  node-pty: true\n  protobufjs: true\n  git-hosted: true\n  cloudflared: true\n  sharp: true\n  ssh2: true\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': true\n  koffi: true\n",
+            format!(
+                "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\n{}",
+                crate::runtime::builtin::PNPM_ALLOW_BUILDS
+            ),
         )
         .map_err(|e| format!("写 pnpm-workspace.yaml 失败：{e}"))?;
         std::fs::write(

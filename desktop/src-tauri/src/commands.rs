@@ -185,9 +185,6 @@ pub(crate) fn get_dsh_status(state: tauri::State<DshState>) -> serde_json::Value
 #[tauri::command]
 pub(crate) fn restart_dsh_service(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<DshState>();
-    if state.restarting.load(Ordering::SeqCst) {
-        return Err("已在重启中".to_string());
-    }
     let mode = state.mode.load(Ordering::SeqCst);
      restart_dsh_in_mode(&app, mode, None);
     Ok(())
@@ -507,7 +504,6 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                     }
                 }
                 // 4) 重置标志并导航（advanced=true，桌面 chrome 生效）
-                handle.state::<DshState>().spawn_failed.store(false, Ordering::SeqCst);
                 let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
                 let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
                 refresh_tray_mode(&handle);
@@ -969,12 +965,7 @@ pub(crate) async fn get_dsh_source(app: tauri::AppHandle) -> serde_json::Value {
 /// get_dsh_source 的阻塞实现：读内置树 package.json / spawn dsh --version / TCP 探活，
 /// 只允许经 spawn_blocking 在阻塞线程池运行，禁止直接在主线程调用。
 fn get_dsh_source_blocking(app: tauri::AppHandle) -> serde_json::Value {
-    use crate::runtime::builtin::DshMode;
-    let mode = crate::runtime::builtin::configured_dsh_mode();
-    let mode_str = match mode {
-        DshMode::Builtin => "builtin",
-        DshMode::External => "external",
-    };
+    let mode_str = crate::runtime::builtin::configured_dsh_mode().as_str();
     let builtin = crate::runtime::builtin::builtin_lib_info(&app)
         .map(|(lib, version)| serde_json::json!({ "lib": lib.display().to_string(), "dsh_version": version }))
         .unwrap_or(serde_json::Value::Null);
@@ -1182,9 +1173,15 @@ pub(crate) async fn list_runtime_catalog(
     };
     let installed = crate::runtime::registry::list_installed(&app);
     let builtin = crate::runtime::registry::builtin_version(&app);
-    let selected = crate::settings::load_desktop_settings().dsh_runtime;
+    // 「当前生效的下载版本」仅在来源=内置时存在：外置 CLI 不占本地运行时树，
+    // 保留的 dsh_runtime 偏好此时不生效（#135：否则同号下载版被误判使用中锁死卸载）。
+    let source_settings = crate::settings::load_desktop_settings();
+    let mode_external =
+        crate::runtime::builtin::configured_dsh_mode() == crate::runtime::builtin::DshMode::External;
+    let selected = if mode_external { None } else { source_settings.dsh_runtime };
     let mut value = serde_json::json!({
         "source": src,
+        "mode": if mode_external { "external" } else { "builtin" },
         "builtin": builtin,
         "selected": selected,
         "installed": installed,
@@ -1233,8 +1230,12 @@ pub(crate) fn runtime_download_status() -> serde_json::Value {
 /// #110：async + spawn_blocking——删除含大量 node_modules 的目录耗时数秒（Windows 尤甚），
 /// 同步命令会在 Tauri 主线程执行并整窗冻结。校验走同步快路径，删除进阻塞线程池。
 pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Result<(), String> {
-    let current = crate::settings::load_desktop_settings().dsh_runtime;
-    if current.as_deref() == Some(version.as_str()) {
+    // 使用中判定只在来源=内置时成立：外置 CLI 不占本地运行时树（#135），
+    // 否则外置模式下同号下载版永远无法卸载（旧逻辑只比对 dsh_runtime 不看来源）。
+    let source_settings = crate::settings::load_desktop_settings();
+    let mode_builtin =
+        crate::runtime::builtin::configured_dsh_mode() == crate::runtime::builtin::DshMode::Builtin;
+    if mode_builtin && source_settings.dsh_runtime.as_deref() == Some(version.as_str()) {
         return Err(format!("{version} 正在使用，请先切换到其他版本"));
     }
     if crate::runtime::registry::builtin_version(&app).as_deref() == Some(version.as_str()) {

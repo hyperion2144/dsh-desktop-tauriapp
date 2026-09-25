@@ -37,8 +37,6 @@ async fn monitor(app: AppHandle) {
         // 保险丝只管启动期（ready_once=false）：运行期进程异常归守护器（#71 分工）。
         // 只看自家 spawn 的实例；重启中/已判失败/外部复用/已就绪运行中都不介入
         if !state.spawned_this_run.load(Ordering::SeqCst)
-            || state.restarting.load(Ordering::SeqCst)
-            || state.spawn_failed.load(Ordering::SeqCst)
             || state.ready_once.load(Ordering::SeqCst)
         {
             continue;
@@ -123,12 +121,13 @@ async fn monitor(app: AppHandle) {
     }
 }
 
-/// 失败收尾：置 spawn_failed（导航/watchdog 都会让位），导航到错误页。
-/// 失败收尾：置 spawn_failed；stderr 尾部落盘 + 回放到页面控制台（#90 实测：
-/// 冷启动早期事件在页面 listener 就绪前丢失，控制台全空、用户无诊断线索）。
+/// 失败收尾：取走死亡子进程 + stderr 尾部落盘 + 回放到页面控制台，导航到错误页。
+/// （#90 实测：冷启动早期事件在页面 listener 就绪前丢失，控制台全空、用户无诊断线索。）
 fn fail_closed(app: &AppHandle, reason: &str) {
     let state = app.state::<DshState>();
-    state.spawn_failed.store(true, Ordering::SeqCst);
+    // 取走死亡子进程：本流程不再重试时，fuse 不会对同一具尸体反复触发；
+    // 导航等待循环与 watchdog 也自然让位（child=None / 端口探测失败仅提示）。
+    state.child.lock().unwrap().take();
     let profile = crate::settings::configured_profile();
     let tail = state.stderr_tail_for(&profile, 40).join("\n");
     // 落盘：~/.dsh/dsh-desktop-tauriapp/last-boot-failure.log（诊断证据）
@@ -167,7 +166,6 @@ async fn respawn(app: &AppHandle, profile: &str, note: String) {
             state.spawned_this_run.store(true, Ordering::SeqCst);
             state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
             state.ready_once.store(false, Ordering::SeqCst);
-            state.spawn_failed.store(false, Ordering::SeqCst);
             drop(state);
             navigate_to_loading(app);
             // 内嵌加载页的事件监听需要 ~1s 才就绪；就绪后重放缓冲尾部 + 保险丝状态行，

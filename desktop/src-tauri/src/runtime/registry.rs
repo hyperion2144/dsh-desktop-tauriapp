@@ -329,14 +329,6 @@ fn pnpm_add_runtime(
         serde_json::json!({ "name": format!("dsh-runtime-{version}"), "private": true }).to_string(),
     )
     .map_err(|e| format!("写入 package.json 失败：{e}"))?;
-    // #95 评论 Bug 2：pnpm 会向上搜索 pnpm-workspace.yaml，祖先目录（如用户 home）的
-    // workspace 污染会引发 ERR_PNPM_UNEXPECTED_STORE。自声明为 workspace root 截断向上搜索
-    // （--ignore-workspace / --store-dir / --force 实测均无效，见 #95 评论）。
-    std::fs::write(dst.join("pnpm-workspace.yaml"), "packages: []\n")
-        .map_err(|e| format!("写入 pnpm-workspace.yaml 失败：{e}"))?;
-    // #95 实测：pnpm 默认 .pnpm symlink 布局顶层只有直接依赖，dsh/lib/bin.js 向上解析
-    // dsh-app-boot 等兄弟包会 MODULE_NOT_FOUND。hoisted = npm 式全量平铺，与内置
-    // resources/dsh 同构，解析钩子与启动器无需区分树型。
     // #114：独立 store（绝对路径，正斜杠）——不写全局 store，避免触碰与运行树 hardlink
     // 共享 inode 的 mtime/ctime（rev = mtime|ctime|size，改动即触发 dsh 插件 rebuilt → 白屏）
     let store = dst
@@ -344,13 +336,23 @@ fn pnpm_add_runtime(
         .map(|p| p.join(".pnpm-store"))
         .unwrap_or_else(|| dst.join(".pnpm-store"));
     let store_path = store.display().to_string().replace('\\', "/");
+    // #95 评论 Bug 2：pnpm 会向上搜索 pnpm-workspace.yaml，祖先目录（如用户 home）的
+    // workspace 污染会引发 ERR_PNPM_UNEXPECTED_STORE。自声明为 workspace root 截断向上搜索
+    // （--ignore-workspace / --store-dir / --force 实测均无效，见 #95 评论）。
+    // #135：pnpm 10+ 配置以 pnpm-workspace.yaml 为准，.npmrc 的 node-linker / store-dir
+    // 在 pnpm 11 会被无视（实测落成 isolated 布局 + 全局 store）——三项都须写进本文件。
+    std::fs::write(dst.join("pnpm-workspace.yaml"), runtime_workspace_yaml(&store_path))
+        .map_err(|e| format!("写入 pnpm-workspace.yaml 失败：{e}"))?;
+    // #95 实测：hoisted = npm 式全量平铺，与内置 resources/dsh 同构，解析钩子与启动器
+    // 无需区分树型。.npmrc 保留同样设置仅为兼容旧 pnpm；pnpm 11 以 yaml 为准。
     std::fs::write(
         dst.join(".npmrc"),
         format!("node-linker=hoisted\nstore-dir={store_path}\n"),
     )
         .map_err(|e| format!("写入 .npmrc 失败：{e}"))?;
-    // pnpm 及其子进程需要 node：前置内置 node 目录
-    let node_dir = node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    // pnpm 生命周期脚本（koffi/node-pty 等，#135 起真正执行）经 sh/cmd 找 PATH 上
+    // 名叫 `node` 的命令；内置 node 是 sidecar（文件名 dsh-node），须垫片成 node。
+    let node_dir = node_shim_dir(node, dst)?;
     let mut paths = vec![node_dir];
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
@@ -401,6 +403,43 @@ fn pnpm_add_runtime(
         ));
     }
     Ok(())
+}
+
+/// 运行时安装目录的 pnpm-workspace.yaml 内容（#135）：pnpm 10+ 配置以本文件为准，
+/// `.npmrc` 的同名设置在 pnpm 11 会被无视（实测 .modules.yaml 落成 isolated +
+/// 全局 store），因此 nodeLinker / storeDir / allowBuilds 三项都必须写在这里：
+/// - `packages: []` 自声明 workspace root 截断向上搜索（#95 评论 Bug 2）
+/// - `nodeLinker: hoisted` 平铺，与内置 resources/dsh 同构（#95 实测）
+/// - `storeDir` 独立 store（#114 隔离，避免写全局 store 触发 profile 插件 rebuilt）
+/// - `allowBuilds` 白名单：pnpm 11 对未批准构建脚本的依赖直接 exit 1
+fn runtime_workspace_yaml(store_dir: &str) -> String {
+    format!(
+        "packages: []\nnodeLinker: hoisted\nstoreDir: {store_dir}\n\n{}",
+        crate::runtime::builtin::PNPM_ALLOW_BUILDS
+    )
+}
+
+/// 造一个含 `node` 命令的垫片目录（#135）：内置 node 是 sidecar（文件名 dsh-node(.exe)），
+/// 而 pnpm 生命周期脚本用 sh/cmd 按 `node` 名字在 PATH 上找解释器，直接前置 sidecar 目录无效。
+/// 垫片放运行时根目录（可写、跨版本复用）；同卷硬链接零拷贝，失败回退符号链接/拷贝。
+fn node_shim_dir(node: &std::path::Path, dst: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let dir = dst
+        .parent()
+        .map(|p| p.join(".node-shim"))
+        .unwrap_or_else(|| std::env::temp_dir().join("dsh-node-shim"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 node 垫片目录失败：{e}"))?;
+    #[cfg(windows)]
+    let link = dir.join("node.exe");
+    #[cfg(not(windows))]
+    let link = dir.join("node");
+    let _ = std::fs::remove_file(&link);
+    if std::fs::hard_link(node, &link).is_err() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(node, &link).map_err(|e| format!("创建 node 垫片失败：{e}"))?;
+        #[cfg(windows)]
+        std::fs::copy(node, &link).map_err(|e| format!("创建 node 垫片失败：{e}"))?;
+    }
+    Ok(dir)
 }
 
 /// 失败原因提取：stderr 去噪后优先（node 告警所在），空则回退 stdout 去噪
@@ -511,6 +550,44 @@ mod tests {
         assert!(!out.contains("NODE_TLS"), "应滤掉 TLS 告警：{out}");
         assert!(out.contains("ERR_PNPM_META_FETCH_FAIL"), "应保留真实错误：{out}");
         assert!(out.lines().count() <= 12, "应截尾到 12 行");
+    }
+
+    #[test]
+    fn runtime_workspace_yaml_has_pnpm11_critical_settings() {
+        // #135：pnpm 11 的关键配置只认 pnpm-workspace.yaml（.npmrc 整体被无视）：
+        // ①packages: [] 自声明 workspace root 截断向上搜索 ②nodeLinker: hoisted
+        // 平铺（否则顶层只有直接依赖，解析钩子按平铺树找 dsh-app-boot 即
+        // MODULE_NOT_FOUND）③storeDir 独立（#114 隔离，禁写全局 store）④allowBuilds
+        // 白名单（pnpm 11 未批准构建脚本直接 exit 1）。
+        let yaml = runtime_workspace_yaml("/tmp/dsh-test-store");
+        assert!(yaml.starts_with("packages: []\n"), "应自声明 workspace root：{yaml}");
+        assert!(yaml.contains("nodeLinker: hoisted"), "pnpm 11 只认 yaml 里的 nodeLinker：{yaml}");
+        assert!(
+            yaml.contains("storeDir: /tmp/dsh-test-store"),
+            "storeDir 须写入 yaml（#114 隔离）：{yaml}"
+        );
+        assert!(yaml.contains("allowBuilds:"), "必须带 allowBuilds 白名单（#135）：{yaml}");
+        assert!(
+            yaml.contains("node-pty: true") && yaml.contains("koffi: true"),
+            "白名单应含报错过的包：{yaml}"
+        );
+    }
+
+    #[test]
+    fn node_shim_dir_provides_node_command() {
+        // #135：内置 node 文件名是 dsh-node，垫片目录必须提供叫 `node` 的硬链/符号链接。
+        let root = std::env::temp_dir().join(format!("dsh-shim-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake_node = bin_dir.join("dsh-node");
+        std::fs::write(&fake_node, b"#!/bin/sh\n").unwrap();
+        let dst = root.join("runtimes").join("0.0.0");
+        let dir = node_shim_dir(&fake_node, &dst).expect("垫片目录应创建成功");
+        assert_eq!(dir, dst.parent().unwrap().join(".node-shim"));
+        let link = dir.join("node");
+        assert!(link.is_file(), "垫片应提供 node 命令：{}", link.display());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

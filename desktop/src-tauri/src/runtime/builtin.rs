@@ -34,6 +34,23 @@ pub(crate) enum DshMode {
     External,
 }
 
+impl DshMode {
+    /// 设置持久化用的字符串形式（与 `configured_dsh_mode` 的解析对称，#126）。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            DshMode::Builtin => "builtin",
+            DshMode::External => "external",
+        }
+    }
+}
+
+/// pnpm 11 允许执行构建脚本的 allowBuilds 白名单（YAML 块，含尾部换行）。
+/// 凡是用内置 pnpm 拉依赖树的路径（profile 初始化/迁移、运行时下载 #135）都必须
+/// 把它写进所在目录的 pnpm-workspace.yaml，否则 pnpm 11 对含构建脚本的依赖
+/// 直接 ERR_PNPM_IGNORED_BUILDS exit 1（此前浮动 pnpm 10 只警告不失败）。
+/// 单一常量避免多处漂移——#135 正是白名单复制多份导致运行时下载路径遗漏。
+pub(crate) const PNPM_ALLOW_BUILDS: &str = "allowBuilds:\n  node-pty: true\n  protobufjs: true\n  git-hosted: true\n  cloudflared: true\n  sharp: true\n  ssh2: true\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': true\n  koffi: true\n";
+
 /// 解析 dsh 来源设置：DSH_MODE env > settings.dsh_mode > 内置（默认）。
 pub(crate) fn configured_dsh_mode() -> DshMode {
     let raw = std::env::var("DSH_MODE")
@@ -142,6 +159,12 @@ fn try_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
             return Ok(DshSource::Builtin { node, dsh_lib, launcher });
         }
     }
+    try_bundled_builtin(app)
+}
+
+/// 随包内置运行时（忽略「已下载版本优先」的选择）：resources/dsh + node sidecar + 启动器。
+/// #126：外部来源不可用时的回退目标——已下载树可能被删/不可用，随包树才是保证存在的默认运行时。
+fn try_bundled_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
     let dsh_lib = builtin_dsh_lib(app)
         .ok_or_else(|| "resources/dsh 不存在（内置运行时未打包）".to_string())?;
     let node = find_builtin_node().ok_or_else(|| "内置 node sidecar 未找到".to_string())?;
@@ -149,9 +172,12 @@ fn try_builtin(app: &tauri::AppHandle) -> Result<DshSource, String> {
     Ok(DshSource::Builtin { node, dsh_lib, launcher })
 }
 
-/// 解析 dsh 来源（#85 拍板）：内置优先；内置不可用自动回退外部并告警；两者皆缺才报错。
+/// 解析 dsh 来源（#85 拍板；#126 把回退补成双向对称）：
+/// 内置不可用 → 回退外部；外部不可用 → 回退随包内置；两者皆缺才报错。
+/// 回退只作用于本次运行，不改写用户设置（下次启动仍按设置尝试）。
 pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String> {
-    if configured_dsh_mode() == DshMode::Builtin {
+    let mode = configured_dsh_mode();
+    if mode == DshMode::Builtin {
         match try_builtin(app) {
             Ok(s) => return Ok(s),
             Err(e) => {
@@ -166,6 +192,24 @@ pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String
     }
     match find_external_bin() {
         Some(bin) => Ok(DshSource::External { bin }),
+        None if mode == DshMode::External => {
+            // #126：来源选的是外部但外部 dsh 找不到——回退随包内置默认运行时，
+            // 而不是直接失败（与上面的反向回退对称）。
+            match try_bundled_builtin(app) {
+                Ok(s) => {
+                    crate::network::notify::show_notification(
+                        app,
+                        "外部 dsh 不可用，已回退内置运行时",
+                        "未找到外部 dsh（DSH_BIN / PATH / npm 全局）。可安装 dsh 后重启，或在设置中切换来源。",
+                    );
+                    log::warn!("[source] 外部 dsh 不可用，回退随包内置运行时");
+                    Ok(s)
+                }
+                Err(e) => Err(format!(
+                    "未找到可用的 dsh：外部 dsh 未找到（DSH_BIN / PATH / npm 全局），内置运行时也不可用（{e}）。"
+                )),
+            }
+        }
         None => Err(
             "未找到可用的 dsh：内置运行时未打包，外部 dsh 也未找到（DSH_BIN / PATH / npm 全局）。"
                 .to_string(),

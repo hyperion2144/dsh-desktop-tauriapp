@@ -2,6 +2,14 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
+## 未发布
+
+- **托盘运行时菜单支持切换到外部 dsh（#126）**：托盘「运行时版本」原先只有 内置版本 / 已下载版本 / 目录下载项，切外部 dsh 只能进设置页；且托盘选中标记只看版本不看来源，外部来源下仍显示「● 内置」。修复：①把「外部 dsh」当成运行时列表里的又一个同级单选条目（紧跟「内置 …」，探测不到就不列——与已下载版本一样「存在才列出」）②`switch_runtime` 参数化目标来源（`DshMode`），点击外部条目写设置页同一份 `dsh_mode` 配置并重启；**切来源不改写 `dsh_runtime`**（切回内置可恢复上次选中的下载版本）③选中标记 ● 跟随当前生效来源，external 下内置/已装一律 ○④来源回退补成双向对称：外部 dsh 不可用时启动回退到**随包内置**运行时（非「已下载版本优先」那棵）并通知，不再直接落到「未找到 dsh 命令」错误页；回退只作用于本次运行不改写设置（与既有「内置不可用→回退外部」对称）⑤`DshMode` 补 `as_str()` 收敛字符串映射（`get_dsh_source` 去重）。新增 3 个菜单条目单测（外部可用/不可用 × 来源 builtin/external），cargo 118 全绿
+- **运行时下载失败修复（#135，共三层）**：托盘/设置页「下载并切换 dsh x.y.z」连续暴露三个问题，逐层修复。**第一层**：`pnpm add` exit 1 `[ERR_PNPM_IGNORED_BUILDS]`——两条装依赖树路径的 pnpm 配置漂移：profile 侧 yaml 带 `allowBuilds` 白名单而运行时下载没有；pnpm 钉到 11.16.0（#119）后对未批准构建脚本直接 exit 1。**第二层**：白名单生效后构建脚本真跑起来，报 `sh: node: command not found`——内置 node 是 sidecar（文件名 `dsh-node`），旧逻辑前置 sidecar 目录到 PATH，脚本按 `node` 名字找解释器必然落空（pnpm 10 时代脚本不执行从未暴露）。**第三层**：下载能完成但启动报 `Cannot find module '@deepseek-ai/dsh-app-boot'`——pnpm 10+ 配置以 `pnpm-workspace.yaml` 为准，`.npmrc` 的 `node-linker=hoisted` 在 pnpm 11 被无视（`.modules.yaml` 实落 `isolated` 布局，顶层只有直接依赖），且 `store-dir` 同样被无视直接写进全局 store（9.8G，违反 #114 隔离）。修复：①白名单收敛为单一常量 `PNPM_ALLOW_BUILDS` 三处统一引用②运行时下载的 `pnpm-workspace.yaml` 抽 `runtime_workspace_yaml(store_dir)` 一次写齐 pnpm 11 必需四项：`packages: []`（截断向上搜 workspace）/ `nodeLinker: hoisted`（平铺同构内置树）/ `storeDir`（#114 独立 store）/ `allowBuilds`（白名单）；`.npmrc` 保留仅兼容旧 pnpm③`node_shim_dir` 垫片：运行时根目录造 `node` 硬链指向 sidecar 并前置 PATH（Windows 回退拷贝）④托盘重复触发（`restarting` 互斥窗口内连点）从静默吞掉改为弹「正在重启 / 切换中」提示——验证反馈错误页期间连点毫无反馈像卡死⑤新增单测锁定 yaml 四项关键配置与垫片提供 `node` 命令。cargo 121 全绿
+- **状态机收敛为两态（#135 验证反馈驱动，净删 170 行）**：重启/切换运行时/切换 Profile（托盘+设置页）全部改为**立即生效**——直接停旧 dsh、按最新设置拉新的，不再看任何状态、不再吞点击。删除：①`restarting` 互斥闸（原在就绪等待期长达 60s 吞掉所有托盘操作，即“切换无反应”的直接原因；其防并发 kill/spawn 职责由 `take()` 语义自然覆盖，fuse/watchdog 让位由 `ready_once` 分界覆盖）②`spawn_failed` 标志（fuse `fail_closed` 直接取走死亡子进程+导航错误页，等待循环自然让位，无需全局标志）③`DshPhase` 状态机整套（8 变体 + 转换图 + `TransitionError`，全仓零使用的死代码，phase.rs 仅留说明注释）④`STATUS_DOWN`（无写入点的死状态）。收敛：`IDLE→STARTING`、`RESTARTING→STARTING`、`EXTERNAL/STALE/REMOTE→READY/STARTING + detail`（内置/外部来源是当前信息，已在 `running_sources`/`get_dsh_source` 独立通道，不属于生命周期状态）。守护器“只管运行中”与保险丝“只管启动期”的分工由 `ready_once` 单一标志承载。外部实例不可达/自愈放弃等终态提示全部改由 detail 承载，前端 0-4 映射表不变（0/3/4 不再发出）。
+- **下载状态以后端为唯一事实源（#135 验证反馈，第五层）**：设置弹窗切 tab 会卸载桌面设置组件，下载的进行中/成败状态（useState + 未决 invoke）全部丢失——进度条消失、成败 toast 永远不弹、再点下载撞后端单飞行被当失败标红。修复：常驻轮询 `runtime_download_status`（600ms，挂载即跑）作为唯一事实源——挂载即恢复 downloading 态 + 进度条；观察到 `active` true→false 按 error 判定成败并刷新列表 + toast；「已有运行时下载任务」错误不再标失败（真实任务仍在跑，轮询会恢复状态）。
+
+
 ## 已发布
 
 ### v0.9.4（2026-09-24）

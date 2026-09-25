@@ -1,6 +1,5 @@
-//! 运行时核心：状态、状态机、域错误。
+//! 运行时核心：共享状态（两态生命周期）与域错误。
 pub mod error;
-pub mod phase;
 pub mod state;
 pub mod instances;
 pub mod builtin;

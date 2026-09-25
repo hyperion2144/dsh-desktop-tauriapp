@@ -21,8 +21,7 @@ mod download;         // 下载管理器（#72）：model/persist/transfer/manag
 use runtime::state::{
     DshState, INTERNAL_HOSTS, set_status,
     MODE_ADVANCED, MODE_COMPAT,
-    STATUS_IDLE, STATUS_STARTING, STATUS_READY, STATUS_EXTERNAL,
-    STATUS_RESTARTING, STATUS_STALE, STATUS_DOWN, STATUS_REMOTE,
+    STATUS_STARTING, STATUS_READY,
 };
 use runtime::error::SpawnError;
 
@@ -223,11 +222,9 @@ pub fn run() {
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
-            status: AtomicU8::new(STATUS_IDLE),
+            status: AtomicU8::new(STATUS_STARTING),
             loading_url: Mutex::new(None),
             tray: Mutex::new(None),
-            spawn_failed: AtomicBool::new(false),
-            restarting: AtomicBool::new(false),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
             quitting: AtomicBool::new(false),
@@ -398,12 +395,10 @@ pub fn run() {
                         }
                         Err(SpawnError::NotFound(e)) => {
                             log::error!("启动 dsh 失败：{e}");
-                            state.spawn_failed.store(true, Ordering::SeqCst);
                             show_error(app.handle(), "not-found");
                         }
                         Err(SpawnError::Other(e)) => {
                             log::error!("启动 dsh 失败：{e}");
-                            state.spawn_failed.store(true, Ordering::SeqCst);
                             show_error(app.handle(), "spawn-failed");
                         }
                     }
@@ -412,13 +407,13 @@ pub fn run() {
                     // 上次壳拉起的实例仍存活（如壳崩溃后重启）：按复用流程接入
                     log::info!("127.0.0.1:{port} 是 profile {profile} 的在跑实例，直接复用");
                     state.mode_prompt_needed.store(true, Ordering::SeqCst);
-                    set_status(app.handle(), STATUS_EXTERNAL, "复用本 profile 实例");
+                    set_status(app.handle(), STATUS_READY, "复用本 profile 实例（不代拉，异常时仅提示）");
                 }
                 ClaimDecision::ForeignWeb => {
                     log::info!("127.0.0.1:{port} 已有外部服务在监听（web legacy 端口），直接复用现有实例");
                     // 外部实例复用会禁用桌面 chrome：在加载页弹「兼容/高级」模式选择
                     state.mode_prompt_needed.store(true, Ordering::SeqCst);
-                    set_status(app.handle(), STATUS_EXTERNAL, "复用外部实例");
+                    set_status(app.handle(), STATUS_READY, "复用外部实例（不代拉，异常时仅提示）");
                 }
                 ClaimDecision::ForeignUnknown => {
                     // 端口被别的 profile / 陌生程序占用：绝不盲目复用，也不代杀
@@ -426,7 +421,6 @@ pub fn run() {
                         "端口 {port} 被其他实例或程序占用（profile={profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试"
                     );
                     log::error!("{detail}");
-                    state.spawn_failed.store(true, Ordering::SeqCst);
                     show_notification(app.handle(), "DeepSeek Harness Desktop · 启动受阻", &detail);
                     show_error(app.handle(), "spawn-failed");
                 }
@@ -491,7 +485,6 @@ pub fn run() {
             if std::env::var("DSH_DESKTOP_PROXY_RESTART_TEST").as_deref() == Ok("1") {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    // 等首次 spawn 完成就绪导航（restarting 标志复位）再触发，模拟用户在表单点「保存」
                     tokio::time::sleep(Duration::from_secs(4)).await;
                     let url = std::env::var("DSH_DESKTOP_PROXY_RESTART_URL").unwrap_or_default();
                     let no_proxy = std::env::var("DSH_DESKTOP_PROXY_RESTART_NO_PROXY").unwrap_or_default();
@@ -500,15 +493,8 @@ pub fn run() {
                         return;
                     }
                     log::info!("[proxy-restart-test] 已保存新代理设置，触发 dsh 重启");
-                    // restarting 标志尚未复位时短暂重试（与表单行为一致：保存成功即调重启命令）
-                    for _ in 0..3 {
-                        match restart_dsh_service(handle.clone()) {
-                            Ok(()) => return,
-                            Err(e) => log::warn!("[proxy-restart-test] 重启暂不可用：{e}"),
-                        }
-                        tokio::time::sleep(Duration::from_millis(1500)).await;
-                    }
-                    log::error!("[proxy-restart-test] 重启多次被拒，验收链路中断");
+                    // 两态模型下重启命令不再拒绝任何状态，直接执行
+                    restart_dsh_service(handle.clone()).expect("重启命令不应失败");
                 });
             }
             // 测试钩子：DSH_DESKTOP_NOTIFY_TEST=1 时延迟触发一次通知（验证通知链路）
@@ -543,8 +529,6 @@ pub fn run() {
                         }
                         // 只管「运行中」：未就绪（启动期）/重启中/已判失败时让位
                         if !state.ready_once.load(Ordering::SeqCst)
-                            || state.restarting.load(Ordering::SeqCst)
-                            || state.spawn_failed.load(Ordering::SeqCst)
                         {
                             continue;
                         }
@@ -560,7 +544,7 @@ pub fn run() {
                             if healthy_streak >= 24 {
                                 epoch_failures = 0;
                             }
-                            if cur == STATUS_STALE || cur == STATUS_DOWN || cur == STATUS_REMOTE {
+                            if cur != STATUS_READY {
                                 set_status(&handle, STATUS_READY, "运行中");
                             }
                             continue;
@@ -568,7 +552,6 @@ pub fn run() {
                         healthy_streak = 0;
                         // 运行中连不上 = 服务异常（#71：单次判定，不等计数、不设闸门）
                         if settings.remote_addr.is_some() {
-                            set_status(&handle, STATUS_REMOTE, "远程不可达");
                             if Instant::now() - last_notify >= Duration::from_secs(300) {
                                 last_notify = Instant::now();
                                 show_notification(&handle, "远程 dsh 不可达", &format!("{verbose}"));
@@ -577,7 +560,7 @@ pub fn run() {
                         }
                         if !state.spawned_this_run.load(Ordering::SeqCst) {
                             // 复用外部实例：不代拉自动重启（那是用户的实例），仅提示
-                            set_status(&handle, STATUS_STALE, "外部实例不可达");
+                            set_status(&handle, STATUS_STARTING, "外部实例不可达（复用实例已停止，请手动重启）");
                             if Instant::now() - last_notify >= Duration::from_secs(300) {
                                 last_notify = Instant::now();
                                 log::warn!("[watchdog] 外部 dsh 实例不可达（{verbose}），未自动重启");
@@ -589,7 +572,7 @@ pub fn run() {
                         epoch_failures += 1;
                         if epoch_failures >= 3 {
                             log::error!("[watchdog] 连续自动恢复失败 3 次，停止自愈");
-                            set_status(&handle, STATUS_STALE, "异常（已停止自愈，请手动重启）");
+                            set_status(&handle, STATUS_STARTING, "异常（已停止自愈，请手动重启）");
                             show_notification(&handle, "dsh 服务异常", "连续自动恢复失败，请手动重启");
                             continue;
                         }

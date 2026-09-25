@@ -15,18 +15,15 @@ pub(crate) const MODE_ADVANCED: u8 = 0;
 pub(crate) const MODE_COMPAT: u8 = 1;
 
 // ── 服务状态（侧边栏标识与守护器共用，经 dsh-status 事件广播）──
-pub(crate) const STATUS_IDLE: u8 = 0;
+// ── 服务状态：两态（启动中 STARTING / 启动成功 READY），经 dsh-status 事件广播 ──
+// 内置/外部、哪个运行时版本是「当前信息」（running_sources / get_dsh_source 通道），
+// 不是生命周期状态，严禁混入此处（#135 重构拍板）。
 pub(crate) const STATUS_STARTING: u8 = 1;
 pub(crate) const STATUS_READY: u8 = 2;
-pub(crate) const STATUS_EXTERNAL: u8 = 3;
-pub(crate) const STATUS_RESTARTING: u8 = 4;
-pub(crate) const STATUS_STALE: u8 = 5;
-pub(crate) const STATUS_DOWN: u8 = 6;
-pub(crate) const STATUS_REMOTE: u8 = 7;
 
 /// 桌面壳的共享运行时状态（Tauri managed state）。
 ///
-/// 20 个字段，几乎被所有功能区域通过 `app.state::<DshState>()` 访问。
+/// 18 个字段，几乎被所有功能区域通过 `app.state::<DshState>()` 访问。
 pub(crate) struct DshState {
     /// 本次运行 spawn 的 dsh 子进程（None = 复用了已有实例）。
     pub(crate) child: Mutex<Option<Child>>,
@@ -44,9 +41,6 @@ pub(crate) struct DshState {
     /// 托盘实例（供模式切换/重启后刷新「切换模式」标签用）。
     pub(crate) tray: Mutex<Option<tauri::tray::TrayIcon>>,
     /// spawn 失败标志（立即终止等待并跳错误页）。
-    pub(crate) spawn_failed: AtomicBool,
-    /// 重启流程进行中（防止重复点击托盘重启项导致并发 kill/spawn）。
-    pub(crate) restarting: AtomicBool,
     /// 是否已至少完成一次就绪导航（守护器只在就绪后介入）。
     pub(crate) ready_once: AtomicBool,
     /// 输入弹窗的确认通道（prompt_input 挂起，页面 ui_input_confirm 回填）。
@@ -219,18 +213,16 @@ mod tests {
 
     #[test]
     fn dsh_state_default_field_types() {
-        // DshState 新增字段（notify_port / notify_token / restarting）默认值校验。
+        // DshState 新增字段（notify_port / notify_token）默认值校验。
         use std::sync::atomic::Ordering;
         let state = DshState {
             child: Mutex::new(None),
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
-            status: AtomicU8::new(STATUS_IDLE),
+            status: AtomicU8::new(STATUS_STARTING),
             loading_url: Mutex::new(None),
             tray: Mutex::new(None),
-            spawn_failed: AtomicBool::new(false),
-            restarting: AtomicBool::new(false),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
             quitting: AtomicBool::new(false),
@@ -252,7 +244,6 @@ mod tests {
             fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
         };
-        assert!(!state.restarting.load(Ordering::SeqCst));
         assert_eq!(state.notify_port.load(Ordering::SeqCst), 0);
         assert!(state.notify_token.lock().unwrap().is_empty());
         assert!(state.pre_zoom_geom.lock().unwrap().is_none());
@@ -277,11 +268,9 @@ mod tests {
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
-            status: AtomicU8::new(STATUS_IDLE),
+            status: AtomicU8::new(STATUS_STARTING),
             loading_url: Mutex::new(None),
             tray: Mutex::new(None),
-            spawn_failed: AtomicBool::new(false),
-            restarting: AtomicBool::new(false),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
             quitting: AtomicBool::new(false),
