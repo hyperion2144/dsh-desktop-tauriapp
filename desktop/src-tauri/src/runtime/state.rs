@@ -23,7 +23,7 @@ pub(crate) const STATUS_READY: u8 = 2;
 
 /// 桌面壳的共享运行时状态（Tauri managed state）。
 ///
-/// 18 个字段，几乎被所有功能区域通过 `app.state::<DshState>()` 访问。
+/// 15 个字段，几乎被所有功能区域通过 `app.state::<DshState>()` 访问。
 pub(crate) struct DshState {
     /// 本次运行 spawn 的 dsh 子进程（None = 复用了已有实例）。
     pub(crate) child: Mutex<Option<Child>>,
@@ -64,10 +64,8 @@ pub(crate) struct DshState {
     /// 双击拖拽区"缩放"前的主窗口几何（None = 当前处于标准尺寸，可触发放大；
     /// Some = 当前已放大，再双击恢复到此几何）。Mutex 防并发双击。
     pub(crate) pre_zoom_geom: Mutex<Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>>,
-    /// 启动保险丝：每 profile 的 stderr 累积缓冲（#86 起按实例隔离；spawn 时创建，
-    /// 转发线程写、保险丝监控任务读；子进程退出且非 0 时取快照做失败检测）。
-    pub(crate) stderr_bufs: Mutex<std::collections::BTreeMap<String, crate::process::quarantine::SharedStderr>>,
-    /// #89 多窗口：非激活 profile 的子进程（窗口↔实例绑定；激活 profile 走 `child`）。
+    /// 每 profile 的 stderr 累积缓冲（spawn 时创建，转发线程写、退出通知读）。
+    pub(crate) stderr_bufs: Mutex<std::collections::BTreeMap<String, crate::process::stderr_buf::SharedStderr>>,
     pub(crate) children: Mutex<std::collections::BTreeMap<String, Child>>,
     /// #89 多窗口：profile → 窗口 label（"profile-<name>"）。
     pub(crate) windows: Mutex<std::collections::BTreeMap<String, String>>,
@@ -76,15 +74,9 @@ pub(crate) struct DshState {
     /// #90：每 profile 实际使用的 dsh 来源（"builtin"/"external"，spawn 时记录；
     /// 设置 Tab 显示实际运行来源而非设置值——用户实测反馈）。
     pub(crate) running_sources: Mutex<std::collections::BTreeMap<String, String>>,
-    /// 启动保险丝：本轮启动周期内已用的自动重试次数（手动重启时清零）。
-    pub(crate) fuse_retries: AtomicU8,
-    /// 启动时跳过完整性检查（confirm_startup_profile 调后置 true，防循环）。
     pub(crate) skip_startup_check: AtomicBool,
     /// 启动时用户选择的 profile（dsh 启动后前端通过 nsSave 持久化到 settings.yaml）。
     pub(crate) pending_active_profile: Mutex<Option<String>>,
-    /// 启动保险丝：最近一次启动的隔离事件摘要（设置 Tab 通知区经 IPC 读取）。
-    pub(crate) fuse_summary: Mutex<Option<serde_json::Value>>,
-    /// 下载管理器（#72）：任务表/调度/句柄，内部可变。
     pub(crate) downloads: crate::download::DownloadManager,
 }
 
@@ -93,7 +85,7 @@ impl DshState {
     pub(crate) fn set_stderr_buf(
         &self,
         profile: &str,
-        buf: crate::process::quarantine::SharedStderr,
+        buf: crate::process::stderr_buf::SharedStderr,
     ) {
         self.stderr_bufs
             .lock()
@@ -105,7 +97,7 @@ impl DshState {
     pub(crate) fn stderr_buf_for(
         &self,
         profile: &str,
-    ) -> Option<crate::process::quarantine::SharedStderr> {
+    ) -> Option<crate::process::stderr_buf::SharedStderr> {
         self.stderr_bufs
             .lock()
             .unwrap()
@@ -113,14 +105,7 @@ impl DshState {
             .cloned()
     }
 
-    /// 取 profile 的 stderr 快照（无缓冲 → 空串）。
-    pub(crate) fn stderr_snapshot_for(&self, profile: &str) -> String {
-        self.stderr_buf_for(profile)
-            .map(|b| b.lock().unwrap().snapshot())
-            .unwrap_or_default()
-    }
-
-    /// 取 profile 的 stderr 尾部 N 行（重试后重放到加载页用）。
+    /// 取 profile 的 stderr 尾部 N 行（实例退出通知展示用）。
     pub(crate) fn stderr_tail_for(&self, profile: &str, n: usize) -> Vec<String> {
         self.stderr_buf_for(profile)
             .map(|b| b.lock().unwrap().tail_lines(n))
@@ -238,10 +223,8 @@ mod tests {
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
              running_sources: Mutex::new(Default::default()),
-            fuse_retries: AtomicU8::new(0),
             skip_startup_check: AtomicBool::new(false),
             pending_active_profile: Mutex::new(None),
-            fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
         };
         assert_eq!(state.notify_port.load(Ordering::SeqCst), 0);
@@ -286,10 +269,8 @@ mod tests {
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
-            fuse_retries: AtomicU8::new(0),
             skip_startup_check: AtomicBool::new(false),
             pending_active_profile: Mutex::new(None),
-            fuse_summary: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
         };
         // 窗口绑定：写入/覆盖/解除

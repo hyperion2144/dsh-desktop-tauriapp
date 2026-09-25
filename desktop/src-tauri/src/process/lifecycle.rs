@@ -400,10 +400,10 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     // 无此问题，因为终端 cwd 是可写目录）。显式把子进程 cwd 设为 dsh home：
     // .mnemon 等工作区相对产物统一落进 $DSH_HOME/.mnemon，归属 harness 单一根。
     cmd.current_dir(crate::dsh_home());
-    // 启动保险丝（#58）：为本实例建 stderr 累积缓冲——转发线程逐行写入，
-    // 保险丝监控任务在子进程退出后取快照做失败检测。
-    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
-        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    // 实例退出通知（#127 后沿存）：为本实例建 stderr 累积缓冲——转发线程逐行写入，
+    // 子进程退出时退出通知取尾部展示原因。
+    let stderr_buf: crate::process::stderr_buf::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::stderr_buf::StderrBuffer::default()),
     );
     app.state::<crate::runtime::state::DshState>()
         .set_stderr_buf(profile, stderr_buf.clone());
@@ -682,9 +682,9 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     inject_proxy_env(&mut cmd);
     // 同 unix 分支：GUI 启动的 cwd 是 /，必须显式设 dsh home（mnemon workspace 域）
     cmd.current_dir(crate::dsh_home());
-    // 启动保险丝（#58）：同 unix 分支，建 stderr 累积缓冲。
-    let stderr_buf: crate::process::quarantine::SharedStderr = std::sync::Arc::new(
-        std::sync::Mutex::new(crate::process::quarantine::StderrBuffer::default()),
+    // 同 unix 分支：建 stderr 累积缓冲（实例退出通知用）。
+    let stderr_buf: crate::process::stderr_buf::SharedStderr = std::sync::Arc::new(
+        std::sync::Mutex::new(crate::process::stderr_buf::StderrBuffer::default()),
     );
     app.state::<crate::runtime::state::DshState>()
         .set_stderr_buf(profile, stderr_buf.clone());

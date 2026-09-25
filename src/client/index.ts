@@ -4,7 +4,6 @@ import { applyAdvancedShell } from './advanced-shell.ts'
 import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
-import { registerFusePanel } from './plugin-fuse.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
@@ -114,8 +113,6 @@ export function apply(ctx: ClientContext): void {
   // blob:/data: 下载拦截转 IPC（纯浏览器不装）
   installDownloadInterceptor()
   registerDesktopSettings(ctx)
-  // 插件保险丝设置面板（#59）：桌面壳 webview 才有 Tauri IPC，纯浏览器不注册
-  registerFusePanel(ctx)
   // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
   // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；
   // 模式/平台本就是壳的运行状态，由壳下发。纯浏览器无 IPC → 不激活（原语义不变）。

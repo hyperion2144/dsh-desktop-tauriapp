@@ -20,7 +20,7 @@ mod download;         // 下载管理器（#72）：model/persist/transfer/manag
 // ── 运行时核心导入 ──
 use runtime::state::{
     DshState, INTERNAL_HOSTS, set_status,
-    MODE_ADVANCED, MODE_COMPAT,
+    MODE_ADVANCED,
     STATUS_STARTING, STATUS_READY,
 };
 use runtime::error::SpawnError;
@@ -68,9 +68,6 @@ use commands::{
     log_diag, log_console, get_dsh_status, restart_dsh_service,
     get_proxy_settings, save_proxy_settings, test_proxy_connectivity,
     ui_input_confirm, choose_desktop_mode,
-    list_quarantine, restore_quarantine, repair_plugin,
-    run_doctor, explain_failure, get_fuse_summary,
-    get_quarantine_settings, save_quarantine_settings, list_ai_providers,
     save_desktop_settings, get_desktop_settings_data, add_remote_address, remove_remote_address,
     list_profile_dependency_status, rebuild_profile_dependencies,
     select_remote_address, set_local_port, switch_profile_command,
@@ -172,7 +169,6 @@ pub fn run() {
             get_proxy_settings,
             save_proxy_settings,
             test_proxy_connectivity,
-            list_ai_providers,
             save_desktop_settings,
             get_desktop_settings_data,
             add_remote_address,
@@ -191,20 +187,12 @@ pub fn run() {
             list_profile_ports,
             set_profile_port,
             create_profile_flow_command,
-            list_quarantine,
             list_profile_dependency_status,
             rebuild_profile_dependencies,
             list_runtime_catalog,
             download_runtime,
             remove_runtime,
             runtime_download_status,
-            restore_quarantine,
-            repair_plugin,
-            run_doctor,
-            explain_failure,
-            get_fuse_summary,
-            get_quarantine_settings,
-            save_quarantine_settings,
             crate::download::commands::list_downloads,
             crate::download::commands::pause_download,
             crate::download::commands::resume_download,
@@ -240,10 +228,8 @@ pub fn run() {
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
-            fuse_retries: AtomicU8::new(0),
             skip_startup_check: AtomicBool::new(false),
             pending_active_profile: Mutex::new(None),
-            fuse_summary: Mutex::new(None),
             downloads: download::DownloadManager::new(),
         })
         .setup(|app| {
@@ -506,13 +492,10 @@ pub fn run() {
                 });
             }
             // 守护器：周期探测 dsh 服务。判定规则（防误杀/防抖动循环）：
-            // 启动保险丝监控（#58）：dsh 子进程退出且非 0 → 隔离坏插件 → 自动重试。
-            // 常驻任务，重启/重试后的新实例也在它的视野内。
-            process::quarantine::monitor::start(app.handle());
             // - 健康 = TCP 连接成功；运行中（已进入 Web GUI）连不上一次 = 服务异常，
             //   立即分流：远程/外部实例只提示，本地拉起马上走完整重启（#71，无等待闸门）；
             // - 自愈每轮 3 次封顶，连续健康 ≥2 分钟才重置计数（防无限重启循环）；
-            // - 守护器只管运行中：启动/重启期（ready_once=false）归导航流程与保险丝，
+            // - 守护器只管运行中：启动/重启期（ready_once=false）归导航流程，
             //   重启流程 spawn 成功即复位 ready_once，从机制上杜绝二次重启；
             {
                 let handle = app.handle().clone();

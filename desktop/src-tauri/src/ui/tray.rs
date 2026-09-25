@@ -301,15 +301,6 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
             show_notification(&handle, "DeepSeek Harness Desktop · 重启失败", &format!("端口 {port} 仍被占用"));
             return;
         }
-        // 保险丝（#58）：隔离是持久化变更（写 patch 文件），切模式/手动重启
-        // **不**自动恢复——恢复只能从插件保险丝面板手动触发（#61 实测反馈：
-        // 切兼容模式后已隔离的插件被恢复导致再次报错）。
-        // 重试预算清零：手动重启代表新的启动周期
-        handle
-            .state::<DshState>()
-            .fuse_retries
-            .store(0, Ordering::SeqCst);
-        // 2) 按目标模式拉起（高级=注入局部拖拽 chrome；兼容=标准布局 + 原生标题栏）
         // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
         clear_web_token(&handle);
         let advanced = target_mode == MODE_ADVANCED;
@@ -320,7 +311,7 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
                 *handle.state::<DshState>().child.lock().unwrap() = Some(child);
                 handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
                 handle.state::<DshState>().mode.store(target_mode, Ordering::SeqCst);
-                // 重启即回到启动期（#71）：新实例就绪前守护器让位、保险丝接管
+                // 重启即回到启动期（#71）：新实例就绪前守护器让位
                 handle.state::<DshState>().ready_once.store(false, Ordering::SeqCst);
                 apply_titlebar(&handle, advanced);
             }

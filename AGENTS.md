@@ -31,7 +31,7 @@
 
 ## 代码风格与约定
 
-- Rust 注释用中文；桌面壳后端为模块化结构（desktop/src-tauri/src/ 下 19 个 mod 文件），lib.rs（约 1300 行）保留 run() 入口 + 状态管理 + generate_handler! 聚合，各功能区域迁移至独立模块（settings/proxy/lifecycle/probing/web_token/tray/pet/nav_guard/notify/plugin/platform/commands/profiles/remote/error/phase/state）。
+- Rust 注释用中文；桌面壳后端为子目录化模块结构（desktop/src-tauri/src/ 下按功能域分 ui/、process/、network/、runtime/、download/、navigation/ 六组 + 根级 settings.rs / commands.rs / profiles.rs / platform.rs），lib.rs 保留 run() 入口 + DshState 构造 + generate_handler! 聚合，具体功能在各域模块内。
 - 异步统一走 tauri::async_runtime::spawn；阻塞操作（如 dsh plugin add）用 spawn_blocking。
 - 托盘菜单「刷新」= refresh_tray_mode（现在重建整个菜单，不是只刷标签）。
 - 状态机：STATUS_* 常量 + set_status（写 DshState + emit dsh-status 事件）。
@@ -43,17 +43,27 @@
 
 ## 目录结构
 
-- src/client/ —— 浏览器侧插件 client（index / advanced-shell / local-chrome /
-  external-links / styles；=外链拦截、局部拖拽 chrome、状态条）
+- src/client/ —— 浏览器侧插件 client（index.ts 注册入口 / advanced-shell 局部拖拽 chrome /
+  desktop-settings.tsx 桌面设置 Tab / downloads-tab.tsx 下载 Tab / theme-select.tsx 主题 /
+  local-chrome.ts 状态条等 DOM 注入 / download-intercept.ts 下载拦截 / environment.ts 环境）。
+  esbuild 产 lib/client.js；槽位注入处用 React 组件，禁 document.createElement 拼 UI。
 - desktop/src-tauri/ —— Rust 桌面壳主体
-  - src/lib.rs 入口聚合（run() + 状态管理 + generate_handler!）；build.rs 负责在构建期 staging 内嵌插件（embedded/，gitignore）
-  - src/{settings,proxy,lifecycle,probing,web_token,tray,pet,nav_guard,notify,plugin,platform,commands,profiles,remote,error,phase,state}.rs —— 各功能模块
-  - src/error.rs —— thiserror 域错误（SpawnError/ProxyError/NavigationError/SettingsError/TransitionError）
-  - src/phase.rs —— DshPhase 状态机 enum + transition()
-  - src/state.rs —— DshState 结构 + 常量
-  - capabilities/ —— default.json（主窗本地）、pet.json（桌宠）、remote-desktop.json（远程页 ACL）
+  - src/lib.rs 入口聚合（run() + DshState 构造 + generate_handler!）；build.rs 构建期 staging
+    内嵌插件（embedded/，gitignore）
+  - src/ui/ —— 窗口与交互：tray.rs（托盘）、multiwin.rs（多窗口/次实例）、window.rs（错误页）、
+    nav_guard.rs（导航守卫）、pet.rs（桌宠）
+  - src/process/ —— 子进程：lifecycle.rs（spawn/stdout/stderr 转发）、probing.rs（探活）、
+    plugin.rs（插件注入物化）、stderr_buf.rs（stderr 环形缓冲，退出通知用）
+  - src/network/ —— proxy.rs（代理）、web_token.rs（process token/cookie）、remote.rs（远程访问）、
+    notify.rs（任务通知服务）、forwarder.rs
+  - src/runtime/ —— 运行时核心：state.rs（DshState + STATUS_*/MODE_* 常量）、phase.rs、error.rs、
+    builtin.rs + builtin/（内置 Node/dsh 启动器）、registry.rs（运行时目录/回收站）、instances.rs（实例台账）、paths.rs
+  - src/download/ —— 下载管理器（#72）：manager/commands/model/persist/transfer
+  - src/navigation/mod.rs —— 就绪导航等待（token→cookie→200 三步）
+  - 根级：settings.rs（desktop-settings.json 读写）、commands.rs（IPC 命令）、profiles.rs（profile 管理）、platform.rs（open_external）
+  - capabilities/ —— default.json（主窗本地）、pet.json（桌宠）、remote-desktop.json（远程页 ACL；
+    dsh 页面 origin 是 127.0.0.1:308x，remote origin 强制 ACL，自命令须两文件都 allow）
   - permissions/app-commands.toml —— 应用自命令权限清单
-- desktop/scripts/ —— 验收脚本与 Windows 无管理员工具链模板
 - mobile/ —— 手机访问（设计稿 docs/mobile-access-design.md）
   - dsh-mobile-access/ —— 手机访问服务（host+client 半区）：改写反代、配对/控制路由、
     SSE、cloudflared 隧道；host apply(ctx) 随 dsh 装载启动 lane；client.js = 设置「手机访问」Tab
@@ -82,7 +92,7 @@
   → materialize 挂共享池 → desktop-plugin-inject.yml 三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
  - 测试：mobile-access `npm test`（node 47 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、vendor 1 例、
-   expo-app `npm test`（vitest 7 例）；cargo test 32 例。
+   expo-app `npm test`（vitest 7 例）；cargo test 83 例。
 
 ## 已知注意事项（血泪坑）
 
