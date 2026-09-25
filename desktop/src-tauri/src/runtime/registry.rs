@@ -332,7 +332,7 @@ fn pnpm_add_runtime(
     // #95 评论 Bug 2：pnpm 会向上搜索 pnpm-workspace.yaml，祖先目录（如用户 home）的
     // workspace 污染会引发 ERR_PNPM_UNEXPECTED_STORE。自声明为 workspace root 截断向上搜索
     // （--ignore-workspace / --store-dir / --force 实测均无效，见 #95 评论）。
-    std::fs::write(dst.join("pnpm-workspace.yaml"), "packages: []\n")
+    std::fs::write(dst.join("pnpm-workspace.yaml"), runtime_workspace_yaml())
         .map_err(|e| format!("写入 pnpm-workspace.yaml 失败：{e}"))?;
     // #95 实测：pnpm 默认 .pnpm symlink 布局顶层只有直接依赖，dsh/lib/bin.js 向上解析
     // dsh-app-boot 等兄弟包会 MODULE_NOT_FOUND。hoisted = npm 式全量平铺，与内置
@@ -401,6 +401,13 @@ fn pnpm_add_runtime(
         ));
     }
     Ok(())
+}
+
+/// 运行时安装目录的 pnpm-workspace.yaml 内容（#135）：`packages: []` 自声明
+/// workspace root 截断向上搜索（#95 评论 Bug 2）+ allowBuilds 白名单——pnpm 11
+/// 对未批准构建脚本的依赖直接 ERR_PNPM_IGNORED_BUILDS exit 1（#119 钉 pnpm 11 后暴露）。
+fn runtime_workspace_yaml() -> String {
+    format!("packages: []\n\n{}", crate::runtime::builtin::PNPM_ALLOW_BUILDS)
 }
 
 /// 失败原因提取：stderr 去噪后优先（node 告警所在），空则回退 stdout 去噪
@@ -511,6 +518,22 @@ mod tests {
         assert!(!out.contains("NODE_TLS"), "应滤掉 TLS 告警：{out}");
         assert!(out.contains("ERR_PNPM_META_FETCH_FAIL"), "应保留真实错误：{out}");
         assert!(out.lines().count() <= 12, "应截尾到 12 行");
+    }
+
+    #[test]
+    fn runtime_workspace_yaml_has_allow_builds() {
+        // #135：pnpm 11 对未批准构建脚本的依赖直接 exit 1——运行时安装目录的
+        // pnpm-workspace.yaml 必须带 allowBuilds 白名单（与 profile 侧同一份常量）。
+        let yaml = runtime_workspace_yaml();
+        assert!(yaml.starts_with("packages: []\n"), "应自声明 workspace root：{yaml}");
+        assert!(
+            yaml.contains("allowBuilds:"),
+            "必须带 allowBuilds 白名单（#135）：{yaml}"
+        );
+        assert!(
+            yaml.contains("node-pty: true") && yaml.contains("koffi: true"),
+            "白名单应含报错过的包：{yaml}"
+        );
     }
 
     #[test]

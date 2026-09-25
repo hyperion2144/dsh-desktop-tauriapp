@@ -44,6 +44,13 @@ impl DshMode {
     }
 }
 
+/// pnpm 11 允许执行构建脚本的 allowBuilds 白名单（YAML 块，含尾部换行）。
+/// 凡是用内置 pnpm 拉依赖树的路径（profile 初始化/迁移、运行时下载 #135）都必须
+/// 把它写进所在目录的 pnpm-workspace.yaml，否则 pnpm 11 对含构建脚本的依赖
+/// 直接 ERR_PNPM_IGNORED_BUILDS exit 1（此前浮动 pnpm 10 只警告不失败）。
+/// 单一常量避免多处漂移——#135 正是白名单复制多份导致运行时下载路径遗漏。
+pub(crate) const PNPM_ALLOW_BUILDS: &str = "allowBuilds:\n  node-pty: true\n  protobufjs: true\n  git-hosted: true\n  cloudflared: true\n  sharp: true\n  ssh2: true\n  '@deepseek-ai/dsh-subprocess-local': true\n  '@google/genai': true\n  koffi: true\n";
+
 /// 解析 dsh 来源设置：DSH_MODE env > settings.dsh_mode > 内置（默认）。
 pub(crate) fn configured_dsh_mode() -> DshMode {
     let raw = std::env::var("DSH_MODE")

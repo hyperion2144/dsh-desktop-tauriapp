@@ -5,6 +5,7 @@
 ## 未发布
 
 - **托盘运行时菜单支持切换到外部 dsh（#126）**：托盘「运行时版本」原先只有 内置版本 / 已下载版本 / 目录下载项，切外部 dsh 只能进设置页；且托盘选中标记只看版本不看来源，外部来源下仍显示「● 内置」。修复：①把「外部 dsh」当成运行时列表里的又一个同级单选条目（紧跟「内置 …」，探测不到就不列——与已下载版本一样「存在才列出」）②`switch_runtime` 参数化目标来源（`DshMode`），点击外部条目写设置页同一份 `dsh_mode` 配置并重启；**切来源不改写 `dsh_runtime`**（切回内置可恢复上次选中的下载版本）③选中标记 ● 跟随当前生效来源，external 下内置/已装一律 ○④来源回退补成双向对称：外部 dsh 不可用时启动回退到**随包内置**运行时（非「已下载版本优先」那棵）并通知，不再直接落到「未找到 dsh 命令」错误页；回退只作用于本次运行不改写设置（与既有「内置不可用→回退外部」对称）⑤`DshMode` 补 `as_str()` 收敛字符串映射（`get_dsh_source` 去重）。新增 3 个菜单条目单测（外部可用/不可用 × 来源 builtin/external），cargo 118 全绿
+- **运行时下载失败修复（#135）**：托盘/设置页「下载并切换 dsh x.y.z」全部失败——`pnpm add` exit 1，`[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: dsh-subprocess-local / @google/genai / koffi / node-pty / protobufjs`。根因是**两条装依赖树的路径 pnpm 配置漂移**：建/迁移 profile 写的 `pnpm-workspace.yaml` 带 `allowBuilds` 白名单所以一直正常，而运行时下载写的只有 `packages: []`（#95 评论 Bug 2 的截断语义）；pnpm 钉到 11.16.0（#119）后对未批准构建脚本直接 exit 1（此前浮动 pnpm 10 只警告不失败）于是全挂。修复：①`allowBuilds` 白名单收敛为单一常量 `PNPM_ALLOW_BUILDS`（`runtime/builtin.rs`），profile 初始化/迁移与运行时下载三处统一引用——本 bug 正是白名单多处复制漂移所致②运行时下载的 yaml 抽 `runtime_workspace_yaml()`：保留 `packages: []` 截断语义 + 追加白名单③新增单测锁定白名单必含。cargo 120 全绿
 
 ## 已发布
 
