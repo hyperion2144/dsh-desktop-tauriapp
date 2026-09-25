@@ -349,8 +349,9 @@ fn pnpm_add_runtime(
         format!("node-linker=hoisted\nstore-dir={store_path}\n"),
     )
         .map_err(|e| format!("写入 .npmrc 失败：{e}"))?;
-    // pnpm 及其子进程需要 node：前置内置 node 目录
-    let node_dir = node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    // pnpm 生命周期脚本（koffi/node-pty 等，#135 起真正执行）经 sh/cmd 找 PATH 上
+    // 名叫 `node` 的命令；内置 node 是 sidecar（文件名 dsh-node），须垫片成 node。
+    let node_dir = node_shim_dir(node, dst)?;
     let mut paths = vec![node_dir];
     if let Some(existing) = std::env::var_os("PATH") {
         paths.extend(std::env::split_paths(&existing));
@@ -408,6 +409,29 @@ fn pnpm_add_runtime(
 /// 对未批准构建脚本的依赖直接 ERR_PNPM_IGNORED_BUILDS exit 1（#119 钉 pnpm 11 后暴露）。
 fn runtime_workspace_yaml() -> String {
     format!("packages: []\n\n{}", crate::runtime::builtin::PNPM_ALLOW_BUILDS)
+}
+
+/// 造一个含 `node` 命令的垫片目录（#135）：内置 node 是 sidecar（文件名 dsh-node(.exe)），
+/// 而 pnpm 生命周期脚本用 sh/cmd 按 `node` 名字在 PATH 上找解释器，直接前置 sidecar 目录无效。
+/// 垫片放运行时根目录（可写、跨版本复用）；同卷硬链接零拷贝，失败回退符号链接/拷贝。
+fn node_shim_dir(node: &std::path::Path, dst: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let dir = dst
+        .parent()
+        .map(|p| p.join(".node-shim"))
+        .unwrap_or_else(|| std::env::temp_dir().join("dsh-node-shim"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 node 垫片目录失败：{e}"))?;
+    #[cfg(windows)]
+    let link = dir.join("node.exe");
+    #[cfg(not(windows))]
+    let link = dir.join("node");
+    let _ = std::fs::remove_file(&link);
+    if std::fs::hard_link(node, &link).is_err() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(node, &link).map_err(|e| format!("创建 node 垫片失败：{e}"))?;
+        #[cfg(windows)]
+        std::fs::copy(node, &link).map_err(|e| format!("创建 node 垫片失败：{e}"))?;
+    }
+    Ok(dir)
 }
 
 /// 失败原因提取：stderr 去噪后优先（node 告警所在），空则回退 stdout 去噪
@@ -534,6 +558,23 @@ mod tests {
             yaml.contains("node-pty: true") && yaml.contains("koffi: true"),
             "白名单应含报错过的包：{yaml}"
         );
+    }
+
+    #[test]
+    fn node_shim_dir_provides_node_command() {
+        // #135：内置 node 文件名是 dsh-node，垫片目录必须提供叫 `node` 的硬链/符号链接。
+        let root = std::env::temp_dir().join(format!("dsh-shim-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let fake_node = bin_dir.join("dsh-node");
+        std::fs::write(&fake_node, b"#!/bin/sh\n").unwrap();
+        let dst = root.join("runtimes").join("0.0.0");
+        let dir = node_shim_dir(&fake_node, &dst).expect("垫片目录应创建成功");
+        assert_eq!(dir, dst.parent().unwrap().join(".node-shim"));
+        let link = dir.join("node");
+        assert!(link.is_file(), "垫片应提供 node 命令：{}", link.display());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
