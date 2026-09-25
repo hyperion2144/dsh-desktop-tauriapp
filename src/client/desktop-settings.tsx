@@ -758,20 +758,29 @@ function DesktopSettingsPanel(): React.ReactElement {
         showToast(`dsh ${version} 下载完成`, true)
       })
       .catch((err) => {
+        const text = String(err)
+        if (text.includes('已有运行时下载任务')) {
+          // 后端单飞行：真实任务仍在跑，常驻轮询会在 600ms 内恢复 downloading 态，
+          // 不能标成失败（否则用户会去点重试，永远撞墙）。
+          setRuntimeDownloading((prev) => {
+            const next = { ...prev }
+            delete next[version]
+            return next
+          })
+          return
+        }
         // #95 评论：失败原因必须落到 UI，不能只打 console
-        const reason = String(err).replace(/^下载失败：?/i, '')
+        const reason = text.replace(/^下载失败：?/i, '')
         setRuntimeDownloading((prev) => ({ ...prev, [version]: { failed: reason || '未知错误' } }))
         showToast(`dsh ${version} 下载失败：${reason || '未知错误'}`, false)
       })
   }
 
-  // 下载中轮询 pnpm 进度（remote 页 event.listen 不可用，同 migration_status 模式）
+  // 下载状态以后端 runtime_download_status 为唯一事实源（#135 验证反馈）：
+  // 设置弹窗切 tab 会卸载本组件——useState 与未决 invoke 全部丢失，而后台任务仍在跑。
+  // 常驻轮询：挂载即恢复进行中状态（进度条重现）；观察到 active true→false 时按 error 判定成败。
   useEffect(() => {
-    const anyDownloading = Object.values(runtimeDownloading).some((s) => s === 'downloading')
-    if (!anyDownloading) {
-      setDlProgress(null)
-      return
-    }
+    let sawActive = false
     const timer = setInterval(() => {
       void invoke<{
         active: boolean
@@ -782,13 +791,33 @@ function DesktopSettingsPanel(): React.ReactElement {
         error: string
       }>('runtime_download_status')
         .then((s) => {
-          if (s.active) setDlProgress({ version: s.version, resolved: s.resolved, downloaded: s.downloaded, added: s.added })
-          else setDlProgress(null)
+          if (s.active) {
+            sawActive = true
+            setRuntimeDownloading((prev) =>
+              prev[s.version] === 'downloading' ? prev : { ...prev, [s.version]: 'downloading' },
+            )
+            setDlProgress({ version: s.version, resolved: s.resolved, downloaded: s.downloaded, added: s.added })
+            return
+          }
+          setDlProgress(null)
+          if (!sawActive) return
+          sawActive = false
+          const ok = !s.error
+          setRuntimeDownloading((prev) => {
+            const next = { ...prev }
+            delete next[s.version]
+            return next
+          })
+          void refreshRuntimes()
+          showToast(
+            ok ? `dsh ${s.version} 下载完成` : `dsh ${s.version} 下载失败：${s.error.replace(/^下载失败：?/i, '')}`,
+            ok,
+          )
         })
         .catch(() => {})
     }, 600)
     return () => clearInterval(timer)
-  }, [runtimeDownloading])
+  }, [refreshRuntimes])
 
   const handleSwitchRuntime = (version: string): void => {
     // 运行时切换 = 内置树换版本：必须同时钉回 builtin（否则 mode=external 时切了也仍走外部 CLI）
