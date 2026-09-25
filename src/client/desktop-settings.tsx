@@ -8,11 +8,9 @@ import type { ClientContext } from './ctx-types.ts'
 import { ThemeSelect } from './theme-select.tsx'
 export const inject = ['slots']
 
-// dsh settings 服务的桌面壳命名空间 RPC 通道（宿主 index.js 注册）。
-// 所有设置项持久化走此通道（宿主侧 ctx.settings.get/mutate），不直接读写 settings.yaml；
-// Tauri IPC 仅保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
-const NS_CHANNEL = '/dsh-desktop-fuse-settings'
-
+// 设置项持久化走 Tauri IPC（nsSave → invoke('save_desktop_settings')，Rust 单写者
+// 读改写私有 desktop-settings.json），不直接读写 settings.yaml；
+// Tauri IPC 另保留只读回显（get_proxy_settings 的 effective 预览、profile 目录扫描）与动作（重启/连通性测试/运行时刻录读取）。
 interface NsRpc {
   rpc: { call: (channel: string, endpoint: string, payload?: unknown) => Promise<NsRpcResponse> }
 }

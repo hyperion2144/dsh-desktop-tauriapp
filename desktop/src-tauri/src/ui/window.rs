@@ -10,7 +10,7 @@ pub(crate) fn show_error(app: &AppHandle, reason: &str) {
     let detail = match reason {
         "not-found" => "未找到 dsh 命令。请先执行 npm i -g @deepseek-ai/dsh，或设置 DSH_BIN 环境变量。",
         "spawn-failed" => "dsh 进程启动失败，请查看下方日志输出。",
-        "boot-failed" => "dsh 启动反复失败（插件不兼容或环境异常），已按保险丝策略处理。请查看下方日志输出。",
+        "boot-failed" => "dsh 启动反复失败（插件不兼容或环境异常），请查看下方日志输出。",
         "timeout" => "等待本地服务就绪超时，请查看下方日志输出并重试。",
         _ => "未知错误，请查看下方日志输出。",
     };

@@ -8,7 +8,6 @@
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
-use tauri::Emitter;
 
 use crate::network::notify::{inject_task_notifier, show_notification};
 use crate::network::web_token::{
@@ -281,13 +280,12 @@ async fn wait_ready_and_attach(
 ) {
     let host_port = format!("127.0.0.1:{port}");
     let mut rounds = 0u32;
-    let mut attach_retries = 0u8; // 次实例轻量保险丝的重试预算（1 次）
     let mut token_rounds = 0u32; // token 等待计数（opts.token_wait_rounds 有上限时生效）
     loop {
         if app.state::<DshState>().quitting.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        // #89 第二批：次实例轻量保险丝——pre-ready 退出且非零 → 隔离不兼容插件 + 重试一次
+        // 次实例退出检测：pre-ready 退出 → 通知摘要（stderr 尾部）并关闭窗口
         let exit_status = {
             let state = app.state::<DshState>();
             let mut children = state.children.lock().unwrap();
@@ -297,33 +295,8 @@ async fn wait_ready_and_attach(
                 .flatten()
         };
         if let Some(status) = exit_status {
-            let stderr = app.state::<DshState>().stderr_snapshot_for(&profile);
-            if attach_retries < 1 && !status.success() {
-                let settings = crate::settings::load_desktop_settings();
-                let inject = crate::desktop_plugin_patch_path(&app);
-                let outcome = crate::process::quarantine::run_cycle(
-                    &crate::dsh_home(),
-                    &profile,
-                    Some(&inject),
-                    &stderr,
-                    &settings,
-                );
-                if !outcome.disabled.is_empty() {
-                    attach_retries += 1;
-                    let names: Vec<String> = outcome.disabled.iter().map(|e| e.id.clone()).collect();
-                    show_notification(
-                        &app,
-                        &format!("{profile} 启动失败 · 已隔离插件"),
-                        &format!("已禁用 {}，重试一次", names.join("、")),
-                    );
-                    let _ = crate::process::lifecycle::stop_port_owner(port).await;
-                    app.state::<DshState>().web_tokens.lock().unwrap().remove(&profile);
-                    match spawn_dsh(&app, &profile, port, true) {
-                        Ok(child) => app.state::<DshState>().set_child(&profile, child),
-                        Err(_) => {}
-                    }
-                    continue;
-                }
+            if !status.success() {
+                log::warn!("[multiwin] {profile} 实例退出异常（{:?}）", status.code());
             }
             let tail = app.state::<DshState>().stderr_tail_for(&profile, 10).join(" ⏎ ");
             show_notification(

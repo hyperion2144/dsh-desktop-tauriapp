@@ -37,20 +37,6 @@ pub struct DesktopSettings {
     pub proxy_user: Option<String>,
     /// 代理认证密码（与 proxy_user 配对；空=无认证）。
     pub proxy_pass: Option<String>,
-    /// 保险丝：第一方插件（@deepseek-ai/*）保护开关（默认开）。
-    pub quarantine_first_party_protection: Option<bool>,
-    /// 保险丝：排除名单（永不自动禁用的插件 id/包名）。
-    pub quarantine_exclude: Option<Vec<String>>,
-    /// 保险丝：启动失败最大重试次数（默认 2，0-5）。
-    pub quarantine_max_retries: Option<u8>,
-    /// 保险丝 AI 解读：provider（deepseek=官方 / custom=自定义 OpenAI 兼容）。
-    pub ai_provider: Option<String>,
-    /// 保险丝 AI 解读：模型（默认 deepseek-v4-flash）。
-    pub ai_model: Option<String>,
-    /// 保险丝 AI 解读：自定义端点（仅 custom 时生效；默认官方 api.deepseek.com）。
-    pub ai_base_url: Option<String>,
-    /// 保险丝 AI 解读：密钥的 refs 键名/环境变量名（custom 时必填；默认 DEEPSEEK_API_KEY）。
-    pub ai_key_env: Option<String>,
     /// 下载管理器：并发下载数上限（默认 3，1-32）。
     pub download_concurrency: Option<u32>,
     /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
@@ -420,13 +406,6 @@ mod tests {
       no_proxy: Some("*.corp".into()),
       proxy_user: Some("alice".into()),
       proxy_pass: Some("s3cret".into()),
-      quarantine_first_party_protection: Some(true),
-      quarantine_exclude: Some(vec!["noisy".into()]),
-      quarantine_max_retries: Some(3),
-      ai_provider: Some("deepseek".into()),
-      ai_model: Some("deepseek-v4-flash".into()),
-      ai_base_url: None,
-      ai_key_env: None,
       download_concurrency: Some(5),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
@@ -443,8 +422,6 @@ mod tests {
     assert_eq!(back.download_concurrency, Some(5));
     assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desktop")).copied(), Some(3081));
     assert_eq!(back.profile_lane_ports.as_ref().and_then(|m| m.get("web")).copied(), Some(3091));
-    assert_eq!(back.ai_provider.as_deref(), Some("deepseek"));
-    assert_eq!(back.ai_model.as_deref(), Some("deepseek-v4-flash"));
     assert_eq!(back.port, Some(3081));
     // #116：手机访问壳键随序列化往返不丢（lane 经 desktop-settings.json 读写）
     assert_eq!(back.tunnel_url.as_deref(), Some("https://t.example.com"));
@@ -459,9 +436,6 @@ mod tests {
     assert_eq!(back.no_proxy.as_deref(), Some("*.corp"));
     assert_eq!(back.proxy_user.as_deref(), Some("alice"));
     assert_eq!(back.proxy_pass.as_deref(), Some("s3cret"));
-    assert_eq!(back.quarantine_first_party_protection, Some(true));
-    assert_eq!(back.quarantine_exclude, Some(vec!["noisy".to_string()]));
-    assert_eq!(back.quarantine_max_retries, Some(3));
   }
 
   #[test]

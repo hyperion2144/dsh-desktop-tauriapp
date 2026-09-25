@@ -225,12 +225,6 @@
           "markdownDescription": "桌面设置面板：下载并安装 dsh 运行时（#95）"
         },
         {
-          "description": "允许 AI 解读隔离记录（复用 dsh 凭据）",
-          "type": "string",
-          "const": "allow-explain-failure",
-          "markdownDescription": "允许 AI 解读隔离记录（复用 dsh 凭据）"
-        },
-        {
           "description": "下载管理器：blob 分块结束（落盘+通知）",
           "type": "string",
           "const": "allow-finish-blob-download",
@@ -267,12 +261,6 @@
           "markdownDescription": "允许查询 dsh 服务状态（侧边栏状态标识）"
         },
         {
-          "description": "允许读取最近一次启动的隔离事件摘要",
-          "type": "string",
-          "const": "allow-get-fuse-summary",
-          "markdownDescription": "允许读取最近一次启动的隔离事件摘要"
-        },
-        {
           "description": "允许加载页轮询模式选择提示状态",
           "type": "string",
           "const": "allow-get-mode-prompt-needed",
@@ -291,18 +279,6 @@
           "markdownDescription": "允许查询代理设置与当前生效预览（设置表单回显）"
         },
         {
-          "description": "允许读取保险丝设置（第一方保护/排除名单/重试次数）",
-          "type": "string",
-          "const": "allow-get-quarantine-settings",
-          "markdownDescription": "允许读取保险丝设置（第一方保护/排除名单/重试次数）"
-        },
-        {
-          "description": "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）",
-          "type": "string",
-          "const": "allow-list-ai-providers",
-          "markdownDescription": "允许列出 .credentials.yaml refs 中可用的 AI provider（密钥键名，不含值）"
-        },
-        {
           "description": "下载管理器：读取任务列表快照",
           "type": "string",
           "const": "allow-list-downloads",
@@ -319,12 +295,6 @@
           "type": "string",
           "const": "allow-list-profile-ports",
           "markdownDescription": "桌面设置面板：list_profile_ports（#90）"
-        },
-        {
-          "description": "允许读取插件保险丝隔离名单",
-          "type": "string",
-          "const": "allow-list-quarantine",
-          "markdownDescription": "允许读取插件保险丝隔离名单"
         },
         {
           "description": "桌面设置面板：运行时版本目录/已装列表（#95）",
@@ -411,22 +381,10 @@
           "markdownDescription": "桌面设置面板：删除已下载的 dsh 运行时（#95）"
         },
         {
-          "description": "允许触发插件修复（dsh plugin add 重装）",
-          "type": "string",
-          "const": "allow-repair-plugin",
-          "markdownDescription": "允许触发插件修复（dsh plugin add 重装）"
-        },
-        {
           "description": "允许请求重启 dsh 服务（状态标识点击）",
           "type": "string",
           "const": "allow-restart-dsh-service",
           "markdownDescription": "允许请求重启 dsh 服务（状态标识点击）"
-        },
-        {
-          "description": "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）",
-          "type": "string",
-          "const": "allow-restore-quarantine",
-          "markdownDescription": "允许恢复被隔离插件（写 patch 托管区块与台账，重启生效）"
         },
         {
           "description": "下载管理器：恢复任务（Range 续传优先）",
@@ -439,12 +397,6 @@
           "type": "string",
           "const": "allow-reveal-download",
           "markdownDescription": "下载管理器：在系统文件管理器中显示已完成文件"
-        },
-        {
-          "description": "允许运行插件保险丝环境体检",
-          "type": "string",
-          "const": "allow-run-doctor",
-          "markdownDescription": "允许运行插件保险丝环境体检"
         },
         {
           "description": "桌面设置面板：运行时下载进度轮询（remote 页 event 不可用，#95）",
@@ -469,12 +421,6 @@
           "type": "string",
           "const": "allow-save-proxy-settings",
           "markdownDescription": "允许保存代理设置（托盘代理设置表单提交）"
-        },
-        {
-          "description": "允许保存保险丝设置",
-          "type": "string",
-          "const": "allow-save-quarantine-settings",
-          "markdownDescription": "允许保存保险丝设置"
         },
         {
           "description": "桌面设置面板：select_remote_address",

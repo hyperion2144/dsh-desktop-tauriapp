@@ -515,16 +515,6 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
     }
 }
 
-// ══ 插件保险丝（#59）：IPC 命令 ═══════════════════════════════
-
-use crate::process::quarantine;
-use crate::profiles::scan_profiles;
-use crate::settings::DesktopSettings;
-
-fn active_profile() -> String {
-    configured_profile()
-}
-
 /// 各 profile 的依赖状态（#122）：node_modules 记录的 pnpm 与内置 pnpm 是否一致，
 /// 以及该 profile 是否在运行（运行中不能重建）。
 #[tauri::command]
@@ -568,209 +558,8 @@ pub(crate) async fn rebuild_profile_dependencies(
     .await
     .map_err(|e| format!("重建任务执行失败：{e}"))?
 }
-/// 隔离名单（含 repairable 判定，供 UI 决定是否展示「修复」）。
-#[tauri::command]
-pub(crate) fn list_quarantine(profile: Option<String>) -> serde_json::Value {
-    let profile = profile.unwrap_or_else(active_profile);
-    let entries = quarantine::ledger::list_entries(&dsh_home(), &profile);
-    let list: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "id": e.id, "name": e.name, "reason": e.reason,
-                "failure_type": e.failure_type, "raw_error": e.raw_error,
-                "quarantined_at": e.quarantined_at, "file": e.file,
-                "repairable": crate::process::quarantine::repair::is_repairable(&e.reason, &e.name),
-            })
-        })
-        .collect();
-    serde_json::json!({ "profile": profile, "entries": list })
-}
 
-/// 恢复指定（或全部）被隔离插件：从托管区块/台账摘除，重启后生效。
-#[tauri::command]
-pub(crate) fn restore_quarantine(profile: Option<String>, ids: Option<Vec<String>>) -> serde_json::Value {
-    let profile = profile.unwrap_or_else(active_profile);
-    let n = match ids {
-        Some(ids) if !ids.is_empty() => quarantine::restore_ids(&dsh_home(), &profile, &ids),
-        _ => quarantine::restore_all_for_profile(&dsh_home(), &profile),
-    };
-    serde_json::json!({ "ok": n > 0, "restored": n })
-}
 
-/// 修复：重装包 + 收尾（台账摘除/托管区块重写）。阻塞操作放 spawn_blocking。
-#[tauri::command]
-pub(crate) async fn repair_plugin(app: tauri::AppHandle, profile: Option<String>, id: String) -> serde_json::Value {
-    let profile = profile.unwrap_or_else(active_profile);
-    let res = tauri::async_runtime::spawn_blocking(move || {
-        let entries = quarantine::ledger::list_entries(&dsh_home(), &profile);
-        let Some(e) = entries.iter().find(|e| e.id == id) else {
-            return Err(format!("台账中不存在 {}", id));
-        };
-        if !quarantine::repair::is_repairable(&e.reason, &e.name) {
-            return Err(format!("{} 不可修复（非包解析/导出不匹配类失败）", id));
-        }
-        quarantine::repair::repair(&app, &profile, &e.name)
-            .map(|_| {
-                quarantine::repair::finish_repair(&dsh_home(), &profile, &id);
-            })
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("修复任务异常：{e}")));
-    match res {
-        Ok(()) => serde_json::json!({ "ok": true, "message": "重装完成，重启 dsh 后生效" }),
-        Err(m) => serde_json::json!({ "ok": false, "error": m }),
-    }
-}
-
-/// 环境体检：dsh 版本 / DSH_HOME 可写 / profiles / 台账一致性 / 托管区块健康。
-#[tauri::command]
-pub(crate) fn run_doctor() -> serde_json::Value {
-    let profile = active_profile();
-    let home = dsh_home();
-    let mut checks: Vec<serde_json::Value> = Vec::new();
-    // ① dsh 版本
-    let ver = crate::profiles::dsh_version();
-    checks.push(serde_json::json!({
-        "id": "dsh-version", "label": "dsh 版本",
-        "ok": ver.is_some(),
-        "detail": ver.unwrap_or_else(|| "未找到 dsh 命令".into()),
-    }));
-    // ② DSH_HOME 可写
-    let probe = home.join(".fuse-probe");
-    let writable = std::fs::write(&probe, b"ok").is_ok();
-    let _ = std::fs::remove_file(&probe);
-    checks.push(serde_json::json!({ "id": "home", "label": "DSH_HOME 可写", "ok": writable,
-        "detail": home.display().to_string() }));
-    // ③ profiles
-    let profiles = scan_profiles();
-    let names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
-    checks.push(serde_json::json!({ "id": "profiles", "label": "profiles", "ok": !names.is_empty(),
-        "detail": if names.is_empty() { "未发现 profile".into() } else { names.join(" / ") } }));
-    // ④ 台账一致性：台账里的 id 是否仍在 patch 行内
-    let entries = quarantine::ledger::list_entries(&home, &profile);
-    let patch = quarantine::profile_patch_path(&home, &profile);
-    let patch_ids: Vec<String> = std::fs::read_to_string(&patch)
-        .map(|t| quarantine::patchfile::scan_patch_rows(&t).into_iter().map(|r| r.id).collect())
-        .unwrap_or_default();
-    let drift: Vec<&String> = entries.iter().map(|e| &e.id).filter(|id| !patch_ids.contains(id)).collect();
-    checks.push(serde_json::json!({ "id": "ledger", "label": "隔离台账一致性", "ok": drift.is_empty(),
-        "detail": if drift.is_empty() { format!("{} 条记录全部与 patch 对应", entries.len()) }
-            else { format!("{} 条已不在 patch 中（可能被手工移除）：{}", drift.len(),
-                drift.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("、")) } }));
-    // ⑤ 托管区块健康
-    let managed = std::fs::read_to_string(&patch)
-        .map(|t| quarantine::patchfile::managed_ids(&t).len())
-        .unwrap_or(0);
-    checks.push(serde_json::json!({ "id": "patch", "label": "托管区块健康", "ok": true,
-        "detail": format!("托管禁用 {managed} 项（含历史）") }));
-    serde_json::json!({ "checks": checks })
-}
-
-/// AI 解读（读 .credentials.yaml 密钥；任何失败静默返回，不阻塞隔离主流程）。
-/// #96：explain_failure 只承载 deepseek（默认路由）与 custom（自定义端点/密钥）；
-/// 其它 dsh 目录 provider 返回错误文案（防 #95 之前“一律 deepseek 默认路由”的静默错路由）。
-fn explain_provider_guard(provider: &str) -> Option<String> {
-    if provider == "deepseek" || provider == "custom" {
-        return None;
-    }
-    Some(format!(
-        "provider \"{provider}\" 的解读路由归 dsh llm 服务——请用保险丝面板「AI 解读」按钮（自动经 dsh 通道），或切回 deepseek/custom"
-    ))
-}
-
-#[tauri::command]
-pub(crate) async fn explain_failure(profile: Option<String>, id: Option<String>) -> serde_json::Value {
-    let _ = profile;
-    let Some(id) = id else {
-        return serde_json::json!({ "ok": false, "error": "缺少插件 id" });
-    };
-    let Some(e) = quarantine::ledger::list_entries(&dsh_home(), &active_profile())
-        .into_iter().find(|e| e.id == id)
-    else {
-        return serde_json::json!({ "ok": false, "error": format!("台账中不存在 {id}") });
-    };
-    // AI 路由按设置解析：deepseek（默认路由）与 custom（自定义端点/密钥）；其它 provider 归 dsh llm 服务。
-    let s = load_desktop_settings();
-    let provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
-    // #96：非 deepseek/custom 的 provider 路由归 dsh llm 目录（client 已自动经
-    // /dsh-desktop-fuse-explain 走 dsh 进程内通道）；直达本命令时明确报错防静默错路由。
-    if let Some(err) = explain_provider_guard(&provider) {
-        return serde_json::json!({ "ok": false, "error": err });
-    }
-    let model_label = s
-        .ai_model
-        .clone()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| crate::network::ai::DEFAULT_MODEL.to_string());
-    let model = model_label.clone();
-    let custom = provider == "custom";
-    let key_env = if custom {
-        s.ai_key_env
-            .clone()
-            .filter(|k| !k.trim().is_empty())
-            .unwrap_or_else(|| crate::network::ai::DEFAULT_KEY_ENV.to_string())
-    } else {
-        crate::network::ai::DEFAULT_KEY_ENV.to_string()
-    };
-    let base_override = if custom {
-        Some(
-            s.ai_base_url
-                .clone()
-                .filter(|b| !b.trim().is_empty())
-                .unwrap_or_else(|| crate::network::ai::DEFAULT_BASE_URL.to_string()),
-        )
-    } else {
-        None
-    };
-    let res = tauri::async_runtime::spawn_blocking(move || {
-        let key = crate::network::ai::resolve_api_key_env(&key_env)
-            .ok_or("未找到 AI 密钥（环境变量或 .credentials.yaml refs）")?;
-        let base = base_override.unwrap_or_else(crate::network::ai::resolve_base_url);
-        crate::network::ai::chat_with(
-            &key,
-            &base,
-            &model,
-            &crate::network::ai::explain_prompt(&e.failure_type, &e.name, &e.raw_error),
-        )
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("AI 任务异常：{e}")));
-    match res {
-        Ok(text) => serde_json::json!({ "ok": true, "suggestion": text, "model": model_label }),
-        Err(err) => serde_json::json!({ "ok": false, "error": err }),
-    }
-}
-
-/// 列出 .credentials.yaml refs 中可用的 AI provider（密钥键名）。
-#[tauri::command]
-pub(crate) fn list_ai_providers() -> serde_json::Value {
-    let creds = dsh_home().join(".credentials.yaml");
-    let mut providers = Vec::new();
-    if let Ok(text) = std::fs::read_to_string(&creds) {
-        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
-            if let Some(refs) = value.get("refs").and_then(|r| r.as_mapping()) {
-                for (k, _) in refs {
-                    if let Some(key) = k.as_str() {
-                        if key.ends_with("_API_KEY") {
-                            providers.push(serde_json::json!({
-                                "id": key,
-                                "name": key.trim_end_matches("_API_KEY"),
-                                "key_env": key,
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if providers.is_empty() {
-        providers.push(serde_json::json!({
-            "id": "DEEPSEEK_API_KEY", "name": "DeepSeek", "key_env": "DEEPSEEK_API_KEY"
-        }));
-    }
-    serde_json::json!({ "providers": providers })
-}
 
 /// 把 patch 键写入合并对象（支持点号路径，如 `profile_ports.desktop`）。
 /// 原实现只做顶层字面键插入：`"profile_ports.desktop"` 成为未知字段，反序列化时被
@@ -1069,71 +858,6 @@ pub(crate) fn set_profile_port(profile: String, port: u16) -> Result<(), String>
 pub(crate) fn create_profile_flow_command(app: tauri::AppHandle) {
     crate::profiles::create_profile_flow(&app);
 }
-/// 最近一次启动的隔离事件摘要（通知区）。
-#[tauri::command]
-pub(crate) fn get_fuse_summary(app: tauri::AppHandle) -> serde_json::Value {
-    app.state::<DshState>()
-        .fuse_summary
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or(serde_json::json!({ "disabled": [], "retried": 0 }))
-}
-
-/// 读保险丝设置。
-#[tauri::command]
-pub(crate) fn get_quarantine_settings() -> serde_json::Value {
-    let s = load_desktop_settings();
-    let (fp, exclude, retries) = quarantine::fuse_settings(&s);
-    let ai_provider = s.ai_provider.clone().unwrap_or_else(|| "deepseek".into());
-    let ai_model = s
-        .ai_model
-        .clone()
-        .filter(|m| !m.trim().is_empty())
-        .unwrap_or_else(|| crate::network::ai::DEFAULT_MODEL.to_string());
-    serde_json::json!({
-        "first_party_protection": fp,
-        "exclude": exclude,
-        "max_retries": retries,
-        "ai_provider": ai_provider,
-        "ai_model": ai_model,
-        "ai_base_url": s.ai_base_url.clone().unwrap_or_default(),
-        "ai_key_env": s.ai_key_env.clone().unwrap_or_default(),
-    })
-}
-
-/// 存保险丝设置（#95 收尾：Rust 单写者直写 $DSH_HOME/desktop-settings.json；
-/// #90 时代「client→插件→dsh settings 服务持久化」的链路已随 v0.1.7 拆除）。
-#[tauri::command]
-pub(crate) fn save_quarantine_settings(
-    first_party_protection: bool,
-    exclude: Vec<String>,
-    max_retries: u8,
-    ai_provider: Option<String>,
-    ai_model: Option<String>,
-    ai_base_url: Option<String>,
-    ai_key_env: Option<String>,
-) -> serde_json::Value {
-    let mut s: DesktopSettings = load_desktop_settings();
-    s.quarantine_first_party_protection = Some(first_party_protection);
-    s.quarantine_exclude = Some(exclude);
-    s.quarantine_max_retries = Some(max_retries.clamp(0, 5));
-    // provider id 来自 dsh llm 目录（deepseek/minimax-cn/…）或 custom（base_url+key_env 覆盖）；
-    // 不做白名单——旧过滤曾把 minimax-cn 静默改写成 deepseek。解读路由缺口见 #96。
-    s.ai_provider = Some(
-        ai_provider
-            .filter(|p| !p.trim().is_empty())
-            .unwrap_or_else(|| "deepseek".into()),
-    );
-    s.ai_model = ai_model.filter(|m| !m.trim().is_empty());
-    s.ai_base_url = ai_base_url.filter(|b| !b.trim().is_empty());
-    s.ai_key_env = ai_key_env.filter(|k| !k.trim().is_empty());
-    match crate::settings::save_desktop_settings(&s) {
-        Ok(()) => serde_json::json!({ "ok": true }),
-        Err(e) => serde_json::json!({ "ok": false, "error": e }),
-    }
-}
-
 
 /// 迁移进度查询（#90 进度条，旧接口保留）：running / copied / total。
 #[tauri::command]
@@ -1249,28 +973,8 @@ pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Re
     Ok(())
 }
 #[cfg(test)]
-mod fuse_doctor_tests {
-    // 复现用户实测「点运行体检无结果」：直接调命令函数，看 panic/异常
-    #[test]
-    fn run_doctor_returns_checks() {
-        let v = super::run_doctor();
-        let checks = v.get("checks").and_then(|c| c.as_array()).expect("checks 应为数组");
-        assert!(!checks.is_empty(), "doctor checks 不应为空：{v}");
-        for c in checks {
-            assert!(c.get("label").is_some(), "每项应有 label：{c}");
-        }
-    }
-
-    #[test]
-    fn explain_provider_guard_routes_only_builtin() {
-        // #96：deepseek（默认路由）与 custom（自定义端点）放行；
-        // 其它 dsh 目录 provider（如 minimax-cn）拒绝直达，逼走路由正确的 dsh 进程内通道。
-        assert!(super::explain_provider_guard("deepseek").is_none());
-        assert!(super::explain_provider_guard("custom").is_none());
-        let err = super::explain_provider_guard("minimax-cn").expect("目录 provider 应被拒绝");
-        assert!(err.contains("dsh llm"), "文案应指向 dsh 通道：{err}");
-    }
-
+mod desktop_settings_tests {
+    // 保险丝测试（#127）：随功能废弃移除。
     #[test]
     fn insert_patch_path_supports_dotted_keys() {
         // 用户实测：Profile 端口保存无效——点号路径键（profile_ports.desktop）必须
@@ -1292,12 +996,5 @@ mod fuse_doctor_tests {
         let mut r2 = serde_json::json!({ "profile_ports": 5 });
         super::insert_patch_path(r2.as_object_mut().unwrap(), "profile_ports.x", serde_json::json!(1));
         assert_eq!(r2["profile_ports"]["x"], 1);
-    }
-
-    #[test]
-    fn list_quarantine_returns_shape() {
-        let v = super::list_quarantine(None);
-        assert!(v.get("entries").is_some(), "应有 entries：{v}");
-        assert!(v.get("profile").is_some(), "应有 profile：{v}");
     }
 }
