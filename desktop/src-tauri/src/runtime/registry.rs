@@ -329,14 +329,6 @@ fn pnpm_add_runtime(
         serde_json::json!({ "name": format!("dsh-runtime-{version}"), "private": true }).to_string(),
     )
     .map_err(|e| format!("写入 package.json 失败：{e}"))?;
-    // #95 评论 Bug 2：pnpm 会向上搜索 pnpm-workspace.yaml，祖先目录（如用户 home）的
-    // workspace 污染会引发 ERR_PNPM_UNEXPECTED_STORE。自声明为 workspace root 截断向上搜索
-    // （--ignore-workspace / --store-dir / --force 实测均无效，见 #95 评论）。
-    std::fs::write(dst.join("pnpm-workspace.yaml"), runtime_workspace_yaml())
-        .map_err(|e| format!("写入 pnpm-workspace.yaml 失败：{e}"))?;
-    // #95 实测：pnpm 默认 .pnpm symlink 布局顶层只有直接依赖，dsh/lib/bin.js 向上解析
-    // dsh-app-boot 等兄弟包会 MODULE_NOT_FOUND。hoisted = npm 式全量平铺，与内置
-    // resources/dsh 同构，解析钩子与启动器无需区分树型。
     // #114：独立 store（绝对路径，正斜杠）——不写全局 store，避免触碰与运行树 hardlink
     // 共享 inode 的 mtime/ctime（rev = mtime|ctime|size，改动即触发 dsh 插件 rebuilt → 白屏）
     let store = dst
@@ -344,6 +336,15 @@ fn pnpm_add_runtime(
         .map(|p| p.join(".pnpm-store"))
         .unwrap_or_else(|| dst.join(".pnpm-store"));
     let store_path = store.display().to_string().replace('\\', "/");
+    // #95 评论 Bug 2：pnpm 会向上搜索 pnpm-workspace.yaml，祖先目录（如用户 home）的
+    // workspace 污染会引发 ERR_PNPM_UNEXPECTED_STORE。自声明为 workspace root 截断向上搜索
+    // （--ignore-workspace / --store-dir / --force 实测均无效，见 #95 评论）。
+    // #135：pnpm 10+ 配置以 pnpm-workspace.yaml 为准，.npmrc 的 node-linker / store-dir
+    // 在 pnpm 11 会被无视（实测落成 isolated 布局 + 全局 store）——三项都须写进本文件。
+    std::fs::write(dst.join("pnpm-workspace.yaml"), runtime_workspace_yaml(&store_path))
+        .map_err(|e| format!("写入 pnpm-workspace.yaml 失败：{e}"))?;
+    // #95 实测：hoisted = npm 式全量平铺，与内置 resources/dsh 同构，解析钩子与启动器
+    // 无需区分树型。.npmrc 保留同样设置仅为兼容旧 pnpm；pnpm 11 以 yaml 为准。
     std::fs::write(
         dst.join(".npmrc"),
         format!("node-linker=hoisted\nstore-dir={store_path}\n"),
@@ -404,11 +405,18 @@ fn pnpm_add_runtime(
     Ok(())
 }
 
-/// 运行时安装目录的 pnpm-workspace.yaml 内容（#135）：`packages: []` 自声明
-/// workspace root 截断向上搜索（#95 评论 Bug 2）+ allowBuilds 白名单——pnpm 11
-/// 对未批准构建脚本的依赖直接 ERR_PNPM_IGNORED_BUILDS exit 1（#119 钉 pnpm 11 后暴露）。
-fn runtime_workspace_yaml() -> String {
-    format!("packages: []\n\n{}", crate::runtime::builtin::PNPM_ALLOW_BUILDS)
+/// 运行时安装目录的 pnpm-workspace.yaml 内容（#135）：pnpm 10+ 配置以本文件为准，
+/// `.npmrc` 的同名设置在 pnpm 11 会被无视（实测 .modules.yaml 落成 isolated +
+/// 全局 store），因此 nodeLinker / storeDir / allowBuilds 三项都必须写在这里：
+/// - `packages: []` 自声明 workspace root 截断向上搜索（#95 评论 Bug 2）
+/// - `nodeLinker: hoisted` 平铺，与内置 resources/dsh 同构（#95 实测）
+/// - `storeDir` 独立 store（#114 隔离，避免写全局 store 触发 profile 插件 rebuilt）
+/// - `allowBuilds` 白名单：pnpm 11 对未批准构建脚本的依赖直接 exit 1
+fn runtime_workspace_yaml(store_dir: &str) -> String {
+    format!(
+        "packages: []\nnodeLinker: hoisted\nstoreDir: {store_dir}\n\n{}",
+        crate::runtime::builtin::PNPM_ALLOW_BUILDS
+    )
 }
 
 /// 造一个含 `node` 命令的垫片目录（#135）：内置 node 是 sidecar（文件名 dsh-node(.exe)），
@@ -545,15 +553,20 @@ mod tests {
     }
 
     #[test]
-    fn runtime_workspace_yaml_has_allow_builds() {
-        // #135：pnpm 11 对未批准构建脚本的依赖直接 exit 1——运行时安装目录的
-        // pnpm-workspace.yaml 必须带 allowBuilds 白名单（与 profile 侧同一份常量）。
-        let yaml = runtime_workspace_yaml();
+    fn runtime_workspace_yaml_has_pnpm11_critical_settings() {
+        // #135：pnpm 11 的关键配置只认 pnpm-workspace.yaml（.npmrc 整体被无视）：
+        // ①packages: [] 自声明 workspace root 截断向上搜索 ②nodeLinker: hoisted
+        // 平铺（否则顶层只有直接依赖，解析钩子按平铺树找 dsh-app-boot 即
+        // MODULE_NOT_FOUND）③storeDir 独立（#114 隔离，禁写全局 store）④allowBuilds
+        // 白名单（pnpm 11 未批准构建脚本直接 exit 1）。
+        let yaml = runtime_workspace_yaml("/tmp/dsh-test-store");
         assert!(yaml.starts_with("packages: []\n"), "应自声明 workspace root：{yaml}");
+        assert!(yaml.contains("nodeLinker: hoisted"), "pnpm 11 只认 yaml 里的 nodeLinker：{yaml}");
         assert!(
-            yaml.contains("allowBuilds:"),
-            "必须带 allowBuilds 白名单（#135）：{yaml}"
+            yaml.contains("storeDir: /tmp/dsh-test-store"),
+            "storeDir 须写入 yaml（#114 隔离）：{yaml}"
         );
+        assert!(yaml.contains("allowBuilds:"), "必须带 allowBuilds 白名单（#135）：{yaml}");
         assert!(
             yaml.contains("node-pty: true") && yaml.contains("koffi: true"),
             "白名单应含报错过的包：{yaml}"

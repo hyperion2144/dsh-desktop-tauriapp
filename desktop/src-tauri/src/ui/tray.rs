@@ -275,6 +275,8 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
     let state = app.state::<DshState>();
     if state.restarting.swap(true, Ordering::SeqCst) {
         log::warn!("已在重启/切换中，忽略重复触发");
+        // #126 验证反馈：错误页期间连点托盘毫无反馈像卡死，这里给出可见提示
+        show_notification(app, "正在重启 / 切换中", "上一次重启尚未完成，请稍候几秒再试");
         return;
     }
     let mode_name = if target_mode == MODE_ADVANCED { "高级" } else { "兼容" };
