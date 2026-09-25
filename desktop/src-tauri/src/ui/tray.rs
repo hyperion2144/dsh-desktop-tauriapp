@@ -21,7 +21,7 @@ use crate::ui::pet::toggle_pet;
 use crate::{
     show_main, set_status, show_notification,
     stop_port_owner, wait_ready_and_navigate,
-    STATUS_RESTARTING,
+    STATUS_STARTING,
 };
 use crate::settings::{configured_profile, port_for_profile};
 
@@ -272,17 +272,10 @@ pub fn navigate_to_loading(app: &AppHandle) {
 /// 通知服务器在 setup 阶段就已启动并常驻，重启时复用同一端口/token。
 pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: Option<&str>) {
     let profile_override = profile_override.map(|s| s.to_string());
-    let state = app.state::<DshState>();
-    if state.restarting.swap(true, Ordering::SeqCst) {
-        log::warn!("已在重启/切换中，忽略重复触发");
-        // #126 验证反馈：错误页期间连点托盘毫无反馈像卡死，这里给出可见提示
-        show_notification(app, "正在重启 / 切换中", "上一次重启尚未完成，请稍候几秒再试");
-        return;
-    }
     let mode_name = if target_mode == MODE_ADVANCED { "高级" } else { "兼容" };
     log::info!("[restart] 进入{mode_name}模式：回到加载页并重启 dsh 服务");
     log::logger().flush();
-    set_status(app, STATUS_RESTARTING, &format!("重启中（{mode_name}）"));
+    set_status(app, STATUS_STARTING, &format!("启动中（重启：{mode_name}）"));
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         // 0) 立即回到启动加载页，然后 kill 旧实例、拉起新实例
@@ -306,7 +299,6 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
         if !freed {
             log::error!("[restart] 端口 {port} 未能停用/释放，重启中止");
             show_notification(&handle, "DeepSeek Harness Desktop · 重启失败", &format!("端口 {port} 仍被占用"));
-            handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
             return;
         }
         // 保险丝（#58）：隔离是持久化变更（写 patch 文件），切模式/手动重启
@@ -338,29 +330,21 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
                 };
                 log::error!("[restart] spawn 失败：{msg}");
                 show_notification(&handle, "DeepSeek Harness Desktop · 重启失败", &format!("spawn 失败：{msg}"));
-                handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
                 return;
             }
         }
         // 3) 重置失败标志并等待就绪 + 重新导航（按目标模式生成 URL）
-        handle.state::<DshState>().spawn_failed.store(false, Ordering::SeqCst);
         let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
         let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
-        // .await 保持 restarting=true 直到导航完成，watchdog 见此标志跳过不干扰。
-        // 加 60s 超时防死锁：dsh 起不来时不会永远卡住。
-        let nav_handle = handle.clone();
+        // #126 验证反馈：重启/切换必须马上生效——restarting 只保护上面 kill/spawn
+        // 临界区（毫秒级），此处立即释放；就绪等待期间托盘随时可再次触发：
+        // 立刻停掉当前实例、按最新设置拉新的（无需任何状态检测）。
+        // 等待本身不设超时（对齐首次启动的产品语义：输出持续上屏，
+        // spawn_failed/quitting 时自动返回），也不再长期霸占互斥闸。
         log::info!("[restart] 开始等待 dsh 就绪并导航...");
         log::logger().flush();
-        let nav_result = tokio::time::timeout(
-            Duration::from_secs(60),
-            wait_ready_and_navigate(nav_handle, port, nport, ntoken),
-        ).await;
-        if nav_result.is_err() {
-            log::warn!("[restart] 等待 dsh 就绪 60s 超时，restarting 复位，交由 watchdog 接管");
-        } else {
-            log::info!("[restart] wait_ready_and_navigate 已返回");
-        }
-        handle.state::<DshState>().restarting.store(false, Ordering::SeqCst);
+        wait_ready_and_navigate(handle.clone(), port, nport, ntoken).await;
+        log::info!("[restart] wait_ready_and_navigate 已返回");
         log::logger().flush();
         // 4) 刷新托盘「切换模式」标签
         refresh_tray_mode(&handle);
@@ -504,25 +488,25 @@ fn spawn_download_progress_notifier(app: &AppHandle, version: String) {
     });
 }
 
-/// 切换后等待重启完成并弹终态（#98 实测反馈补）：先观察到 restarting=true 再等它落下且
-/// 服务 READY（seen 标志防误读切换前旧状态），90s 超时静默放弃（守护器另有兑底提示）。
+/// 切换后等服务就绪并弹终态（#98 实测反馈补）：见到过「非就绪」再见到 READY 才提示
+/// 完成（防误读切换前旧状态）；90s 未就绪静默放弃（失败原因已流式上屏）。
 fn notify_when_ready(app: &AppHandle, label: String) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        let mut seen = false;
+        let mut saw_pending = false;
         for _ in 0..90 {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let state = handle.state::<DshState>();
-            if state.restarting.load(Ordering::SeqCst) {
-                seen = true;
+            if state.status.load(Ordering::SeqCst) != crate::runtime::state::STATUS_READY {
+                saw_pending = true;
                 continue;
             }
-            if seen && state.status.load(Ordering::SeqCst) == crate::runtime::state::STATUS_READY {
+            if saw_pending {
                 show_notification(&handle, "运行时切换完成", &format!("✅ {label} 已启动"));
-                return;
             }
+            return;
         }
-        log::warn!("[tray] 等待运行时 {label} 就绪超时（90s），放弃完成通知");
+        log::warn!("[restart] 等待运行时 {label} 就绪超时（90s），放弃完成通知");
     });
 }
 
@@ -530,6 +514,7 @@ fn notify_when_ready(app: &AppHandle, label: String) {
 fn radio(on: bool) -> &'static str {
     if on { "● " } else { "○ " }
 }
+
 /// 生成「运行时版本」子菜单条目（纯函数，单测锁定语义）。
 /// 返回 (id, text)：内置项 +「外部 dsh」项（#126：与内置同级单选，探测不到就不列）
 /// + 已装项（● 当前选中 / ○ 其余，与内置同号去重）

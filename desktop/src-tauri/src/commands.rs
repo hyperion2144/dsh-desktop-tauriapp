@@ -185,9 +185,6 @@ pub(crate) fn get_dsh_status(state: tauri::State<DshState>) -> serde_json::Value
 #[tauri::command]
 pub(crate) fn restart_dsh_service(app: tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<DshState>();
-    if state.restarting.load(Ordering::SeqCst) {
-        return Err("已在重启中".to_string());
-    }
     let mode = state.mode.load(Ordering::SeqCst);
      restart_dsh_in_mode(&app, mode, None);
     Ok(())
@@ -507,7 +504,6 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                     }
                 }
                 // 4) 重置标志并导航（advanced=true，桌面 chrome 生效）
-                handle.state::<DshState>().spawn_failed.store(false, Ordering::SeqCst);
                 let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
                 let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
                 refresh_tray_mode(&handle);

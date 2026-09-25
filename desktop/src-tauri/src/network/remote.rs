@@ -11,7 +11,8 @@ use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode};
 use crate::commands::prompt_input;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use crate::{set_status, INTERNAL_HOSTS, STATUS_REMOTE};
+use crate::{set_status, INTERNAL_HOSTS};
+use crate::runtime::state::STATUS_READY;
 pub(crate) fn normalize_remote_url(input: &str) -> Option<String> {
     let raw = input.trim();
     if raw.is_empty() {
@@ -328,7 +329,7 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
         let _ = w.eval(&format!("window.location.replace({url:?});"));
     }
     log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
-    set_status(app, STATUS_REMOTE, &format!("远程 {}", remote_display(addr)));
+    set_status(app, STATUS_READY, &format!("远程 {}", remote_display(addr)));
     app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
 }
 

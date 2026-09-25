@@ -40,10 +40,8 @@ pub(crate) async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u1
     let expect_token = state.spawned_this_run.load(std::sync::atomic::Ordering::SeqCst);
     let mut rounds = 0u32;
     loop {
-        // spawn 本身失败：错误提示已由 setup/重启流程给出，这里不再二次导航
-        if state.spawn_failed.load(std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
+        // 启动失败不再置全局标志：fuse 放弃后停在错误页（detail 说明原因），
+        // 用户从托盘/设置页手动重启时本循环会自然拿到新实例并自动接入。
         // 保险丝协作（#58）：spawn 场景下子进程若已退出，绝不把加载页导航到死实例；
         // 隔离/重试由 fuse 监控任务负责（重试成功后这里会拿到新实例）
         if expect_token
