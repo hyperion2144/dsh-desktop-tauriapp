@@ -80,6 +80,7 @@ interface RuntimeCatalog {
   installed: { version: string }[]
   catalog: { version: string; channel: string }[]
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
+   mode?: 'builtin' | 'external'
   error?: string
 }
 
@@ -1151,13 +1152,19 @@ function DesktopSettingsPanel(): React.ReactElement {
           {runtimeCatalog && (
             <>
               <div style={{ marginBottom: 6 }}>
-                {runtimeCatalog.selected
-                  ? `当前使用：运行时 ${runtimeCatalog.selected}${
-                      runtimeCatalog.builtin ? '（内置兜底 ' + runtimeCatalog.builtin + '）' : ''
-                    }`
-                  : runtimeCatalog.builtin
-                    ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
-                    : '当前无可用 dsh'}
+                {runtimeCatalog.mode === 'external'
+                  ? `当前使用：外部 dsh ${
+                      sourceState?.running?.version ||
+                      sourceState?.external?.dsh_version ||
+                      '（版本未知）'
+                    }（运行时版本偏好仅保留，不生效）`
+                  : runtimeCatalog.selected
+                    ? `当前使用：运行时 ${runtimeCatalog.selected}${
+                        runtimeCatalog.builtin ? '（内置兜底 ' + runtimeCatalog.builtin + '）' : ''
+                      }`
+                    : runtimeCatalog.builtin
+                      ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
+                      : '当前无可用 dsh'}
               </div>
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
@@ -1199,9 +1206,14 @@ function DesktopSettingsPanel(): React.ReactElement {
                       const isBuiltin = runtimeCatalog.builtin === c.version
                       const available = installed || isBuiltin
                       // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
-                      const isCurrent = runtimeCatalog.selected
-                        ? runtimeCatalog.selected === c.version
-                        : isBuiltin
+                      // 当前使用：仅来源=内置时按号匹配（selected 空 = 内置兜底行）；
+                      // 外部 CLI 模式下没有哪个下载版本「使用中」（#135，卸载不再被锁死）
+                      const isCurrent =
+                        runtimeCatalog.mode === 'external'
+                          ? false
+                          : runtimeCatalog.selected
+                            ? runtimeCatalog.selected === c.version
+                            : isBuiltin
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
                       if (isBuiltin) tags.push('内置')
