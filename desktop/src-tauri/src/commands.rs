@@ -8,17 +8,14 @@ use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
 use crate::settings::{load_desktop_settings, configured_port};
 use crate::network::proxy::{normalize_proxy_url, split_authority, PROXY_MODE_OFF, PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL};
-use crate::process::lifecycle::spawn_dsh;
-use crate::network::web_token::{store_web_token, clear_web_token};
+use crate::network::web_token::store_web_token;
 use crate::network::notify::show_notification;
 use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode, apply_titlebar};
 use crate::network::remote::{normalize_remote_url, extract_token_from_url};
 use crate::process::plugin::desktop_platform_tag;
 use crate::settings::dsh_home;
-use crate::runtime::error::SpawnError;
 use crate::settings::port_for_profile;
-use crate::ui::window::{show_error, current_monitor_for_window};
-use crate::process::lifecycle::stop_port_owner;
+use crate::ui::window::current_monitor_for_window;
 use crate::navigation::wait_ready_and_navigate;
 use crate::runtime::state::{MODE_ADVANCED, MODE_COMPAT};
 use crate::settings::configured_profile;
@@ -436,7 +433,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
             state.mode.store(MODE_COMPAT, Ordering::SeqCst);
             apply_titlebar(&app, false);
             refresh_tray_mode(&app);
-            let port = port_for_profile(&configured_profile());
+            let _port = port_for_profile(&configured_profile());
             let nport = state.notify_port.load(Ordering::SeqCst);
             let ntoken = state.notify_token.lock().unwrap().clone();
             let handle = app.clone();
@@ -464,51 +461,17 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                         }
                     }
                 }
-                wait_ready_and_navigate(handle, port, nport, ntoken).await;
+                let epoch = handle.state::<DshState>().main_worker.epoch();
+                wait_ready_and_navigate(handle, epoch, nport, ntoken).await;
             });
             Ok(())
         }
         "advanced" => {
             log::info!("[mode] 用户选择高级模式：停用外部实例并以桌面 overlay 实例重启");
-            let handle = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let profile = configured_profile();
-                let port = port_for_profile(&profile);
-                // 1) 停用占用端口的现有 dsh（纯代码，跨平台：netstat2 查 PID + SIGTERM/SIGKILL）
-                log::info!("[mode] 停用端口 {port} 上的现有 dsh 进程");
-                let freed = stop_port_owner(port).await;
-                if !freed {
-                    log::error!("[mode] 端口 {port} 未能停用/释放，高级模式失败");
-                    show_error(&handle, "timeout");
-                    return;
-                }
-                log::info!("[mode] 端口 {port} 已释放，用桌面 overlay 实例重启");
-                // 3) 以桌面 overlay 实例拉起（先清旧 token：新实例 token 必然不同）
-                clear_web_token(&handle);
-                match spawn_dsh(&handle, &profile, port, true) {
-                    Ok(child) => {
-                        *handle.state::<DshState>().child.lock().unwrap() = Some(child);
-                        handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
-                        // 拉起即回到启动期（#71）：新实例就绪前守护器让位、保险丝接管
-                        handle.state::<DshState>().ready_once.store(false, Ordering::SeqCst);
-                        handle.state::<DshState>().mode.store(MODE_ADVANCED, Ordering::SeqCst);
-                        apply_titlebar(&handle, true);
-                    }
-                    Err(e) => {
-                        let msg = match &e {
-                            SpawnError::NotFound(s) | SpawnError::Other(s) => s.clone(),
-                        };
-                        log::error!("[mode] spawn 失败：{msg}");
-                        show_error(&handle, "spawn-failed");
-                        return;
-                    }
-                }
-                // 4) 重置标志并导航（advanced=true，桌面 chrome 生效）
-                let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
-                let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
-                refresh_tray_mode(&handle);
-                wait_ready_and_navigate(handle, port, nport, ntoken).await;
-            });
+            // 主 worker 接管（杀旧 + 端口清理 + 拉新 + 就绪导航）；
+            // 外部实例由 worker 后台任务的 stop_port_owner 兜底清理
+            app.state::<DshState>().main_worker.request_start(&app, true);
+            crate::ui::tray::refresh_tray_mode(&app);
             Ok(())
         }
         _ => Err(format!("未知的桌面接入模式：{mode}")),
@@ -769,7 +732,7 @@ fn get_dsh_source_blocking(app: tauri::AppHandle) -> serde_json::Value {
     let state = app.state::<crate::runtime::state::DshState>();
     let active_port = crate::settings::port_for_profile(&active);
     let shell_spawned = state.running_source_for(&active);
-    let running = if state.child.lock().unwrap().is_some() {
+    let running = if state.main_worker.has_child() {
         serde_json::json!({
             "profile": active,
             "mode": shell_spawned.clone().unwrap_or_else(|| "external".into()),

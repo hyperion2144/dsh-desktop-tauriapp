@@ -23,44 +23,29 @@ use runtime::state::{
     MODE_ADVANCED,
     STATUS_STARTING, STATUS_READY,
 };
-use runtime::error::SpawnError;
 
 // ── 进程管理导入 ──
 use process::lifecycle::{
-    port_open, spawn_dsh, kill_process, kill_process_force,
-    listener_pids, stop_port_owner,
+    port_open,
 };
-#[cfg(unix)]
-use process::lifecycle::{NativeLifecycle, find_dsh_bin, dsh_runtime_path};
 
 // ── 网络层导入 ──
-use network::web_token::{
-    parse_web_token_line, store_web_token, clear_web_token,
-    exchange_token_for_cookie, seed_session_cookie, session_cookie_accepts,
-};
 use network::notify::{
-    start_notify_server, notify_completed, inject_task_notifier,
+    start_notify_server, notify_completed,
     request_notification_permission, show_notification,
-};
-use network::proxy::inject_proxy_env;
-use network::remote::{
-    remote_display, remote_host_port,
-    select_remote, add_remote_flow, remove_remote_flow, set_port_flow,
-    open_proxy_settings, navigate_remote,
 };
 
 // ── 界面层导入 ──
-use ui::tray::{build_tray, apply_titlebar, restart_dsh_in_mode};
+use ui::tray::{build_tray, apply_titlebar};
 use ui::pet::{read_pet_state, write_pet_state, setup_pet, pet_show_main, pet_hide, pet_quit, pet_toggle_passthrough};
 use ui::nav_guard::nav_guard_plugin;
 use ui::window::{show_main, show_error};
 
-// ── 导航逻辑导入 ──
-use navigation::wait_ready_and_navigate;
+// ── 导航逻辑（wait_ready_and_navigate 由 process::worker 后台任务调用）──
 
 // ── 设置/插件/平台/command 导入 ──
 use settings::{load_desktop_settings, configured_port, app_port, dsh_home, configured_profile};
-use process::plugin::{desktop_plugin_patch_path, materialize_desktop_plugin, strip_web_profile_plugin_bundle};
+use process::plugin::desktop_plugin_patch_path;
 use process::probing::{probe_local, probe_remote};
 use platform::{open_external, open_external_impl};
 use commands::{
@@ -78,7 +63,6 @@ use commands::{
     create_profile_flow_command, migration_status, task_status, list_runtime_catalog, download_runtime,
     remove_runtime, runtime_download_status,
 };
-use profiles::{scan_profiles, switch_profile, create_profile_flow};
 
 // ── std/tauri 导入 ──
 use std::{
@@ -88,7 +72,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_log::{Target, TargetKind};
 
 // ── 测试专用导入（cargo fix 会移除非测试构建未用的项，这里统一补回）──
@@ -206,7 +190,11 @@ pub fn run() {
             crate::download::commands::finish_blob_download
         ])
 .manage(DshState {
-            child: Mutex::new(None),
+            main_worker: crate::process::worker::DshWorker::new(
+                crate::settings::configured_profile(),
+                crate::settings::port_for_profile(&crate::settings::configured_profile()),
+                true,
+            ),
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
@@ -224,7 +212,7 @@ pub fn run() {
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
              stderr_bufs: Mutex::new(Default::default()),
-            children: Mutex::new(Default::default()),
+            workers: Mutex::new(Default::default()),
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
@@ -371,39 +359,22 @@ pub fn run() {
                 ClaimDecision::Free => {
                     // 即将由本应用拉起 dsh：先挂共享模块池并迁移旧 bundle 注册（--patch 注入）
                     log::info!("桌面插件 --patch 注入准备：挂共享模块池 + 迁移旧 bundle 注册");
-                    set_status(app.handle(), STATUS_STARTING, "启动中");
-                    materialize_desktop_plugin(app.handle());
-                    strip_web_profile_plugin_bundle();
-                    // 首次 spawn 前清 token（防御性：正常为空）；stdout 线程随后写入新值
-                    clear_web_token(app.handle());
-                    match spawn_dsh(app.handle(), &profile, port, true) {
-                        Ok(child) => {
-                            log::info!("dsh 子进程已启动（PID {}）", child.id());
-                            *state.child.lock().unwrap() = Some(child);
-                            state.spawned_this_run.store(true, Ordering::SeqCst);
-                            state.mode.store(MODE_ADVANCED, Ordering::SeqCst);
-                            // #94：主实例上线即默认转发目标
-                            crate::network::forwarder::set_focused_lane(
-                                crate::settings::lane_port_for_profile(&profile)
-                            );
-                            // #87：全新安装默认 desktop profile——通知说明 + 指引如何回 web
-                            if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
-                                show_notification(
-                                    app.handle(),
-                                    "全新安装 · 默认使用 desktop profile",
-                                    "启动端口 3081；托盘菜单「切换 Profile」可回到 web@3080",
-                                );
-                            }
-                        }
-                        Err(SpawnError::NotFound(e)) => {
-                            log::error!("启动 dsh 失败：{e}");
-                            show_error(app.handle(), "not-found");
-                        }
-                        Err(SpawnError::Other(e)) => {
-                            log::error!("启动 dsh 失败：{e}");
-                            show_error(app.handle(), "spawn-failed");
-                        }
+                    // #94：主实例上线即默认转发目标
+                    crate::network::forwarder::set_focused_lane(
+                        crate::settings::lane_port_for_profile(&profile)
+                    );
+                    // #87：全新安装默认 desktop profile——通知说明 + 指引如何回 web
+                    if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
+                        show_notification(
+                            app.handle(),
+                            "全新安装 · 默认使用 desktop profile",
+                            "启动端口 3081；托盘菜单「切换 Profile」可回到 web@3080",
+                        );
                     }
+                    // 唯一启动入口：主 worker（latest-wins；状态/token/模式翻转均由 worker 负责，
+                    // spawn 前的端口清理与就绪导航也在 worker 后台任务内）
+                    state.main_worker.retarget(profile.clone(), port);
+                    state.main_worker.request_start(app.handle(), true);
                 }
                 ClaimDecision::Ours => {
                     // 上次壳拉起的实例仍存活（如壳崩溃后重启）：按复用流程接入
@@ -437,14 +408,7 @@ pub fn run() {
             // desktop profile 不再自动补建（#95 拍板）：dsh CLI 将 desktop 保留给 Electron
             // 官方桌面版（plugin add 被拒），spawn 实例只写模板不装插件——自动化三条路全堵死。
             // 想要 desktop/任意 profile：设置里的「新建 Profile」手动建。
-            if state.spawned_this_run.load(Ordering::SeqCst) {
-                // 本次由桌面壳拉起实例：立即导航（advanced，桌面 chrome）
-                let handle = app.handle().clone();
-                let nav_token = ntoken.clone();
-                tauri::async_runtime::spawn(async move {
-                    wait_ready_and_navigate(handle, port, nport, nav_token).await;
-                });
-            } else {
+            if !state.spawned_this_run.load(Ordering::SeqCst) {
                 // 复用了外部实例：等用户在加载页选择模式（choose_desktop_mode）再接入；
                 // 这里发一个延迟事件兜底，防止页面早于 state 标记加载完成
                 let handle = app.handle().clone();
@@ -514,8 +478,8 @@ pub fn run() {
             // - 健康 = TCP 连接成功；运行中（已进入 Web GUI）连不上一次 = 服务异常，
             //   立即分流：远程/外部实例只提示，本地拉起马上走完整重启（#71，无等待闸门）；
             // - 自愈每轮 3 次封顶，连续健康 ≥2 分钟才重置计数（防无限重启循环）；
-            // - 守护器只管运行中：启动/重启期（ready_once=false）归导航流程，
-            //   重启流程 spawn 成功即复位 ready_once，从机制上杜绝二次重启；
+            // - 守护器只管运行中：启动/重启期（ready_once=false）归 worker 任务，
+            //   worker 在入口（begin_start）即复位 ready_once，从机制上杜绝二次重启；
             {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -570,7 +534,8 @@ pub fn run() {
                             }
                             continue;
                         }
-                        // 本地拉起的实例：立即进入完整重启流程
+                        // 本地拉起的实例：异常同样走 worker 排队（latest-wins；守护器只
+                        // 检查不自行拉起——worker 保证先杀旧再拉新，至多一个 dsh 进程）
                         epoch_failures += 1;
                         if epoch_failures >= 3 {
                             log::error!("[watchdog] 连续自动恢复失败 3 次，停止自愈");
@@ -580,7 +545,8 @@ pub fn run() {
                         }
                         log::warn!("[watchdog] dsh 不可达（{verbose}），自动重启（第 {epoch_failures} 次）");
                         show_notification(&handle, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
-                        restart_dsh_in_mode(&handle, state.mode.load(Ordering::SeqCst), None);
+                        let advanced = state.mode.load(Ordering::SeqCst) == crate::runtime::state::MODE_ADVANCED;
+                        state.main_worker.request_start(&handle, advanced);
                     }
                 });
             }
@@ -683,30 +649,19 @@ pub fn run() {
             }
             RunEvent::Exit => {
                 let state = app.state::<DshState>();
-                if state.spawned_this_run.load(Ordering::SeqCst) {
-                    if let Some(mut child) = state.child.lock().unwrap().take() {
-                        let pid = child.id();
-                        log::info!("正在停止 dsh 子进程（PID {pid}）");
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        log::info!("dsh 子进程已退出");
-                        // #89 多窗口：回收非激活 profile 的次实例
-                        {
-                            let state = app.state::<DshState>();
-                            let mut children = state.children.lock().unwrap();
-                            let profiles: Vec<String> = children.keys().cloned().collect();
-                            for profile in profiles {
-                                if let Some(mut child) = children.remove(&profile) {
-                                    let pid = child.id();
-                                    log::info!("[exit] 停止 {profile} 实例（PID {pid}）");
-                                    let _ = child.kill();
-                                    let _ = child.wait();
-                                    crate::runtime::instances::remove_instance(&profile);
-                                }
-                            }
+                // 主实例 worker：停掉其掌管的 dsh 进程（有句柄才杀，幂等）
+                state.main_worker.stop();
+                crate::runtime::instances::remove_instance(&state.main_worker.profile());
+                // #89 次窗口：逐个销毁 worker（自行清理进程）+ 摘台账
+                {
+                    let mut workers = state.workers.lock().unwrap();
+                    let profiles: Vec<String> = workers.keys().cloned().collect();
+                    for profile in profiles {
+                        if let Some(w) = workers.remove(&profile) {
+                            log::info!("[exit] 停止 {profile} 实例");
+                            w.shutdown();
+                            crate::runtime::instances::remove_instance(&profile);
                         }
-                        // 实例台账（#86）：自家实例已停，摘除记录
-                        crate::runtime::instances::remove_instance(&configured_profile());
                     }
                 }
                 // 退出时清理所有 profile 下的桌面插件 junction/symlink

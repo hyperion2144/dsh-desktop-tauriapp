@@ -14,13 +14,9 @@ use tauri::{
 
 use crate::runtime::state::{DshState, MODE_ADVANCED, MODE_COMPAT};
 use crate::runtime::builtin::DshMode;
-use crate::runtime::error::SpawnError;
-use crate::process::lifecycle::spawn_dsh;
-use crate::network::web_token::clear_web_token;
 use crate::ui::pet::toggle_pet;
 use crate::{
     show_main, set_status, show_notification,
-    stop_port_owner, wait_ready_and_navigate,
     STATUS_STARTING,
 };
 use crate::settings::{configured_profile, load_desktop_settings, port_for_profile};
@@ -102,6 +98,17 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .separator()
         .text("runtime-more", "更多版本（设置页）…")
         .build()?;
+    // 「dsh 服务地址」子菜单（#136 实机反馈）：本地/远程同层单选；远程不可用
+    // （如 token 失效 401）时可从托盘一键切回本地，不再需要手改配置文件。
+    let src = crate::settings::load_desktop_settings();
+    let mut asub = tauri::menu::SubmenuBuilder::with_id(app, "remote-addr-menu", "dsh 服务地址");
+    for (id, text) in crate::network::remote::remote_menu_items(
+        src.remote_addr.as_deref(),
+        &src.remote_list,
+    ) {
+        asub = asub.text(&id, &text);
+    }
+    let addr_sub = asub.build()?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
@@ -113,6 +120,7 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &profile_sub,
             &switch_sub,
             &runtime_sub,
+            &addr_sub,
             &restart,
             &toggle,
             &quit,
@@ -174,6 +182,17 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             id if id.starts_with("runtime-switch-") => {
                 let ver = id.strip_prefix("runtime-switch-").unwrap_or("").to_string();
                 switch_runtime(app, Some(&ver), DshMode::Builtin);
+            }
+            // #136 实机反馈：远程不可用（如 token 失效 401）时托盘一键切回本地
+            "remote-local" => crate::network::remote::select_remote(app, None),
+            id if id.starts_with("remote-sel-") => {
+                let idx = id
+                    .strip_prefix("remote-sel-")
+                    .and_then(|s| s.parse::<usize>().ok());
+                let src = crate::settings::load_desktop_settings();
+                if let Some(addr) = idx.and_then(|i| src.remote_list.get(i)) {
+                    crate::network::remote::select_remote(app, Some(addr.clone()));
+                }
             }
             id if id.starts_with("runtime-fetch-") => {
                 let ver = id.strip_prefix("runtime-fetch-").unwrap_or("").to_string();
@@ -271,90 +290,46 @@ pub fn navigate_to_loading(app: &AppHandle) {
 /// 通知服务器在 setup 阶段就已启动并常驻，重启时复用同一端口/token。
 pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: Option<&str>) {
     let profile_override = profile_override.map(|s| s.to_string());
-    // #136 远程模式：服务来源是远程 dsh——不 kill/不 spawn 本地实例，
+    // #136 远程模式：服务来源是远程 dsh——本地实例不再需要，worker 停掉它，
     // 回加载页稍作停留后直接导航远程（与冷启动远程路径同语义）。
     // 切回本地（remote_addr=None）后自然恢复原有本地重启流程。
     if let Some(addr) = load_desktop_settings().remote_addr {
-        log::info!("[restart] 远程模式：回到加载页并导航远程（不拉本地实例）");
+        log::info!("[restart] 远程模式：回到加载页并导航远程（停本地实例，不拉新的）");
+        let state = app.state::<DshState>();
         set_status(app, STATUS_STARTING, "启动中（远程）");
+        state.ready_once.store(false, Ordering::SeqCst);
+        state.main_worker.stop();
+        navigate_to_loading(app);
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            navigate_to_loading(&handle);
             tokio::time::sleep(Duration::from_millis(300)).await;
             crate::network::remote::navigate_remote(&handle, &addr, target_mode == MODE_ADVANCED);
             refresh_tray_mode(&handle);
         });
         return;
     }
+    // 本地：回加载页，主 worker 接管——入口杀旧（任何状态）、置「启动中」，
+    // 后台清端口 → 拉新 → 就绪导航（成功置「运行中」）。latest-wins：重复触发
+    // 时新任务直接抢占，任何时刻至多一个 dsh 进程（#136 实机反馈双进程修复）。
     let mode_name = if target_mode == MODE_ADVANCED { "高级" } else { "兼容" };
-    log::info!("[restart] 进入{mode_name}模式：回到加载页并重启 dsh 服务");
+    log::info!("[restart] 进入{mode_name}模式：回到加载页，经主 worker 杀旧拉新");
     log::logger().flush();
-    set_status(app, STATUS_STARTING, &format!("启动中（重启：{mode_name}）"));
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        // 0) 立即回到启动加载页，然后 kill 旧实例、拉起新实例
-        navigate_to_loading(&handle);
-        log::logger().flush();
-
-        let profile = profile_override.clone().unwrap_or_else(configured_profile);
-        let port = port_for_profile(&profile);
-        // 1) 停掉占用端口的现有 dsh（含自家子进程与外部实例，纯代码）
-        if let Some(mut child) = handle.state::<DshState>().child.lock().unwrap().take() {
-            let pid = child.id();
-            log::info!("[restart] 停止自管 dsh 子进程（PID {pid}）");
-            let _ = child.kill();
-            log::logger().flush();
-            let _ = child.wait();
-            log::info!("[restart] 旧 dsh 已退出");
-        }
-        // 实例台账（#86）：旧实例已停，摘除记录（新 spawn 会重新登记）
-        crate::runtime::instances::remove_instance(&profile);
-        let freed = stop_port_owner(port).await;
-        if !freed {
-            log::error!("[restart] 端口 {port} 未能停用/释放，重启中止");
-            show_notification(&handle, "DeepSeek Harness Desktop · 重启失败", &format!("端口 {port} 仍被占用"));
-            return;
-        }
-        // 先清旧 token：新实例 token 必然不同，残留会误导宽限窗口内的导航
-        clear_web_token(&handle);
-        let advanced = target_mode == MODE_ADVANCED;
-        match spawn_dsh(&handle, &profile, port, advanced) {
-            Ok(child) => {
-                log::logger().flush();
-                log::info!("[restart] 新 dsh 子进程已启动（PID {}）", child.id());
-                *handle.state::<DshState>().child.lock().unwrap() = Some(child);
-                handle.state::<DshState>().spawned_this_run.store(true, Ordering::SeqCst);
-                handle.state::<DshState>().mode.store(target_mode, Ordering::SeqCst);
-                // 重启即回到启动期（#71）：新实例就绪前守护器让位
-                handle.state::<DshState>().ready_once.store(false, Ordering::SeqCst);
-                apply_titlebar(&handle, advanced);
-            }
-            Err(e) => {
-                let msg = match &e {
-                    SpawnError::NotFound(s) | SpawnError::Other(s) => s.clone(),
-                };
-                log::error!("[restart] spawn 失败：{msg}");
-                show_notification(&handle, "DeepSeek Harness Desktop · 重启失败", &format!("spawn 失败：{msg}"));
-                return;
-            }
-        }
-        // 3) 重置失败标志并等待就绪 + 重新导航（按目标模式生成 URL）
-        let nport = handle.state::<DshState>().notify_port.load(Ordering::SeqCst);
-        let ntoken = handle.state::<DshState>().notify_token.lock().unwrap().clone();
-        // #126 验证反馈：重启/切换必须马上生效——restarting 只保护上面 kill/spawn
-        // 临界区（毫秒级），此处立即释放；就绪等待期间托盘随时可再次触发：
-        // 立刻停掉当前实例、按最新设置拉新的（无需任何状态检测）。
-        // 等待本身不设超时（对齐首次启动的产品语义：输出持续上屏，
-        // spawn_failed/quitting 时自动返回），也不再长期霸占互斥闸。
-        log::info!("[restart] 开始等待 dsh 就绪并导航...");
-        log::logger().flush();
-        wait_ready_and_navigate(handle.clone(), port, nport, ntoken).await;
-        log::info!("[restart] wait_ready_and_navigate 已返回");
-        log::logger().flush();
-        // 4) 刷新托盘「切换模式」标签
-        refresh_tray_mode(&handle);
-        log::info!("[restart] {mode_name}模式启动完成");
-    });
+    let profile = profile_override.unwrap_or_else(configured_profile);
+    let port = port_for_profile(&profile);
+    {
+        let state = app.state::<DshState>();
+        // 实例台账（#86）：旧实例即将由 worker 停掉，摘旧记录（新 spawn 会重新登记）；
+        // 先摘再 retarget——retarget 前旧 profile 还挂在 worker 上。
+        crate::runtime::instances::remove_instance(&state.main_worker.profile());
+        // 切换 Profile = 主 worker 转向新目标（旧 profile 实例由 worker 杀旧步骤清理）
+        state.main_worker.retarget(profile, port);
+    }
+    navigate_to_loading(app);
+    app.state::<DshState>()
+        .main_worker
+        .request_start(app, target_mode == MODE_ADVANCED);
+    refresh_tray_mode(app);
+    log::logger().flush();
 }
 
 /// 托盘「重启 dsh 服务」：在当前模式下重启。

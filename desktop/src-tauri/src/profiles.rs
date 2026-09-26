@@ -593,7 +593,7 @@ fn write_shim(
     dir: &std::path::Path,
     name: &str,
     unix_body: &str,
-    win_body: &str,
+    _win_body: &str,
 ) -> Option<()> {
     let file = if cfg!(windows) {
         format!("{name}.cmd")

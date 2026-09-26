@@ -162,7 +162,7 @@ pub(crate) async fn run_url_transfer(app: AppHandle, task_id: u64, url: String, 
     // .part 尾部可能多出半截数据；task.received 是已计入的最小一致点，以它为准截齐
     if resumed {
         match tokio::fs::File::options().write(true).open(&part).await {
-            Ok(mut f) => {
+            Ok(f) => {
                 if let Err(e) = f.set_len(start_at).await {
                     return fail(format!("临时文件对齐失败：{e}")).await;
                 }

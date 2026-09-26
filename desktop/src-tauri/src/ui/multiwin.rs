@@ -13,7 +13,7 @@ use crate::network::notify::{inject_task_notifier, show_notification};
 use crate::network::web_token::{
     exchange_token_for_cookie, seed_session_cookie_for, session_cookie_accepts,
 };
-use crate::process::lifecycle::{port_open, spawn_dsh};
+use crate::process::lifecycle::port_open;
 use crate::runtime::instances::{decide_claim, load_instances, ClaimDecision};
 use crate::runtime::state::DshState;
 
@@ -238,26 +238,44 @@ fn spawn_and_navigate_to(app: &AppHandle, profile: &str, port: u16, label: Strin
         app.state::<DshState>().web_tokens.lock().unwrap().remove(&profile);
         let advanced = app.state::<DshState>().mode.load(std::sync::atomic::Ordering::SeqCst)
             == crate::MODE_ADVANCED;
-        match spawn_dsh(&app, &profile, port, advanced) {
-            Ok(child) => {
-                app.state::<DshState>().set_child(&profile, child);
-                crate::ui::tray::refresh_tray_mode(&app);
-            }
-            Err(e) => {
-                let msg = match &e {
-                    crate::runtime::error::SpawnError::NotFound(s)
-                    | crate::runtime::error::SpawnError::Other(s) => s.clone(),
-                };
-                show_notification(&app, &format!("{profile} 启动失败"), &msg);
-                if !in_place {
-                    if let Some(w) = app.get_webview_window(&label) {
-                        let _ = w.close();
-                    }
-                    app.state::<DshState>().unbind_window(&profile);
-                }
-                return;
-            }
+        // 就地切换：先销毁同名旧 worker（停旧实例——「启动新的必须停掉旧的」）
+        if let Some(old) = app.state::<DshState>().workers.lock().unwrap().remove(&profile) {
+            old.shutdown();
         }
+        // 次实例 worker：打开次窗口时创建（关窗时销毁，见 close_profile_instance）
+        let worker = crate::process::worker::DshWorker::new(profile.clone(), port, false);
+        worker.begin_start(&app, advanced);
+        if !crate::process::lifecycle::stop_port_owner(port).await {
+            show_notification(&app, &format!("{profile} 启动失败"), &format!("端口 {port} 未能释放"));
+            if !in_place {
+                if let Some(w) = app.get_webview_window(&label) {
+                    let _ = w.close();
+                }
+                app.state::<DshState>().unbind_window(&profile);
+            }
+            return;
+        }
+        if let Err(e) = worker.spawn_now(&app, advanced) {
+            let msg = match &e {
+                crate::runtime::error::SpawnError::NotFound(s)
+                | crate::runtime::error::SpawnError::Other(s) => s.clone(),
+            };
+            show_notification(&app, &format!("{profile} 启动失败"), &msg);
+            if !in_place {
+                if let Some(w) = app.get_webview_window(&label) {
+                    let _ = w.close();
+                }
+                app.state::<DshState>().unbind_window(&profile);
+            }
+            return;
+        }
+        // 登记 worker（退出检测 / 关窗销毁 / 应用退出回收都从表里取）
+        app.state::<DshState>()
+            .workers
+            .lock()
+            .unwrap()
+            .insert(profile.clone(), worker);
+        crate::ui::tray::refresh_tray_mode(&app);
         let nport = app
             .state::<DshState>()
             .notify_port
@@ -287,12 +305,12 @@ async fn wait_ready_and_attach(
         }
         // 次实例退出检测：pre-ready 退出 → 通知摘要（stderr 尾部）并关闭窗口
         let exit_status = {
-            let state = app.state::<DshState>();
-            let mut children = state.children.lock().unwrap();
-            children
-                .get_mut(&profile)
-                .and_then(|c| c.try_wait().ok())
-                .flatten()
+            app.state::<DshState>()
+                .workers
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .and_then(|w| w.child_exited())
         };
         if let Some(status) = exit_status {
             if !status.success() {
@@ -376,7 +394,7 @@ async fn supervise_secondary(
     app: AppHandle,
     profile: String,
     label: String,
-    port: u16,
+    _port: u16,
     close_window_on_exit: bool,
 ) {
     loop {
@@ -385,12 +403,12 @@ async fn supervise_secondary(
         }
         tokio::time::sleep(Duration::from_millis(2_000)).await;
         let exited = {
-            let state = app.state::<DshState>();
-            let mut children = state.children.lock().unwrap();
-            children
-                .get_mut(&profile)
-                .and_then(|c| c.try_wait().ok())
-                .flatten()
+            app.state::<DshState>()
+                .workers
+                .lock()
+                .unwrap()
+                .get(&profile)
+                .and_then(|w| w.child_exited())
                 .is_some()
         };
         if !exited {
@@ -419,9 +437,9 @@ pub(crate) fn close_profile_instance(app: &AppHandle, profile: &str, stop_proces
     if !stop_process {
         return;
     }
-    if let Some(mut child) = app.state::<DshState>().take_child(profile) {
-        let _ = child.kill();
-        let _ = child.wait();
+    // 关闭窗口 = 销毁该 profile 的 worker：worker 自行清理其 dsh 进程
+    if let Some(worker) = app.state::<DshState>().workers.lock().unwrap().remove(profile) {
+        worker.shutdown();
     }
     crate::runtime::instances::remove_instance(profile);
     let port = crate::settings::port_for_profile(profile);

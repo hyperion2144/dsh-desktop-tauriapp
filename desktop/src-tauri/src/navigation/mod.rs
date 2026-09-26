@@ -28,7 +28,8 @@ use crate::network::remote::navigate_remote;
 /// ③ 任一步失败都留在启动界面重试（dsh 输出持续上屏），绝不带着失败
 ///    状态跳转。成功后主窗口一次性直达根路径（cookie 随行，直接 200），
 ///    桌面 chrome 由 client 经 IPC 查询壳状态自行激活。
-pub(crate) async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u16, ntoken: String) {
+/// `epoch` = 本次启动任务版本（worker latest-wins：被更新任务抢占即让位）。
+pub(crate) async fn wait_ready_and_navigate(app: AppHandle, epoch: u64, nport: u16, ntoken: String) {
     let state = app.state::<DshState>();
     // 远程模式：不探测/不 spawn 本地，直接导航远程页面
     if let Some(addr) = load_desktop_settings().remote_addr {
@@ -36,23 +37,19 @@ pub(crate) async fn wait_ready_and_navigate(app: AppHandle, port: u16, nport: u1
         navigate_remote(&app, &addr, advanced);
         return;
     }
+    let port = state.main_worker.port();
     // spawn 场景才等 stdout 的 token 行（外部复用场景的 token 只能来自粘贴）
     let expect_token = state.spawned_this_run.load(std::sync::atomic::Ordering::SeqCst);
     let mut rounds = 0u32;
     loop {
-        // 启动失败不再置全局标志：反复失败时停在错误页（detail 说明原因），
-        // 用户从托盘/设置页手动重启时本循环会自然拿到新实例并自动接入。
+        // latest-wins 让位：已有更新的启动任务接管（新任务会自己导航），
+        // 本任务放弃，绝不把加载页导航到别人的实例。
+        if state.main_worker.epoch() != epoch {
+            log::info!("[nav] 任务 #{epoch} 已被任务 #{} 抢占，让位", state.main_worker.epoch());
+            return;
+        }
         // spawn 场景下子进程若已退出，绝不把加载页导航到死实例；
-        if expect_token
-            && state
-                .child
-                .lock()
-                .unwrap()
-                .as_mut()
-                .and_then(|c| c.try_wait().ok())
-                .flatten()
-                .is_some()
-        {
+        if expect_token && state.main_worker.child_exited().is_some() {
             tokio::time::sleep(Duration::from_millis(400)).await;
             continue;
         }
