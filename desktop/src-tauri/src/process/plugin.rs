@@ -267,19 +267,46 @@ pub(crate) fn materialize_desktop_plugin_for(app: &tauri::AppHandle, profile: &s
 }
 
 /// 退出时清理所有 profile 下的桌面插件 junction/symlink（不删复制体）。
-pub(crate) fn cleanup_desktop_plugin_links() {
+/// #118 并行实例加固：只删指向**本实例**资源目录的链接——NO_SINGLETON 测试钩子/
+/// 升级窗口期里另一实例仍在跑时，其指向自身包的链接不得被本实例的退出拆掉。
+pub(crate) fn cleanup_desktop_plugin_links(app: &tauri::AppHandle) {
+    let own: Vec<std::path::PathBuf> = [
+        desktop_plugin_dir(app),
+        mobile_package_dir(app, "dsh-mobile-access", "dsh-mobile-access"),
+        mobile_package_dir(app, "dsh-web-mobile", "dsh-mobile-nav"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let profiles_dir = dsh_home().join("profiles");
     let Ok(entries) = std::fs::read_dir(&profiles_dir) else { return };
     for entry in entries.flatten() {
         let nm = entry.path().join("node_modules");
         for name in ["dsh-desktop-tauriapp", "dsh-mobile-access", "dsh-web-mobile"] {
             let link = nm.join(name);
+            // 只清理归本实例所有的链接（symlink 目标在本实例资源目录下）；
+            // 指向其它实例（如安装版 .app）的链接保留，由其所属实例自行清理
+            let Ok(target) = std::fs::read_link(&link) else { continue };
+            if !link_owned_by_this_instance(&target, &own) {
+                log::info!("[exit] 跳过他实例插件链接 {} -> {}", link.display(), target.display());
+                continue;
+            }
             // junction/symlink 用 remove_dir 只删链接不穿透；实体目录 remove_dir 会失败（非空）→ 跳过
             if std::fs::remove_dir(&link).is_ok() || std::fs::remove_file(&link).is_ok() {
                 log::info!("[exit] 清理插件链接 {}", link.display());
             }
         }
     }
+}
+
+/// 判定 symlink 目标是否落在本实例自己的插件资源目录下。
+/// 目标可能是绝对路径，也可能是相对链接（相对 profile node_modules 解析），
+/// 相对路径一律视为非本实例（内嵌挂池恒为绝对路径）。
+fn link_owned_by_this_instance(target: &std::path::Path, own: &[std::path::PathBuf]) -> bool {
+    if !target.is_absolute() {
+        return false;
+    }
+    own.iter().any(|o| target.starts_with(o))
 }
 
 /// 清理旧共享池 $DSH_HOME/profiles/node_modules 中本应用注入的三个包残留。
@@ -356,6 +383,23 @@ pub(crate) fn desktop_platform_tag() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_ownership_scopes_cleanup_to_this_instance() {
+        let own_a = std::path::PathBuf::from("/Applications/AppA.app/Contents/Resources/plugins/dsh-desktop-tauriapp");
+        let own_b = std::path::PathBuf::from("/Applications/AppB.app/Contents/Resources/plugins/dsh-mobile-access");
+        let own = vec![own_a.clone(), own_b.clone()];
+        // 指向本实例目录（含子路径）→ 归属，可清理
+        assert!(link_owned_by_this_instance(&own_a, &own));
+        assert!(link_owned_by_this_instance(&own_b, &own));
+        // 指向其它实例 → 保留（并行实例互不拆链）
+        assert!(!link_owned_by_this_instance(
+            std::path::Path::new("/Applications/AppC.app/Contents/Resources/plugins/dsh-desktop-tauriapp"),
+            &own,
+        ));
+        // 相对路径（非内嵌挂池形态）→ 保留
+        assert!(!link_owned_by_this_instance(std::path::Path::new("../../somewhere/pkg"), &own));
+    }
 
     fn pool_test_dir(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()

@@ -72,6 +72,14 @@
     "allow-reveal-download",
     "allow-start-blob-download",
     "allow-save-blob-chunk",
-    "allow-finish-blob-download"
+    "allow-finish-blob-download",
+    "allow-browser-guest-acquire",
+    "allow-browser-guest-release",
+    "allow-browser-guest-release-all",
+    "allow-browser-guest-navigate",
+    "allow-browser-guest-control",
+    "allow-browser-guest-set-bounds",
+    "allow-browser-guest-set-visible",
+    "allow-browser-guest-state"
   ]
 }

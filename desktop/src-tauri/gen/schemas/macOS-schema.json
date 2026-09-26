@@ -183,6 +183,54 @@
           "markdownDescription": "桌面设置面板：add_remote_address"
         },
         {
+          "description": "浏览器 guest（#118）：创建侧边栏浏览器子 webview（DesktopBrowserBridge acquire）",
+          "type": "string",
+          "const": "allow-browser-guest-acquire",
+          "markdownDescription": "浏览器 guest（#118）：创建侧边栏浏览器子 webview（DesktopBrowserBridge acquire）"
+        },
+        {
+          "description": "浏览器 guest（#118）：历史控制 back/forward/reload",
+          "type": "string",
+          "const": "allow-browser-guest-control",
+          "markdownDescription": "浏览器 guest（#118）：历史控制 back/forward/reload"
+        },
+        {
+          "description": "浏览器 guest（#118）：导航（webview 元素 loadURL）",
+          "type": "string",
+          "const": "allow-browser-guest-navigate",
+          "markdownDescription": "浏览器 guest（#118）：导航（webview 元素 loadURL）"
+        },
+        {
+          "description": "浏览器 guest（#118）：释放子 webview（DesktopBrowserBridge release）",
+          "type": "string",
+          "const": "allow-browser-guest-release",
+          "markdownDescription": "浏览器 guest（#118）：释放子 webview（DesktopBrowserBridge release）"
+        },
+        {
+          "description": "浏览器 guest（#118）：页面卸载时兜底释放全部 guest",
+          "type": "string",
+          "const": "allow-browser-guest-release-all",
+          "markdownDescription": "浏览器 guest（#118）：页面卸载时兜底释放全部 guest"
+        },
+        {
+          "description": "浏览器 guest（#118）：同步矩形（ResizeObserver 驱动）",
+          "type": "string",
+          "const": "allow-browser-guest-set-bounds",
+          "markdownDescription": "浏览器 guest（#118）：同步矩形（ResizeObserver 驱动）"
+        },
+        {
+          "description": "浏览器 guest（#118）：显隐（rect 归零/弹层遮挡）",
+          "type": "string",
+          "const": "allow-browser-guest-set-visible",
+          "markdownDescription": "浏览器 guest（#118）：显隐（rect 归零/弹层遮挡）"
+        },
+        {
+          "description": "浏览器 guest（#118）：拉取当前状态快照（client 镜像初始化）",
+          "type": "string",
+          "const": "allow-browser-guest-state",
+          "markdownDescription": "浏览器 guest（#118）：拉取当前状态快照（client 镜像初始化）"
+        },
+        {
           "description": "下载管理器：取消任务并清理临时文件",
           "type": "string",
           "const": "allow-cancel-download",

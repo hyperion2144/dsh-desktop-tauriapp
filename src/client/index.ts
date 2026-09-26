@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-theme/client'
 import { applyAdvancedShell } from './advanced-shell.ts'
 import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
+import { installDesktopBrowserBridge } from './desktop-browser-bridge.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 
@@ -112,6 +113,9 @@ export function apply(ctx: ClientContext): void {
   registerDownloadsTab(ctx)
   // blob:/data: 下载拦截转 IPC（纯浏览器不装）
   installDownloadInterceptor()
+  // 侧边栏浏览器 guest 桥（#118/#134）：仅壳内本地窗口（dshDesktop 标记存在）安装，
+  // 纯浏览器无副作用
+  installDesktopBrowserBridge()
   registerDesktopSettings(ctx)
   // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
   // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；

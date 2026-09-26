@@ -1,6 +1,6 @@
 [package]
 name = "dsh-desktop-tauriapp"
-version = "0.9.4"
+version = "0.10.0"
 description = "DeepSeek Harness Desktop —— DeepSeek Harness desktop client (auto-spawn local dsh web service, system tray resident)"
 authors = ["ArcReel"]
 edition = "2021"
@@ -16,7 +16,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
+# unstable：Window::add_child（同窗子 webview，侧边栏浏览器 guest 载体 #118）所需
+tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api", "unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
@@ -45,3 +46,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tar = "0.4"
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# #118 浏览器 guest：WebView2 COM 历史读控（GoBack/GoForward/CanGoBack/CanGoForward）
+webview2-com = "0.38"
+windows-core = "0.61"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# #118 浏览器 guest：WKWebView 历史读控（msg_send goBack/goForward/canGoBack/canGoForward）
+objc2 = "0.6"

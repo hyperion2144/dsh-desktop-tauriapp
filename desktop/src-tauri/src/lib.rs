@@ -39,6 +39,12 @@ use network::notify::{
 use ui::tray::{build_tray, apply_titlebar};
 use ui::pet::{read_pet_state, write_pet_state, setup_pet, pet_show_main, pet_hide, pet_quit, pet_toggle_passthrough};
 use ui::nav_guard::nav_guard_plugin;
+use ui::browser_guests::{
+    GuestRegistry, DESKTOP_CARRIER_INIT_SCRIPT,
+    browser_guest_acquire, browser_guest_release, browser_guest_release_all,
+    browser_guest_navigate, browser_guest_control, browser_guest_set_bounds,
+    browser_guest_set_visible, browser_guest_state,
+};
 use ui::window::{show_main, show_error};
 
 // ── 导航逻辑（wait_ready_and_navigate 由 process::worker 后台任务调用）──
@@ -187,8 +193,17 @@ pub fn run() {
             crate::download::commands::reveal_download,
             crate::download::commands::start_blob_download,
             crate::download::commands::save_blob_chunk,
-            crate::download::commands::finish_blob_download
+            crate::download::commands::finish_blob_download,
+            browser_guest_acquire,
+            browser_guest_release,
+            browser_guest_release_all,
+            browser_guest_navigate,
+            browser_guest_control,
+            browser_guest_set_bounds,
+            browser_guest_set_visible,
+            browser_guest_state
         ])
+.manage(GuestRegistry::new())
 .manage(DshState {
             main_worker: crate::process::worker::DshWorker::new(
                 crate::settings::configured_profile(),
@@ -264,6 +279,17 @@ pub fn run() {
             .min_inner_size(940.0, 620.0)
             .center()
             .disable_drag_drop_handler()
+            // #118/#134：注入 dshDesktop 载体标记（document-start，仅本地
+            // loopback origin 生效）——dsh 探测到载体即选 guest 模式，侧边栏浏览器
+            // 从 iframe 切换为独立子 webview。
+            .initialization_script(DESKTOP_CARRIER_INIT_SCRIPT)
+            // #118：宿主 dsh 页每次 Started 加载时确定性清理旧 guest——dsh 重启/
+            // 重导航后 pagehide 的 IPC 兑底可能丢，旧 guest 原生层会浮在新页面上
+            .on_page_load(|w, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                    crate::ui::browser_guests::release_guests_of_host(w.app_handle(), w.label());
+                }
+            })
             .on_download(move |_w, event| match event {
                 tauri::webview::DownloadEvent::Requested { url, destination } => {
                     let suggested = destination
@@ -664,8 +690,8 @@ pub fn run() {
                         }
                     }
                 }
-                // 退出时清理所有 profile 下的桌面插件 junction/symlink
-                crate::process::plugin::cleanup_desktop_plugin_links();
+                // 退出时清理所有 profile 下的桌面插件 junction/symlink（只清归本实例所有的链接）
+                crate::process::plugin::cleanup_desktop_plugin_links(app);
             }
             _ => {}
         });

@@ -51,7 +51,9 @@
   - src/lib.rs 入口聚合（run() + DshState 构造 + generate_handler!）；build.rs 构建期 staging
     内嵌插件（embedded/，gitignore）
   - src/ui/ —— 窗口与交互：tray.rs（托盘）、multiwin.rs（多窗口/次实例）、window.rs（错误页）、
-    nav_guard.rs（导航守卫）、pet.rs（桌宠）
+    nav_guard.rs（导航守卫，browser-guest-* label 豁免）、pet.rs（桌宠）、browser_guests/（#118
+    侧边栏浏览器 guest 载体：DesktopBrowserBridge 桥 + 子 webview 管理 + client 侧
+    webview 标签兼容层对应命令）
   - src/process/ —— 子进程：lifecycle.rs（spawn/stdout/stderr 转发）、probing.rs（探活）、
     plugin.rs（插件注入物化）、stderr_buf.rs（stderr 环形缓冲，退出通知用）
   - src/network/ —— proxy.rs（代理）、web_token.rs（process token/cookie）、remote.rs（远程访问）、
@@ -92,7 +94,8 @@
   → materialize 挂共享池 → desktop-plugin-inject.yml 三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
  - 测试：mobile-access `npm test`（node 47 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、vendor 1 例、
-   expo-app `npm test`（vitest 7 例）；cargo test 83 例。
+   expo-app `npm test`（vitest 7 例）；cargo test 93 例；桥契约仿真（#118 guest 载体，手动）：
+   `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 
 ## 已知注意事项（血泪坑）
 
