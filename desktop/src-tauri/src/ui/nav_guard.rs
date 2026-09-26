@@ -15,7 +15,15 @@ use crate::open_external_impl;
 
 pub fn nav_guard_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("dsh-nav-guard")
-        .on_navigation(|_webview, url| navigate_guard(url))
+        // #118：浏览器 guest 子 webview（browser-guest-*）豁免——guest 的顶层
+        // 就是外部站点，其边界由自己的 builder 级 on_navigation（拒绝凭证 URL /
+        // 应用宿主）把关；本守卫只管 dsh 页面所在宿主 webview 的顶层导航。
+        .on_navigation(|webview, url| {
+            if crate::ui::browser_guests::is_guest_label(webview.label()) {
+                return true;
+            }
+            navigate_guard(url)
+        })
         .build()
 }
 

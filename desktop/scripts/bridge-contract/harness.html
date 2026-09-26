@@ -1,0 +1,144 @@
+<!doctype html>
+<!--
+  桥契约仿真测试（#118）——mock 壳环境下按 dsh ElectronWebViewImpl 的真实时序
+  驱动 desktop-browser-bridge（webview 标签兼容层），22 项断言。
+  运行方式见同目录 run.sh；结果读 window.__RESULTS__（全部 PASS 即通过）。
+  背景：此仿真在实现期抓到两个实机才会爆的 bug（isWebviewTag 的 instanceof
+  判定跨引擎不成立；ResizeObserver 对 display:none 转换不触发）。dsh 升级若改
+  ElectronWebViewImpl 的事件/方法面，这里应最先红灯。
+-->
+<html><head><meta charset="utf-8"><style>
+  #host { position: fixed; left: 100px; top: 100px; width: 400px; height: 300px; }
+  webview { display: block; width: 100%; height: 100%; }
+  [role=dialog] { position: fixed; left: 90px; top: 90px; width: 420px; height: 320px; background: rgba(0,0,0,.3); }
+</style></head>
+<body>
+<div id="host"></div>
+<script src="./bridge.js"></script>
+<script>
+(async function () {
+  const R = { steps: [] }
+  const ok = (name, cond) => R.steps.push((cond ? 'PASS: ' : 'FAIL: ') + name)
+  const waitFor = async (fn, ms = 2000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) { if (fn()) return true; await new Promise(r => setTimeout(r, 20)) }
+    return false
+  }
+  // ── mock 壳环境 ──
+  const calls = []
+  window.__MOCK_CALLS__ = calls
+  window.__TAURI_INTERNALS__ = {
+    invoke: (cmd, args) => {
+      calls.push({ cmd, args })
+      if (cmd === 'browser_guest_acquire') return Promise.resolve({ lease: 'lease-t1', partition: 'persist:ws-abc' })
+      if (cmd === 'browser_guest_state') return Promise.resolve({ lease: 'lease-t1', kind: 'state', url: 'about:blank#lease-t1', title: '', loading: false, canGoBack: false, canGoForward: false })
+      return Promise.resolve(undefined)
+    }
+  }
+  // 模拟 Rust init script 装的载体标记（惰性转发，等价 DESKTOP_CARRIER_INIT_SCRIPT）
+  globalThis.dshDesktop = { protocolVersion: 1, browser: {
+    acquire: (ws) => globalThis.__dshShellBridgeImpl.acquire(ws),
+    release: (l) => globalThis.__dshShellBridgeImpl.release(l),
+    onOpenRequested: (l, cb) => globalThis.__dshShellBridgeImpl.onOpenRequested(l, cb),
+  } }
+
+  // ── 安装桥 ──
+  window.__installBridge()
+  ok('桥安装 __dshShellBridgeImpl', !!globalThis.__dshShellBridgeImpl)
+
+  // ── 严格按 dsh ElectronWebViewImpl 时序驱动 ──
+  // 1) acquire
+  const reservation = await globalThis.dshDesktop.browser.acquire('ws-key-1')
+  ok('acquire 返回 {lease,partition}', reservation && reservation.lease === 'lease-t1' && reservation.partition === 'persist:ws-abc')
+
+  // 2) createElement（照抄 dsh ElectronWebviewPresentation.createElement）
+  const el = document.createElement('webview')
+  el.className = 'x'
+  el.dataset.sidebarBrowserFrame = 'webview'
+  el.setAttribute('name', reservation.lease)
+  el.setAttribute('partition', reservation.partition)
+  el.setAttribute('allowpopups', '')
+  el.setAttribute('src', 'about:blank#' + reservation.lease)
+
+  // 3) 先挂监听（dsh 在 present 前挂）再 present
+  const got = []
+  for (const n of ['dom-ready','did-start-navigation','did-start-loading','did-stop-loading','did-navigate','did-navigate-in-page','page-title-updated','did-fail-load','render-process-gone']) {
+    el.addEventListener(n, (e) => got.push({ type: n, isMainFrame: e.isMainFrame, errorCode: e.errorCode }))
+  }
+  document.getElementById('host').append(el)
+  ok('dom-ready 在绑定后触发', await waitFor(() => got.some(g => g.type === 'dom-ready')))
+
+  // 4) loadURL（dsh loadPending 在 dom-ready 后调用）
+  await el.loadURL('https://www.baidu.com/')
+  const nav = calls.find(c => c.cmd === 'browser_guest_navigate')
+  ok('loadURL → browser_guest_navigate', nav && nav.args.lease === 'lease-t1' && nav.args.url === 'https://www.baidu.com/')
+
+  // 5) Rust 推 started → dsh 置 loading
+  globalThis.__dshShellBridgeImpl._receive({ lease: 'lease-t1', kind: 'started', url: 'https://www.baidu.com/', title: '', loading: true, canGoBack: false, canGoForward: false })
+  ok('started → did-start-navigation(isMainFrame) + did-start-loading',
+    got.some(g => g.type === 'did-start-navigation' && g.isMainFrame === true) && got.some(g => g.type === 'did-start-loading'))
+  ok('isLoading() 同步读镜像 = true', el.isLoading() === true)
+
+  // 6) Rust 推 finished
+  globalThis.__dshShellBridgeImpl._receive({ lease: 'lease-t1', kind: 'finished', url: 'https://www.baidu.com/', title: '百度一下', loading: false, canGoBack: true, canGoForward: false })
+  ok('finished → did-stop-loading + did-navigate',
+    got.some(g => g.type === 'did-stop-loading') && got.some(g => g.type === 'did-navigate'))
+  ok('getURL() 同步读镜像', el.getURL() === 'https://www.baidu.com/')
+  ok('canGoBack()/canGoForward() 读镜像', el.canGoBack() === true && el.canGoForward() === false)
+
+  // 7) 标题推送
+  globalThis.__dshShellBridgeImpl._receive({ lease: 'lease-t1', kind: 'title', url: 'https://www.baidu.com/', title: '百度一下，你就知道', loading: false, canGoBack: true, canGoForward: false })
+  ok('title → page-title-updated + getTitle()', got.some(g => g.type === 'page-title-updated') && el.getTitle() === '百度一下，你就知道')
+
+  // 8) 失败推送
+  globalThis.__dshShellBridgeImpl._receive({ lease: 'lease-t1', kind: 'failed', url: 'https://www.baidu.com/', title: '', loading: false, canGoBack: false, canGoForward: false })
+  const fail = got.find(g => g.type === 'did-fail-load')
+  ok('failed → did-fail-load(isMainFrame)', fail && fail.isMainFrame === true)
+
+  // 9) 历史控制
+  el.goBack(); el.goForward(); el.reload(); el.clearHistory(); el.stop()
+  const ctl = calls.filter(c => c.cmd === 'browser_guest_control')
+  ok('goBack/goForward/reload → 3 个 control 调用', ctl.length === 3 && ctl[0].args.action === 'back' && ctl[1].args.action === 'forward' && ctl[2].args.action === 'reload')
+  ok('clearHistory/stop 为 no-op 不炸', true)
+
+  // 10) rect 同步（rAF 合并）
+  const bounded = await waitFor(() => calls.some(c => c.cmd === 'browser_guest_set_bounds'))
+  const sb = calls.find(c => c.cmd === 'browser_guest_set_bounds')
+  const rect = el.getBoundingClientRect()
+  ok('ResizeObserver → set_bounds（CSS px）', bounded && Math.abs(sb.args.x - rect.x) < 1 && Math.abs(sb.args.width - rect.width) < 1)
+  const shown = calls.find(c => c.cmd === 'browser_guest_set_visible' && c.args.visible === true)
+  ok('初始可见 → set_visible(true)', !!shown)
+
+  // 11) 弹层遮挡 → 隐藏；移开 → 恢复
+  const dlg = document.createElement('div'); dlg.setAttribute('role', 'dialog'); document.body.append(dlg)
+  const hidden = await waitFor(() => calls.some(c => c.cmd === 'browser_guest_set_visible' && c.args.visible === false))
+  ok('role=dialog 相交 → set_visible(false)', hidden)
+  dlg.remove()
+  const reshown = await waitFor(() => { const l = calls.filter(c => c.cmd === 'browser_guest_set_visible' && c.args.visible === true); return l.length >= 2 })
+  ok('弹层移除 → set_visible(true) 恢复', reshown)
+
+  // 12) 新窗回交
+  let opened = null
+  const unsub = globalThis.dshDesktop.browser.onOpenRequested('lease-t1', (url) => { opened = url })
+  globalThis.__dshShellBridgeImpl._openRequested({ lease: 'lease-t1', url: 'https://example.org/x' })
+  ok('onOpenRequested/_openRequested 回调链', opened === 'https://example.org/x')
+  unsub()
+
+  // 13) rect 归零（隐藏 tab：display:none）→ 隐藏；恢复 → 显示（真实流程：隐藏先于释放）
+  const host2 = document.getElementById('host'); host2.style.display = 'none'
+  const hid2 = await waitFor(() => { const l = calls.filter(c => c.cmd === 'browser_guest_set_visible' && c.args.visible === false); return l.length >= 2 })
+  ok('宿主 display:none → set_visible(false)', hid2)
+  host2.style.display = ''
+  const reshow2 = await waitFor(() => { const l = calls.filter(c => c.cmd === 'browser_guest_set_visible' && c.args.visible === true); return l.length >= 3 })
+  ok('宿主恢复显示 → set_visible(true)', reshow2)
+
+  // 14) 释放
+  await globalThis.dshDesktop.browser.release('lease-t1')
+  const rel = calls.find(c => c.cmd === 'browser_guest_release')
+  ok('release → browser_guest_release', rel && rel.args.lease === 'lease-t1')
+  ok('释放后迟到的推送被忽略', (globalThis.__dshShellBridgeImpl._receive({ lease: 'lease-t1', kind: 'finished', url: 'x', title: '', loading: false, canGoBack: false, canGoForward: false }), true))
+
+  window.__RESULTS__ = R
+})().catch(e => { window.__RESULTS__ = { steps: ['FAIL: 异常 ' + (e && e.stack || e)] } })
+</script>
+</body></html>

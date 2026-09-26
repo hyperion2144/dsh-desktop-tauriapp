@@ -257,3 +257,43 @@ commands = { allow = ['list_profile_dependency_status'] }
 identifier = 'allow-rebuild-profile-dependencies'
 description = '依赖状态（#122）：用内置 pnpm 重建某 profile 的依赖（迁移 store 大版本）；运行中的 profile 会被拒绝'
 commands = { allow = ['rebuild_profile_dependencies'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-acquire'
+description = '浏览器 guest（#118）：创建侧边栏浏览器子 webview（DesktopBrowserBridge acquire）'
+commands = { allow = ['browser_guest_acquire'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-release'
+description = '浏览器 guest（#118）：释放子 webview（DesktopBrowserBridge release）'
+commands = { allow = ['browser_guest_release'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-release-all'
+description = '浏览器 guest（#118）：页面卸载时兜底释放全部 guest'
+commands = { allow = ['browser_guest_release_all'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-navigate'
+description = '浏览器 guest（#118）：导航（webview 元素 loadURL）'
+commands = { allow = ['browser_guest_navigate'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-control'
+description = '浏览器 guest（#118）：历史控制 back/forward/reload'
+commands = { allow = ['browser_guest_control'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-set-bounds'
+description = '浏览器 guest（#118）：同步矩形（ResizeObserver 驱动）'
+commands = { allow = ['browser_guest_set_bounds'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-set-visible'
+description = '浏览器 guest（#118）：显隐（rect 归零/弹层遮挡）'
+commands = { allow = ['browser_guest_set_visible'] }
+
+[[permission]]
+identifier = 'allow-browser-guest-state'
+description = '浏览器 guest（#118）：拉取当前状态快照（client 镜像初始化）'
+commands = { allow = ['browser_guest_state'] }
