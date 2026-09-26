@@ -4,6 +4,10 @@
 
 ## 未发布
 
+## 已发布
+
+### v0.10.0（2026-09-26）
+
 - **侧边栏浏览器 guest 载体（#118，同时根治 #134「永远正在打开…」）**：壳内实现 dsh 的 DesktopBrowserBridge（protocolVersion 1），侧边栏浏览器从 iframe 切换为**同窗子 webview（guest）**，对齐官方 Electron 桌面架构。背景：#134 根因是 macOS 上 wry 的 WKWebView 导航回调不区分主/子框架，壳导航守卫取消所有外部 iframe 导航（Windows 因 WebView2 事件仅主框架触发而不受影响）。实现：①`ui/browser_guests/` 新模块（注册表 + 导航策略 + 8 个 IPC 命令）——`Window::add_child` 创建 guest（开 tauri `unstable` feature，`focused(false)` 防焦点抢夺），builder 级 `on_navigation` 拒带凭证 URL/应用宿主（对齐官方 browser-guests.ts），`on_new_window`→Deny+回交 dsh 侧栏开新标签，`on_download` 拒下载，macOS 14+ 按 workspace 哈希 data_store_identifier 隔离存储（Windows data_directory）②导航守卫按 `browser-guest-*` label 豁免 guest（主窗顶层防护零变化）③主窗/multiwin 注入 `DESKTOP_CARRIER_INIT_SCRIPT`（仅本地 loopback origin 装 `globalThis.dshDesktop` 惰性标记，acquire/release 带 4s 宽限轮询——升级窗口期页面 client 旧于壳时超时干净报错而非立即炸）④client 新增 `desktop-browser-bridge.ts`：桥实现 + `<webview>` 标签兼容层（MutationObserver 绑定/元素方法补丁/状态镜像+Electron 事件合成）+ ResizeObserver 矩形同步（rect 归零或 [role=dialog] 相交即隐藏）+ pagehide 兑底释放。已知限制：guest 原生层永远在 dsh 内容之上（弹层遮挡按 rect-hide 缓解）；SPA 站内导航地址栏可能滞后（无 KVO URL）；Windows 侧行为由 CI 产物验证。cargo 93 全绿 + client `node --check` 通过
 - **远程 webview 401 终局修复（#136 三轮，实机验证通过）**：前两轮修了 SameSite=Strict 跨站不随行（exchange+Lax 种入）与落库竞态（验证轮询），实机仍 401——日志显示三件套全部通过但窗口仍鉴权页，锁定最后差异：**导航目标**。本机模式 seed 后导航的是不带 token 的根路径，而远程导航的是带 token 的原 URL；dsh 对带 token 参数的请求优先走 token 校验分支（浏览器地址栏 303 链能过，webview 跨站链过不了）。终局对齐本机：会话建立（种入+服务端验证通过）→ 导航 scheme://host:port/ 根路径，种入的 cookie 随行；未建立 → 原 URL 降级导航。至此远程与本机完全同构：换 cookie→种入→验证→根路径访问，唯一差异是 token 来源（本机等 stdout 打印，远程 URL 自带）。隔离验收（13080 真实 token）实机确认进入远程 GUI。cargo 86 全绿
 - **退出清理只拆本实例插件链接（#118 冒烟暴露的并行实例互拆问题）**：`cleanup_desktop_plugin_links` 原先无条件摘除所有 profile node_modules 下的三插件链接——NO_SINGLETON 测试钩子/升级窗口期里并行实例退出时会把在跑实例（指向安装版 .app 的）链接一并拆掉。修复：先 `read_link` 归属判定（目标落在**本实例**资源目录内才清理，相对路径一律保留），他实例链接跳过并记日志。隔离冒烟复验：并行实例退出打「跳过他实例插件链接」×3，在跑实例三链接存活。附归属判定单测
