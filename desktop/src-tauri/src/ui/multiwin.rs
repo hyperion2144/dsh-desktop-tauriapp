@@ -145,16 +145,24 @@ pub(crate) fn switch_profile_in_window(app: &AppHandle, label: &str, target: &st
             return;
         }
     }
-    // 改绑：目标 profile 接管该窗口，旧 profile 解绑
-    state.unbind_window(&current);
-    state.bind_window(target, label.to_string());
-    // 主窗即激活 profile 的窗口：同步内存激活 profile 并持久化（下次启动沿用）
+    // 主窗切换（#136 定稿）：主窗的 profile 可换——主 worker 转向新目标杀旧拉新，
+    // 任意时刻主 worker 名下只有一个 dsh 进程；不走次实例路径（否则旧 profile 的
+    // 主实例没人停、新 profile 又拉一个 → 双进程）。目标端口已有实例（次窗口/
+    // 外部）也由 worker 统一接管清理。
     if label == "main" {
+        state.unbind_window(&current);
+        state.bind_window(target, label.to_string());
         *state.pending_active_profile.lock().unwrap() = Some(target.to_string());
         let mut s = crate::settings::load_desktop_settings();
         s.active_profile = Some(target.to_string());
         let _ = crate::settings::save_desktop_settings(&s);
+        let mode = state.mode.load(std::sync::atomic::Ordering::SeqCst);
+        crate::ui::tray::restart_dsh_in_mode(app, mode, Some(target));
+        return;
     }
+    // 次窗口：改绑 + 就地切换（次 worker 路径）
+    state.unbind_window(&current);
+    state.bind_window(target, label.to_string());
     let nport = state.notify_port.load(std::sync::atomic::Ordering::SeqCst);
     let ntoken = state.notify_token.lock().unwrap().clone();
     crate::ui::tray::refresh_tray_mode(app);

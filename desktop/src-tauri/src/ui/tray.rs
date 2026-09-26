@@ -321,6 +321,11 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
         // 实例台账（#86）：旧实例即将由 worker 停掉，摘旧记录（新 spawn 会重新登记）；
         // 先摘再 retarget——retarget 前旧 profile 还挂在 worker 上。
         crate::runtime::instances::remove_instance(&state.main_worker.profile());
+        // 目标 profile 若有次窗口 worker：销毁（一个 profile 只有一个 worker；
+        // 其实例占着目标端口，由主 worker 统一接管后重拉）
+        if let Some(w) = state.workers.lock().unwrap().remove(&profile) {
+            w.shutdown();
+        }
         // 切换 Profile = 主 worker 转向新目标（旧 profile 实例由 worker 杀旧步骤清理）
         state.main_worker.retarget(profile, port);
     }
