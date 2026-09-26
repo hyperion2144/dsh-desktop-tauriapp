@@ -5,7 +5,9 @@
 use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
 use crate::settings::{load_desktop_settings, configured_port};
-use crate::network::web_token::{exchange_token_for_cookie, seed_session_cookie, store_web_token};
+use crate::network::web_token::{
+    exchange_token_for_cookie, seed_session_cookie, session_cookie_accepts, store_web_token,
+};
 use crate::network::notify::show_notification;
 use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode};
 use crate::commands::prompt_input;
@@ -338,30 +340,57 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     } else {
         format!("http://{addr}/")
     };
-    // #136 二轮反馈：seed 写 WKHTTPCookieStore 是异步落库——种完立即导航，
-    // 请求先于 cookie 落库发出仍 401（隔离验收只见「种入成功」日志，实机仍 401
-    // 即此）。整段放后台：换 cookie（最长 5s）→ 种入 → 等落库（400ms）→ 导航。
+    // 「访问」与本机同构(web_token.rs 三件套):换 cookie → Lax 种入 → 服务端
+    // 验证;轮询间隔兼作 WKHTTPCookieStore 异步落库的等待窗口(种完立即导航、
+    // 请求先于 cookie 落库发出仍 401)。远程与本机的唯一差异是 token 来源:
+    // 本机等 stdout 打印,远程 URL 自带——「远程只是少了启动 dsh 这一步」。
     let handle = app.clone();
     let host_port2 = host_port;
     let host2 = host;
     let addr2 = addr.to_string();
     tauri::async_runtime::spawn(async move {
+        let mut session_established = false;
         if let Some(token) = extract_token_from_url(&addr2) {
             match exchange_token_for_cookie(&host_port2, &token) {
                 Some((name, value)) => {
-                    seed_session_cookie(&handle, &host2, port, &name, &value);
-                    // WKHTTPCookieStore setCookie 异步落库：给足时间再导航
-                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    if seed_session_cookie(&handle, &host2, port, &name, &value) {
+                        let mut verified = false;
+                        for _ in 0..4 {
+                            tokio::time::sleep(Duration::from_millis(350)).await;
+                            if session_cookie_accepts(&host_port2, &name, &value) {
+                                verified = true;
+                                break;
+                            }
+                        }
+                        session_established = verified;
+                        log::info!(
+                            "[remote] 会话 cookie 已种入并{}",
+                            if verified { "通过服务端验证（本机同款链路）" } else { "进入落库等待窗口" }
+                        );
+                    } else {
+                        // 平台不支持种 cookie：回退 token 直开（与本机同款降级路径）
+                        log::warn!("[remote] 原生种 cookie 不可用，回退 token 直开路径");
+                    }
                 }
                 None => {
                     log::warn!("[remote] token 换会话 cookie 未成功，照常导航（dsh 将自行展示鉴权页）")
                 }
             }
         }
+        // 导航目标（与本机一致）：会话已建立 → 根路径（不带 token，种入的 cookie
+        // 随行；dsh 对带 token 参数的请求优先走 token 校验分支，webview 跨站
+        // 303 链过不了它——浏览器地址栏能进而壳不能的另一半根源）；未建立 →
+        // 原 URL 照常导航（降级，由 dsh 自行展示鉴权页）。
+        let nav_url = if session_established {
+            let scheme = if url.starts_with("https") { "https" } else { "http" };
+            format!("{scheme}://{host_port2}/")
+        } else {
+            url.clone()
+        };
         if let Some(w) = handle.get_webview_window("main") {
-            let _ = w.eval(&format!("window.location.replace({url:?});"));
+            let _ = w.eval(&format!("window.location.replace({nav_url:?});"));
         }
-        log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
+        log::info!("已导航到远程 dsh：{}（{}）", remote_display(&nav_url), nav_url);
         set_status(&handle, STATUS_READY, &format!("远程 {}", remote_display(&addr2)));
         handle.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
     });
