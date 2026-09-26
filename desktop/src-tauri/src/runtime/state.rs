@@ -1,7 +1,6 @@
 //! 共享运行时状态：DshState + 常量 + set_status + 全局静态。
 
 use std::{
-    process::Child,
     sync::{
         atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering},
         Mutex,
@@ -23,10 +22,11 @@ pub(crate) const STATUS_READY: u8 = 2;
 
 /// 桌面壳的共享运行时状态（Tauri managed state）。
 ///
-/// 15 个字段，几乎被所有功能区域通过 `app.state::<DshState>()` 访问。
+/// dsh 进程句柄不在本结构（由 process::worker 的 per-profile worker 唯一持有）；
 pub(crate) struct DshState {
-    /// 本次运行 spawn 的 dsh 子进程（None = 复用了已有实例）。
-    pub(crate) child: Mutex<Option<Child>>,
+    /// 主实例 worker（激活 profile）：dsh 进程句柄唯一持有者，冷启动/重启/
+    /// 守护器自愈等所有启动命令都经它（latest-wins，见 process::worker）。
+    pub(crate) main_worker: crate::process::worker::DshWorker,
     /// 子进程是否由本次启动启动（决定退出时是否回收、重启时是否生效）。
     pub(crate) spawned_this_run: AtomicBool,
     /// 启动时端口已被外部 dsh web 占用（复用外部实例）：需要在加载页选择
@@ -66,7 +66,8 @@ pub(crate) struct DshState {
     pub(crate) pre_zoom_geom: Mutex<Option<(tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>)>>,
     /// 每 profile 的 stderr 累积缓冲（spawn 时创建，转发线程写、退出通知读）。
     pub(crate) stderr_bufs: Mutex<std::collections::BTreeMap<String, crate::process::stderr_buf::SharedStderr>>,
-    pub(crate) children: Mutex<std::collections::BTreeMap<String, Child>>,
+    /// #89 次窗口：per-profile worker（打开次窗时创建；关窗时销毁并清理进程）。
+    pub(crate) workers: Mutex<std::collections::BTreeMap<String, crate::process::worker::DshWorker>>,
     /// #89 多窗口：profile → 窗口 label（"profile-<name>"）。
     pub(crate) windows: Mutex<std::collections::BTreeMap<String, String>>,
     /// #89 多窗口：每 profile 的 dsh web process token（stdout 解析；激活 profile 另存 `web_token` 供主流程）。
@@ -167,16 +168,6 @@ impl DshState {
             .unwrap()
             .insert(profile.to_string(), token);
     }
-
-    /// 存非激活 profile 的子进程。
-    pub(crate) fn set_child(&self, profile: &str, child: Child) {
-        self.children.lock().unwrap().insert(profile.to_string(), child);
-    }
-
-    /// 取走非激活 profile 的子进程（停止时；负责 kill+wait 回收）。
-    pub(crate) fn take_child(&self, profile: &str) -> Option<Child> {
-        self.children.lock().unwrap().remove(profile)
-    }
 }
 
 /// 运行时放行的远程 dsh 主机清单（导航守卫读，托盘远程选择写）。
@@ -201,7 +192,7 @@ mod tests {
         // DshState 新增字段（notify_port / notify_token）默认值校验。
         use std::sync::atomic::Ordering;
         let state = DshState {
-            child: Mutex::new(None),
+            main_worker: crate::process::worker::DshWorker::new("web".into(), 3080, true),
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
@@ -219,7 +210,7 @@ mod tests {
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
             stderr_bufs: Mutex::new(Default::default()),
-            children: Mutex::new(Default::default()),
+            workers: Mutex::new(Default::default()),
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
              running_sources: Mutex::new(Default::default()),
@@ -247,7 +238,7 @@ mod tests {
     fn multiwin_bindings_roundtrip() {
         // #89：窗口绑定与 per-profile token 的存取语义
         let state = DshState {
-            child: Mutex::new(None),
+            main_worker: crate::process::worker::DshWorker::new("web".into(), 3080, true),
             spawned_this_run: AtomicBool::new(false),
             mode_prompt_needed: AtomicBool::new(false),
             mode: AtomicU8::new(MODE_ADVANCED),
@@ -265,7 +256,7 @@ mod tests {
             web_token: Mutex::new(String::new()),
             pre_zoom_geom: Mutex::new(None),
             stderr_bufs: Mutex::new(Default::default()),
-            children: Mutex::new(Default::default()),
+            workers: Mutex::new(Default::default()),
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),

@@ -447,7 +447,8 @@ function MobileAccessPanel() {
       <div style={{ fontSize: 15, fontWeight: 600 }}>远程访问</div>
       <div style={{ color: cssVars.text2, fontSize: 13 }}>
         三个通道独立维护配对二维码：扫码/打开链接即可配对（一次性令牌 + 会话
-        Cookie）。
+        Cookie）。此页面供手机/其它设备连接本机；若要切换桌面壳自身连接的 dsh
+        服务来源，请用桌面设置的「dsh 服务地址」。
       </div>
 
       {/* 1. 局域网 */}

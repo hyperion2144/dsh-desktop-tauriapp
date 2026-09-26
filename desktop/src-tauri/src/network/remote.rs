@@ -5,7 +5,9 @@
 use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
 use crate::settings::{load_desktop_settings, configured_port};
-use crate::network::web_token::store_web_token;
+use crate::network::web_token::{
+    exchange_token_for_cookie, seed_session_cookie, session_cookie_accepts, store_web_token,
+};
 use crate::network::notify::show_notification;
 use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode};
 use crate::commands::prompt_input;
@@ -87,7 +89,9 @@ pub(crate) fn extract_token_from_url(input: &str) -> Option<String> {
 pub(crate) fn select_remote(app: &AppHandle, addr: Option<String>) {
     let mut settings = load_desktop_settings();
     settings.remote_addr = addr;
-    // #90 架构约束：Rust 不写 settings.yaml——持久化由 client→插件→dsh settings 服务承担
+    // 持久化（#95 起 Rust 是壳私有 desktop-settings.json 的唯一写者）：托盘路径
+    // 此前只改内存，restart 重新读盘时远程地址原样返回，切换永远不生效
+    let _ = crate::settings::save_desktop_settings(&settings);
     if let Some(a) = settings.remote_addr.as_deref() {
         let host = remote_host_port(a).split(':').next().unwrap_or(a).to_string();
         let mut list = INTERNAL_HOSTS.lock().unwrap();
@@ -122,7 +126,7 @@ pub(crate) fn add_remote_flow(app: &AppHandle) {
         if !settings.remote_list.contains(&addr) {
             settings.remote_list.push(addr.clone());
         }
-        // #90：持久化由 client→插件→dsh settings 服务承担
+        let _ = crate::settings::save_desktop_settings(&settings);
         log::info!("[tray] 新增远程 dsh 地址：{}（未切换，请在菜单中手动选择）", remote_display(&addr));
         refresh_tray_mode(&handle);
     });
@@ -135,7 +139,7 @@ pub(crate) fn remove_remote_flow(app: &AppHandle, addr: &str) {
     if settings.remote_addr.as_deref() == Some(addr) {
         settings.remote_addr = None;
     }
-    // #90：持久化由 client→插件→dsh settings 服务承担
+    let _ = crate::settings::save_desktop_settings(&settings);
     log::info!("[tray] 删除远程 dsh 地址：{}", remote_display(addr));
     refresh_tray_mode(app);
 }
@@ -163,7 +167,7 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
             .profile_ports
             .get_or_insert_with(Default::default)
             .insert("web".to_string(), port);
-        // #90：持久化由 client→插件→dsh settings 服务承担
+        let _ = crate::settings::save_desktop_settings(&settings);
         log::info!("[tray] 本地端口 -> {port}");
         if settings.remote_addr.is_some() {
             show_notification(&handle, "端口已保存", &format!("{port} 将在本地模式生效"));
@@ -306,10 +310,21 @@ pub(crate) fn remote_has_plugin(addr: &str) -> bool {
 pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     let host_port = remote_host_port(addr);
     let host = host_port.split(':').next().unwrap_or(addr).to_string();
+    // #136 实机反馈：dsh 303 的 Set-Cookie 带 SameSite=Strict，而主窗口是从
+    // tauri://localhost 加载页发起的跨站顶层导航——WebKit 拒发 Strict cookie，
+    // webview 落地 dsh 的 401 错误页（浏览器地址栏导航无此限制，故浏览器能进
+    // 而壳不能）。对齐本地模式既有链路：后台用 URL 里的 token 换会话 cookie，
+    // 并以 SameSite=Lax 原生种入 webview（机制见 web_token.rs 注释）。
+    // 换取失败（token 失效/远程不可达）时照常导航，由 dsh 自行展示鉴权错误页。
+    let port = tauri::Url::parse(addr)
+        .ok()
+        .and_then(|u| u.port_or_known_default())
+        .or_else(|| host_port.rsplit(':').next()?.parse::<u16>().ok())
+        .unwrap_or(80);
     {
         let mut list = INTERNAL_HOSTS.lock().unwrap();
         if !list.contains(&host) {
-            list.push(host);
+            list.push(host.clone());
         }
     }
     if advanced && !remote_has_plugin(addr) {
@@ -325,12 +340,77 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     } else {
         format!("http://{addr}/")
     };
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval(&format!("window.location.replace({url:?});"));
+    // 「访问」与本机同构(web_token.rs 三件套):换 cookie → Lax 种入 → 服务端
+    // 验证;轮询间隔兼作 WKHTTPCookieStore 异步落库的等待窗口(种完立即导航、
+    // 请求先于 cookie 落库发出仍 401)。远程与本机的唯一差异是 token 来源:
+    // 本机等 stdout 打印,远程 URL 自带——「远程只是少了启动 dsh 这一步」。
+    let handle = app.clone();
+    let host_port2 = host_port;
+    let host2 = host;
+    let addr2 = addr.to_string();
+    tauri::async_runtime::spawn(async move {
+        let mut session_established = false;
+        if let Some(token) = extract_token_from_url(&addr2) {
+            match exchange_token_for_cookie(&host_port2, &token) {
+                Some((name, value)) => {
+                    if seed_session_cookie(&handle, &host2, port, &name, &value) {
+                        let mut verified = false;
+                        for _ in 0..4 {
+                            tokio::time::sleep(Duration::from_millis(350)).await;
+                            if session_cookie_accepts(&host_port2, &name, &value) {
+                                verified = true;
+                                break;
+                            }
+                        }
+                        session_established = verified;
+                        log::info!(
+                            "[remote] 会话 cookie 已种入并{}",
+                            if verified { "通过服务端验证（本机同款链路）" } else { "进入落库等待窗口" }
+                        );
+                    } else {
+                        // 平台不支持种 cookie：回退 token 直开（与本机同款降级路径）
+                        log::warn!("[remote] 原生种 cookie 不可用，回退 token 直开路径");
+                    }
+                }
+                None => {
+                    log::warn!("[remote] token 换会话 cookie 未成功，照常导航（dsh 将自行展示鉴权页）")
+                }
+            }
+        }
+        // 导航目标（与本机一致）：会话已建立 → 根路径（不带 token，种入的 cookie
+        // 随行；dsh 对带 token 参数的请求优先走 token 校验分支，webview 跨站
+        // 303 链过不了它——浏览器地址栏能进而壳不能的另一半根源）；未建立 →
+        // 原 URL 照常导航（降级，由 dsh 自行展示鉴权页）。
+        let nav_url = if session_established {
+            let scheme = if url.starts_with("https") { "https" } else { "http" };
+            format!("{scheme}://{host_port2}/")
+        } else {
+            url.clone()
+        };
+        if let Some(w) = handle.get_webview_window("main") {
+            let _ = w.eval(&format!("window.location.replace({nav_url:?});"));
+        }
+        log::info!("已导航到远程 dsh：{}（{}）", remote_display(&nav_url), nav_url);
+        set_status(&handle, STATUS_READY, &format!("远程 {}", remote_display(&addr2)));
+        handle.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+    });
+}
+
+/// 「dsh 服务地址」子菜单条目（纯函数便于单测）：首项固定「本地」，
+/// 其后按 remote_list 顺序列远程；当前来源打 ●（其余 ○）。标签经
+/// remote_display 展示（host[:port]），不泄露 token。
+pub(crate) fn remote_menu_items(
+    remote_addr: Option<&str>,
+    remote_list: &[String],
+) -> Vec<(String, String)> {
+    let mut items = Vec::new();
+    let local_mark = if remote_addr.is_none() { "●" } else { "○" };
+    items.push(("remote-local".to_string(), format!("{local_mark} 本地（127.0.0.1）")));
+    for (idx, addr) in remote_list.iter().enumerate() {
+        let mark = if remote_addr == Some(addr.as_str()) { "●" } else { "○" };
+        items.push((format!("remote-sel-{idx}"), format!("{mark} {}", remote_display(addr))));
     }
-    log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
-    set_status(app, STATUS_READY, &format!("远程 {}", remote_display(addr)));
-    app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+    items
 }
 
 
@@ -402,6 +482,26 @@ mod tests {
         assert_eq!(extract_token_from_url("http://127.0.0.1:3080/"), None);
         assert_eq!(extract_token_from_url("http://h/?token="), None);
         assert_eq!(extract_token_from_url("not a url"), None);
+    }
+
+    #[test]
+    fn remote_menu_items_marks_current_source_and_hides_token() {
+        let list = vec![
+            "http://192.168.1.10:3080/?token=secret123".to_string(),
+            "dsh.example.cn".to_string(),
+        ];
+        // 本地来源：本地 ●，远程 ○，标签不含 token
+        let items = remote_menu_items(None, &list);
+        assert_eq!(items.len(), 3);
+        assert!(items[0].1.contains("● 本地"));
+        assert!(items[1].1.starts_with("○ 192.168.1.10:3080"));
+        assert!(!items[1].1.contains("secret123"));
+        // 远程来源：选中项 ●，id 稳定按列表序
+        let items = remote_menu_items(Some(list[0].as_str()), &list);
+        assert!(items[0].1.contains("○ 本地"));
+        assert!(items[1].1.starts_with("● 192.168.1.10:3080"));
+        assert_eq!(items[1].0, "remote-sel-0");
+        assert_eq!(items[2].0, "remote-sel-1");
     }
 
 }
