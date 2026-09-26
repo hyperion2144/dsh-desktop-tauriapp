@@ -34,7 +34,8 @@
 - Rust 注释用中文；桌面壳后端为子目录化模块结构（desktop/src-tauri/src/ 下按功能域分 ui/、process/、network/、runtime/、download/、navigation/ 六组 + 根级 settings.rs / commands.rs / profiles.rs / platform.rs），lib.rs 保留 run() 入口 + DshState 构造 + generate_handler! 聚合，具体功能在各域模块内。
 - 异步统一走 tauri::async_runtime::spawn；阻塞操作（如 dsh plugin add）用 spawn_blocking。
 - 托盘菜单「刷新」= refresh_tray_mode（现在重建整个菜单，不是只刷标签）。
-- 状态机：STATUS_* 常量 + set_status（写 DshState + emit dsh-status 事件）。
+- 状态机只有两态：STATUS_STARTING(1) / STATUS_READY(2) + set_status（写 DshState + emit dsh-status
+  事件）；外部/远程来源是「当前信息」而非生命周期状态（#135 收敛，前端 0-4 映射表不变）。
 - 新 Tauri 命令必须三步：generate_handler! 注册 + permissions/app-commands.toml 加 allow-*
   （标识符连字符、commands.allow 用下划线命令名）+ capabilities（default/pet/remote-desktop
   按需）+ 提交时带上 gen/schemas 变更（构建自动再生成，需一起入库）。
@@ -45,7 +46,8 @@
 
 - src/client/ —— 浏览器侧插件 client（index.ts 注册入口 / advanced-shell 局部拖拽 chrome /
   desktop-settings.tsx 桌面设置 Tab / downloads-tab.tsx 下载 Tab / theme-select.tsx 主题 /
-  local-chrome.ts 状态条等 DOM 注入 / download-intercept.ts 下载拦截 / environment.ts 环境）。
+  local-chrome.ts 状态条等 DOM 注入 / download-intercept.ts 下载拦截 / desktop-browser-bridge.ts
+  （#118 桥实现 + webview 标签兼容层）/ environment.ts 环境）。
   esbuild 产 lib/client.js；槽位注入处用 React 组件，禁 document.createElement 拼 UI。
 - desktop/src-tauri/ —— Rust 桌面壳主体
   - src/lib.rs 入口聚合（run() + DshState 构造 + generate_handler!）；build.rs 构建期 staging
@@ -55,10 +57,10 @@
     侧边栏浏览器 guest 载体：DesktopBrowserBridge 桥 + 子 webview 管理 + client 侧
     webview 标签兼容层对应命令）
   - src/process/ —— 子进程：lifecycle.rs（spawn/stdout/stderr 转发）、probing.rs（探活）、
-    plugin.rs（插件注入物化）、stderr_buf.rs（stderr 环形缓冲，退出通知用）
+    plugin.rs（插件注入物化）、stderr_buf.rs（stderr 环形缓冲，退出通知用）、worker.rs（per-profile dsh 进程 worker：句柄唯一持有者 + 全壳唯一 spawn 入口，latest-wins epoch；重启/切 Profile/守护器自愈全经它）
   - src/network/ —— proxy.rs（代理）、web_token.rs（process token/cookie）、remote.rs（远程访问）、
     notify.rs（任务通知服务）、forwarder.rs
-  - src/runtime/ —— 运行时核心：state.rs（DshState + STATUS_*/MODE_* 常量）、phase.rs、error.rs、
+  - src/runtime/ —— 运行时核心：state.rs（DshState + STATUS_*/MODE_* 常量）、phase.rs（#135 后仅留说明注释）、error.rs、
     builtin.rs + builtin/（内置 Node/dsh 启动器）、registry.rs（运行时目录/回收站）、instances.rs（实例台账）、paths.rs
   - src/download/ —— 下载管理器（#72）：manager/commands/model/persist/transfer
   - src/navigation/mod.rs —— 就绪导航等待（token→cookie→200 三步）
@@ -70,13 +72,13 @@
   - dsh-mobile-access/ —— 手机访问服务（host+client 半区）：改写反代、配对/控制路由、
     SSE、cloudflared 隧道；host apply(ctx) 随 dsh 装载启动 lane；client.js = 设置「手机访问」Tab
   - shell-web/ —— 浏览器 H5 壳纯逻辑（parsePairInput/buildEnterUrl/createPairStore，被 Expo/Harmony 移植）
-  - vendor/dsh-mobile-nav/ —— 第三方移动布局包（@dsh-external，MIT，经 gh contents 拉取）
+  - dsh-mobile-nav/ —— 上游移动布局插件 dsh-web-mobile 的 git 子模块（.gitmodules；mexiaosqwq/dsh-web-mobile，当前 v3.0.3，MIT；测试 npm run test:core；CI checkout 需 submodules: recursive）
   - expo-app/ —— Android/iOS 原生壳（Expo/RN，用户确认的技术栈；src/lib/pair.ts 为逻辑源）
   - harmony/ —— 鸿蒙壳源码骨架（ArkTS + ArkWeb，需 DevEco 编译）
 - docs/ —— 设计与审计；docs/desktop-guardian-profile-remote-design.md 为托盘三件套设计稿；docs/mobile-access-design.md 为移动端设计稿，原型见 docs/prototypes/；docs/agents/ 为 agent 协作文档
 - .github/workflows/release.yml —— tag v* 双平台构建 + draft release + 自动 release notes
-- SKILL.md / README.md（README 部分描述已过时：实际已改为 --patch 注入 + 局部 chrome，
-  不再 plugin add / 接管 root slot；以代码为准）
+- SKILL.md / README.md —— README 面向人类（安装/特性/实测状态），SKILL.md 为技能包正文；二者的架构
+  描述与代码冲突时以代码为准（README 已于 2026-09-24 重写对齐 --patch 注入 + 局部 chrome）。
 
 ## 手机访问（mobile）关键契约
 
@@ -90,11 +92,12 @@
   超时揧断 dsh /api/remote.mux 复用长连接——手机端「连接异常」循环的对策）；pong 超时判死主动
   断开触发 dsh 客户端快速重连。settings.yaml dsh-desktop-tauriapp: ws_keepalive_ms（ping 间隔
   ms，0=关闭，默认 15000）、ws_pong_timeout_ms（判死超时 ms，默认 10000），改动重启 lane 生效。
-- 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + @dsh-external/dsh-mobile-nav）
-  → materialize 挂共享池 → desktop-plugin-inject.yml 三行 --patch。
+- 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
+  → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
- - 测试：mobile-access `npm test`（node 47 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、vendor 1 例、
-   expo-app `npm test`（vitest 7 例）；cargo test 93 例；桥契约仿真（#118 guest 载体，手动）：
+ - 测试：mobile-access `npm test`（node 53 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、
+   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 8 例）；cargo test 94 例；
+   桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 
 ## 已知注意事项（血泪坑）
@@ -113,12 +116,24 @@
    曾引发无限自愈循环）；复用外部/远程只提示不代拉；自愈 3 次封顶。
 5. 远程页面 IPC：Tauri 2.11 对 remote origin 强制 ACL，应用自命令也需在
    remote-desktop.json 显式 allow；远程高级模式需远程已装本插件（navigate_remote 有预检提示）。
-6. Windows：本地无 windows 编译目标，Windows 编译/产物由 CI 把关；open_external 走
+6. Windows：本地无 windows 编译目标（交叉 cargo check 被 tauri-winres 需 llvm-rc、externalBin 缺
+   dsh-node-*.exe 挡死），Windows 编译/产物只能靠 CI 把关；cfg(windows) 分支在本机被编译掉，
+   分支内引用的参数名绝不能带下划线前缀（write_shim 的 _win_body → E0425，v0.10.0 CI 才爆），
+   新增 Windows 代码须静态核对接口签名（webview2-com-sys bindings 为准）；open_external 走
    ShellExecuteW（windows-sys 已启用 Win32_UI_Shell / WindowsAndMessaging）。
 7. 本地 dmg 打包时常失败（bundle_dmg.sh，hdiutil 残留挂载），.app 不受影响，dmg 以
    CI 产物为准；失败时 hdiutil detach 清理 bundle/macos/rw.*.dmg 再试。
 8. 注入样式慎用 hash 类名：dsh 各 client 包的 css module 类名随版本漂移；优先用稳定标记
    （role/aria、data-*），例：设置弹窗 tab 列滚动修复即用 role=dialog + nav 结构定位。
+9. webview 会话建立链本机/远程必须同构，勿只改一边：换 cookie（SameSite=Lax 原生种入）→ 服务端
+   验证已落库 → 导航**不带 token 的根路径**。dsh 对带 token 参数的 URL 优先走 token 校验分支，
+   webview 跨站 303 链过不去（浏览器能过）→ cookie 已种入仍 401（#136 终局；navigation/mod.rs 注释）。
+10. 内置运行时的依赖树安装（profile 初始化/迁移、运行时下载）必须一次写齐 pnpm-workspace.yaml 四项：
+   packages:[]（截断向上 workspace 搜索）/ nodeLinker: hoisted（平铺、与内置树同构）/ storeDir
+   （#114 独立 store）/ allowBuilds 白名单（PNPM_ALLOW_BUILDS 单一常量）——pnpm 10+ 以 yaml 为准，
+   .npmrc 的 node-linker/store-dir 在 pnpm 11 被无视（实测落 isolated 布局 + 全局 store）；且内置
+   node 是 sidecar（名 dsh-node），pnpm 生命周期脚本按 `node` 名找解释器，须造垫片目录并前置 PATH
+   （runtime/registry.rs，含单测）。
 
 ## Agent skills
 
@@ -133,3 +148,8 @@ Five canonical triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `
 ### Domain docs
 
 Single-context layout: one optional `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### Project memory
+
+Agent 侧项目记忆即本文件；知识变更审计日志见 `docs/CHANGELOG-MEMORY.md`，共享词汇表见 `CONTEXT.md`；
+设计与审计长文在 `docs/`（`docs/agents/` 为 agent 协作说明）。

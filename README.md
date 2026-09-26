@@ -12,7 +12,7 @@
 
 1. **内置运行时，零前置依赖**：Node sidecar + dsh 依赖树随安装包分发，双击即用；也可随时切换到自己装的外部 `dsh`
 2. **多 profile、多窗口**：每个 profile 独立端口与实例，托盘一键开新窗 / 就地切换；手机访问经 lane 反代跟随焦点窗口
-3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、鲸鱼娘桌宠、下载管理器、插件保险丝
+3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、鲸鱼娘桌宠、下载管理器、侧边栏浏览器 guest 载体（#118）
 4. **国内网络友好**：rustup / cargo / npm / GitHub / NSIS 全套镜像配置与「哨兵」超时判定，Windows 无管理员工具链方案（见 [skill/](skill/) 与 [docs/](docs/)）
 
 ## 安装
@@ -63,7 +63,7 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
 
 - **内置运行时（默认）**：Node 24 sidecar + dsh 依赖树随包分发，经内部 API 代码路径启动（不走 CLI）；也可切换外部 dsh CLI（`DSH_BIN` → PATH → npm 全局）
 - **运行时版本管理**：应用内下载 / 切换 / 卸载 dsh 运行时版本（目录源可配 github / npm）；托盘「运行时版本」子菜单——已装点击即切，未装点击 = 下载→自动切换，全程系统通知反馈；内置版本可直接切回
-- **进程守护**：连接级健康探测（TCP 连不上才判异常），异常自动回启动页重建，自愈 3 次封顶、冷却 60s；复用外部实例/远程只提示不代拉
+- **进程守护**：连接级健康探测（TCP 连不上才判异常），异常自动回启动页重建，自愈 3 次封顶（持续健康 ≥2 分钟才重置计数）；复用外部实例/远程只提示不代拉
 - **单实例 + 窗口状态记忆 + 退出回收**：重复双击聚焦已有窗口；位置大小自动恢复；只回收本次 spawn 的子进程，stdout/stderr 落盘日志
 
 ### 多 profile 与多窗口
@@ -88,8 +88,7 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
 ### 设置与维护
 
 - **设置页区块**：dsh 来源（内置/外部，切换立即接管）· dsh 服务地址（本地/远程）· Profile · Profile 端口 · 迁移 Profile · dsh 运行时（下载/切换/卸载）· 下载 · 代理设置 · **依赖状态** · 手机访问
-- **依赖状态自检与一键重建**：dsh 的插件安装/卸载由内置 pnpm 执行，其 store 大版本必须与 profile 的 `node_modules` 一致；面板列出各 profile 记录的 pnpm / 内置版本 / 是否需重建（运行中禁重建），壳启动时后台检查并自动重建不一致且未运行的 profile
-- **插件保险丝**：隔离名单 / 可修复判定 / 修复 / 失败解读（AI 解读带超时看门狗，不会无限 loading）
+- **依赖状态自检与一键重建**：dsh 的插件安装/卸载由内置 pnpm 执行，其 store 大版本必须与 profile 的 `node_modules` 一致；面板列出各 profile 记录的 pnpm / 内置版本 / 是否需重建（运行中禁重建），壳启动时后台检查，不一致仅弹提示、由用户手动重建（#124 起不再自动重建）
 - **诊断**：webview 控制台镜像到 `$DSH_HOME/dsh-desktop-webview.log`，应用日志在 `~/Library/Logs/com.arcreel.dsh-desktop-tauriapp/`
 
 ## 仓库结构
@@ -152,4 +151,4 @@ xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Relea
 - **桌宠**：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常）；置顶仅 Floating 级、盖不过全屏应用；Cmd+Tab 会出现桌宠条目（`skipTaskbar` 仅 Windows 生效）
 - **未签名分发**：macOS 非公证包需右键打开（`xattr -cr "/Applications/DeepSeek Harness Desktop.app"` 可解）；Windows 网络下载的 exe 触发 SmartScreen
 - **安装包体积**：内置运行时（Node 24 + dsh 依赖树）使 macOS dmg 约 200 MB 量级，Windows msi 约 240 MB
-- **侧边栏浏览器**：dsh 官方按 profile 名开关（仅 `desktop` profile 默认启用）；web profile 需在自己的 `cordis.patch.yml` 里 opt-in，且以 iframe 模式工作。宿主的独立 webview guest 方案见 [#118](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/118)
+- **侧边栏浏览器**：dsh 官方按 profile 名开关（仅 `desktop` profile 默认启用）；web profile 需在自己的 `cordis.patch.yml` 里 opt-in。宿主已实现独立 webview guest 载体（v0.10.0，[#118](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/118)）：侧边栏浏览器改为同窗子 webview，不再受 macOS 上 iframe 导航被守卫取消的影响

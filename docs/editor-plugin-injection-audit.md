@@ -8,6 +8,11 @@
 > lib.rs 注入清单字符串、lib.rs materialize 挂载、lib.rs spawn_dsh 两处 env、
 > tauri.conf.json resources、插件包自身 package.json/cordis.patch.yml/client），
 > 另发现一个**既有打包缺口**：mobile 两包未进 `bundle.resources`（见 §4.2）。
+>
+> **状态：历史快照（锚定 HEAD `ae73dab`）**——文中 `mobile/vendor/dsh-mobile-nav` 路径与
+> `vendor.test.mjs`（1 例）**已不存在**：该上游包已改为 git 子模块 `mobile/dsh-mobile-nav`
+> （包名 `dsh-web-mobile`，测试 `npm run test:core`，191 例，见仓库根 `.gitmodules` 与 `AGENTS.md`）。
+> 下文结论仅代表当时（0.6.x）的仓库形态，引用路径前请先核对当前代码。
 
 ---
 
