@@ -41,8 +41,12 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let port = port_for_profile(&info.name);
         let running = crate::process::lifecycle::port_open(port);
         let id = format!("open-profile-{}", info.name);
-        let text = if running {
-            format!("● {} · {}（点击聚焦）", info.name, port)
+        // ● = 主 worker 当前管理的 profile（主窗正在跑的）；运行中用文字后缀
+        let is_current = info.name == app.state::<DshState>().main_worker.profile();
+        let text = if is_current {
+            format!("● {} · {}（当前）", info.name, port)
+        } else if running {
+            format!("{} · {}（运行中·点击聚焦）", info.name, port)
         } else {
             format!("在新窗口打开 {}", info.name)
         };
@@ -59,7 +63,11 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let port = port_for_profile(&info.name);
         let running = crate::process::lifecycle::port_open(port);
         let id = format!("switch-profile-{}", info.name);
-        let text = if running {
+        // ● = 主 worker 当前管理的 profile（主窗正在跑的）；运行中用文字后缀
+        let is_current = info.name == app.state::<DshState>().main_worker.profile();
+        let text = if is_current {
+            format!("● {} · {}（当前）", info.name, port)
+        } else if running {
             format!("{} · {}（运行中）", info.name, port)
         } else {
             format!("{} · {}", info.name, port)

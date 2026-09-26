@@ -87,7 +87,9 @@ pub(crate) fn extract_token_from_url(input: &str) -> Option<String> {
 pub(crate) fn select_remote(app: &AppHandle, addr: Option<String>) {
     let mut settings = load_desktop_settings();
     settings.remote_addr = addr;
-    // #90 架构约束：Rust 不写 settings.yaml——持久化由 client→插件→dsh settings 服务承担
+    // 持久化（#95 起 Rust 是壳私有 desktop-settings.json 的唯一写者）：托盘路径
+    // 此前只改内存，restart 重新读盘时远程地址原样返回，切换永远不生效
+    let _ = crate::settings::save_desktop_settings(&settings);
     if let Some(a) = settings.remote_addr.as_deref() {
         let host = remote_host_port(a).split(':').next().unwrap_or(a).to_string();
         let mut list = INTERNAL_HOSTS.lock().unwrap();
@@ -122,7 +124,7 @@ pub(crate) fn add_remote_flow(app: &AppHandle) {
         if !settings.remote_list.contains(&addr) {
             settings.remote_list.push(addr.clone());
         }
-        // #90：持久化由 client→插件→dsh settings 服务承担
+        let _ = crate::settings::save_desktop_settings(&settings);
         log::info!("[tray] 新增远程 dsh 地址：{}（未切换，请在菜单中手动选择）", remote_display(&addr));
         refresh_tray_mode(&handle);
     });
@@ -135,7 +137,7 @@ pub(crate) fn remove_remote_flow(app: &AppHandle, addr: &str) {
     if settings.remote_addr.as_deref() == Some(addr) {
         settings.remote_addr = None;
     }
-    // #90：持久化由 client→插件→dsh settings 服务承担
+    let _ = crate::settings::save_desktop_settings(&settings);
     log::info!("[tray] 删除远程 dsh 地址：{}", remote_display(addr));
     refresh_tray_mode(app);
 }
@@ -163,7 +165,7 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
             .profile_ports
             .get_or_insert_with(Default::default)
             .insert("web".to_string(), port);
-        // #90：持久化由 client→插件→dsh settings 服务承担
+        let _ = crate::settings::save_desktop_settings(&settings);
         log::info!("[tray] 本地端口 -> {port}");
         if settings.remote_addr.is_some() {
             show_notification(&handle, "端口已保存", &format!("{port} 将在本地模式生效"));
@@ -317,20 +319,10 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
         .and_then(|u| u.port_or_known_default())
         .or_else(|| host_port.rsplit(':').next()?.parse::<u16>().ok())
         .unwrap_or(80);
-    if let Some(token) = extract_token_from_url(addr) {
-        match exchange_token_for_cookie(&host_port, &token) {
-            Some((name, value)) => {
-                seed_session_cookie(app, &host, port, &name, &value);
-            }
-            None => {
-                log::warn!("[remote] token 换会话 cookie 未成功，照常导航（dsh 将自行展示鉴权页）")
-            }
-        }
-    }
     {
         let mut list = INTERNAL_HOSTS.lock().unwrap();
         if !list.contains(&host) {
-            list.push(host);
+            list.push(host.clone());
         }
     }
     if advanced && !remote_has_plugin(addr) {
@@ -346,12 +338,33 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     } else {
         format!("http://{addr}/")
     };
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.eval(&format!("window.location.replace({url:?});"));
-    }
-    log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
-    set_status(app, STATUS_READY, &format!("远程 {}", remote_display(addr)));
-    app.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+    // #136 二轮反馈：seed 写 WKHTTPCookieStore 是异步落库——种完立即导航，
+    // 请求先于 cookie 落库发出仍 401（隔离验收只见「种入成功」日志，实机仍 401
+    // 即此）。整段放后台：换 cookie（最长 5s）→ 种入 → 等落库（400ms）→ 导航。
+    let handle = app.clone();
+    let host_port2 = host_port;
+    let host2 = host;
+    let addr2 = addr.to_string();
+    tauri::async_runtime::spawn(async move {
+        if let Some(token) = extract_token_from_url(&addr2) {
+            match exchange_token_for_cookie(&host_port2, &token) {
+                Some((name, value)) => {
+                    seed_session_cookie(&handle, &host2, port, &name, &value);
+                    // WKHTTPCookieStore setCookie 异步落库：给足时间再导航
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                None => {
+                    log::warn!("[remote] token 换会话 cookie 未成功，照常导航（dsh 将自行展示鉴权页）")
+                }
+            }
+        }
+        if let Some(w) = handle.get_webview_window("main") {
+            let _ = w.eval(&format!("window.location.replace({url:?});"));
+        }
+        log::info!("已导航到远程 dsh：{}（{}）", remote_display(&url), url);
+        set_status(&handle, STATUS_READY, &format!("远程 {}", remote_display(&addr2)));
+        handle.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
+    });
 }
 
 /// 「dsh 服务地址」子菜单条目（纯函数便于单测）：首项固定「本地」，
