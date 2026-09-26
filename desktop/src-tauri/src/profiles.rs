@@ -589,11 +589,13 @@ fn pnpm_cjs_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
 }
 
 /// 写 shim 脚本（unix `#!/bin/sh` / windows `.cmd`）：幂等 + 可执行位。
+/// unix 分支用 unix_body，windows 分支用 win_body；非当前平台的那份由 allow 静默
+#[allow(unused_variables)]
 fn write_shim(
     dir: &std::path::Path,
     name: &str,
     unix_body: &str,
-    _win_body: &str,
+    win_body: &str,
 ) -> Option<()> {
     let file = if cfg!(windows) {
         format!("{name}.cmd")
