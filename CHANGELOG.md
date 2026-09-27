@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **手机访问：远程端完整访问回归（#145）**：远程端（隧道/局域网）拿不到 dsh 服务端设置、插件设置与壳的「手机访问」信息，根因**不是反代通道不通**，而是 dsh 0.1.7 客户端按**页面 hostname** 判 loopback 特权（`isLoopback = transport?.ownsHost === true || 无 location || hostname ∈ 127/localhost/[::1]`）——经隧道访问被判「远程浏览器」→ 服务端设置类 RPC 压根不发起；lane 早年用来伪装的 `LOOPBACK_HOSTNAME_PATCH`（改 `Location.prototype.hostname`）被浏览器禁止伪造，早已是死代码。修复：①改用官方能力位——已配对响应注入 `globalThis.__DSH_TRANSPORT__ = { ownsHost: true }`（新 `OWNS_HOST_PATCH`；客户端无 rpc/fetch/openStream 时回落默认 HTTP+WS 载体，请求仍全部经 lane），远程端 `ctx.connection.isLoopback` 为真→设置面可读可写；②权限收敛为**两级**：已配对设备＝完整访问（mint/tunnel/probe/cloudflared/remove/stop 不再限属主），属主判定只免除 cookie 要求；③lane 自有控制面迁入**保留命名空间** `/__dsh-mobile`（新模块 `lib/lane-routes.mjs` 是路由表唯一事实源；`/pair`、`/api/pair/*` 为冻结别名，已发出的二维码继续可用），命名空间外一切请求（含 dsh 自有路径与 **OPTIONS 预检**）原样透传、lane 绝不代答；④设置页「远程访问」面板在远程/手机上改走同源命名空间（原先无条件打 `127.0.0.1:lanePort`，在手机上打的是手机自己、必然失败）。测试：mobile-access `npm test` **60 全绿**（新增 lane 路由契约 5 例 + 完整访问与透传不变式 2 例）；游标：实机（iPad/鸿蒙）验证待做
+
 ## 已发布
 
 ### v0.10.0（2026-09-26）

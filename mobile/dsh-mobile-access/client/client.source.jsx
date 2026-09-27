@@ -38,11 +38,19 @@ export function apply(ctx) {
 }
 
 const lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
-const LANE = "http://127.0.0.1:" + lanePort;
+/** lane 控制面的保留命名空间（与 lib/lane-routes.mjs 的 LANE_PREFIX 同值）。 */
+const LANE_PREFIX = "/__dsh-mobile";
+/** 页面自身是否就在回环源上（桌面壳内的设置页）；远程/手机端一律走同源。 */
+const LANE_LOOPBACK =
+  typeof location !== "undefined" &&
+  /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+/** 回环页直连属主 lane 端口；远程页走同源（页面本身就由 lane 提供）。
+ *  旧实现无条件打 127.0.0.1:lanePort——在手机上那是手机自己，必然失败（#145）。 */
+const LANE = LANE_LOOPBACK ? "http://127.0.0.1:" + lanePort : "";
 
-/** lane 属主通道直 fetch。CORS 由 lane 端按 Origin 反射放行（仅放行回环源）。 */
+/** lane 控制面直 fetch（保留命名空间）。回环页 CORS 由 lane 按 Origin 反射放行；远程页同源无 CORS。 */
 async function lane(path, opts = {}) {
-  const res = await fetch(LANE + path, {
+  const res = await fetch(LANE + LANE_PREFIX + path, {
     method: opts.method ?? "GET",
     headers: { "content-type": "application/json" },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -417,7 +425,7 @@ function MobileAccessPanel() {
 
   // ---- helpers ----
   const pairLink = (base, scheme, token) =>
-    scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
+    scheme + "://" + base + LANE_PREFIX + "/pair?token=" + encodeURIComponent(token);
 
   /** 铸造一次性配对链接：mint → 写 link/hint；失败写 hint。 */
   const mintFor = async (base, scheme, setLink, setHint) => {

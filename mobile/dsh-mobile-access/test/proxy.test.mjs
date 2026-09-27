@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createRewriteProxy, POLYFILL, desktopEnvPatchScript } from '../lib/proxy.mjs';
+import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, desktopEnvPatchScript } from '../lib/proxy.mjs';
+import { lanePath } from '../lib/lane-routes.mjs';
 
 function startUpstream() {
   const sockets = new Set();
@@ -92,6 +93,12 @@ test('注入脚本产物', () => {
   const p = desktopEnvPatchScript('darwin');
   assert.ok(p.includes('dsh-desktop-mode'));
   assert.ok(p.includes('darwin'));
+  // #145：远程端能力位补丁取代了失效的 hostname 伪装补丁
+  assert.ok(OWNS_HOST_PATCH.includes('data-dsh-mobile-owns-host'));
+  assert.ok(OWNS_HOST_PATCH.includes('__DSH_TRANSPORT__'));
+  assert.ok(OWNS_HOST_PATCH.includes('ownsHost:true'));
+  assert.ok(!OWNS_HOST_PATCH.includes('Location.prototype'), '不再伪造浏览器内建对象');
+  assert.ok(THEME_SYNC_PATCH.includes(lanePath('/api/pair/info')), '主题兜底读保留命名空间端点');
 });
 
 test('压缩 HTML：跳过注入并触发 onInjectSkip 告警（不静默）', async () => {

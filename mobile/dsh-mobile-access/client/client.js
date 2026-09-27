@@ -1699,9 +1699,11 @@ function apply(ctx) {
   );
 }
 var lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
-var LANE = "http://127.0.0.1:" + lanePort;
+var LANE_PREFIX = "/__dsh-mobile";
+var LANE_LOOPBACK = typeof location !== "undefined" && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+var LANE = LANE_LOOPBACK ? "http://127.0.0.1:" + lanePort : "";
 async function lane(path, opts = {}) {
-  const res = await fetch(LANE + path, {
+  const res = await fetch(LANE + LANE_PREFIX + path, {
     method: opts.method ?? "GET",
     headers: { "content-type": "application/json" },
     body: opts.body ? JSON.stringify(opts.body) : void 0
@@ -2012,7 +2014,7 @@ function MobileAccessPanel() {
   const lanQr = (0, import_react.useMemo)(() => makeQr(lanLink), [lanLink]);
   const tunQr = (0, import_react.useMemo)(() => makeQr(tunLink), [tunLink]);
   const cfQr = (0, import_react.useMemo)(() => makeQr(cfLink), [cfLink]);
-  const pairLink = (base, scheme, token) => scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
+  const pairLink = (base, scheme, token) => scheme + "://" + base + LANE_PREFIX + "/pair?token=" + encodeURIComponent(token);
   const mintFor = async (base, scheme, setLink, setHint) => {
     try {
       const r = await lane("/api/pair/mint", { method: "POST", body: {} });

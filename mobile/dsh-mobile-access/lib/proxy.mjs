@@ -25,29 +25,29 @@ function accessLog(parts) {
 export const POLYFILL = '<script data-dsh-mobile-polyfill="1">!function(){if(self.crypto&&!self.crypto.randomUUID){self.crypto.randomUUID=function(){var b=new Uint8Array(16);self.crypto.getRandomValues(b);b[6]=b[6]&15|64;b[8]=b[8]&63|128;var h="";for(var i=0;i<16;i++){var x=b[i].toString(16);h+=(x.length<2?"0":"")+x;if(i===3||i===5||i===7||i===9)h+="-";}return h;}}}();</script>';
 
 /**
- * 远程浏览器「本地身份」补丁：dsh-client-connection 的 `isLoopback` 只看
- * `location.hostname`（127.x/localhost/[::1]），远程经隧道访问的 hostname 是
- * cpolar/cloudflared 域名 → isLoopback=false → settingsScope 走 memory 模式
- * （注释原文：「remote browsers stay process-local because settings RPCs are
- * loopback-only」）→ ui-theme/locale 等所有服务端设置 fallback 默认（主题变
- * 「跟随系统」）。本补丁把 Location.prototype.hostname 的读取伪装成 127.0.0.1，
- * 抢在 dsh client bundles 之前执行（HS 注入位置在 <head> 最前）。
- * 副作用：settings.describe 等 RPC 在远程端启用（经 lane 配对 cookie 放行），
- * 远程端能读到 Host 的服务端设置——这正是「远程跟随桌面设置」的需求。
- * 注意不伪装 href/origin：dsh 的 /api 信任栅栏走 Host 头（lane 已改写），
- * 且页面相对 URL 仍按真实域名解析（cpolar → lane 路径不变）。
+ * 远程端「页面拥有 Host」能力位（#145）：dsh 客户端把**非 loopback 页面**当远程浏览器，
+ * 特权面（服务端设置 RPC）不开放 → 插件设置、dsh 服务端设置、壳的手机访问信息一律拿不到。
+ * 判定原文（dsh-client-connection）：
+ *   isLoopback = transport?.ownsHost === true || 无 location || hostname ∈ loopback
+ * 浏览器禁止伪造 `location.hostname`（历史 LOOPBACK_HOSTNAME_PATCH 因此失效，已删除），
+ * 但官方留了能力位 `ClientTransportHooks.ownsHost`：声明页面拥有 Host，
+ * `ctx.connection.isLoopback` 即无视页面 authority 一律为真。只给该字段即可——客户端在没有
+ * rpc/fetch/openStream 时回落默认 HTTP + WebSocket 载体
+ * （`rpc ?? createWebConnectionRpc(fetch, openStream)`），请求仍全部经 lane 反代。
+ * 顺序：必须早于 dsh 客户端 bundle 执行（<head> 最前注入）。注入仅发生在已配对响应上
+ * （反代门禁先于注入）。
  */
-export const LOOPBACK_HOSTNAME_PATCH = '<script data-dsh-mobile-loopback="1">!function(){try{var d=Object.getOwnPropertyDescriptor(Location.prototype,"hostname");if(d&&typeof d.get==="function"){Object.defineProperty(Location.prototype,"hostname",{get:function(){return "127.0.0.1"},configurable:true});}}catch(e){}}();</script>';
+export const OWNS_HOST_PATCH = '<script data-dsh-mobile-owns-host="1">!function(){try{var g=globalThis,t=g.__DSH_TRANSPORT__;if(t&&typeof t==="object"){t.ownsHost=true;}else{g.__DSH_TRANSPORT__={ownsHost:true};}}catch(e){}}();</script>';
 
 /**
  * 远程端主题视觉同步：dsh 官方在非 loopback 客户端把 settingsScope 锁成 memory
  * 模式（settings.describe 不发起），ui-theme preference 永远 "system" → body 无
  * `data-ds-dark-theme` → 皮肤 CSS 走浅色背景（§2.2 主题透传）。本补丁从 lane 的
- * `/api/pair/info`（已配对即放行）读桌面端 ui-theme.preference，强制 body 属性，
+ * 保留命名空间端点（`/__dsh-mobile/api/pair/info`，已配对即放行）读桌面端 ui-theme.preference，强制 body 属性，
  * 并用 MutationObserver 守卫（ui-theme publish / React 重渲染可能清掉该属性）。
  * 设置页选项值仍显示 system（官方 memory 模式限制，UI 显示层被锁死，无法注入改）。
  */
-export const THEME_SYNC_PATCH = '<script data-dsh-mobile-theme-sync="1">!function(){var pref=null;function enforce(){try{var b=document.body;if(!b)return;var want=pref==="dark";var has=b.hasAttribute("data-ds-dark-theme");if(want!==has){if(want)b.setAttribute("data-ds-dark-theme","");else b.removeAttribute("data-ds-dark-theme");}}catch(e){}}function load(){fetch("/api/pair/info",{headers:{"accept":"application/json"}}).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t)});return r.json()}).then(function(d){var v=d&&d.uiTheme;if(typeof v==="string"&&(v==="dark"||v==="light"||v==="system")){pref=v;enforce();}}).catch(function(){})}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",load)}else{load()}try{var mo=new MutationObserver(function(){enforce()});if(document.body)mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});else{var mo2=new MutationObserver(function(){if(document.body){mo2.disconnect();mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});enforce();}});mo2.observe(document.documentElement,{childList:true});}}catch(e){}}();</script>';
+export const THEME_SYNC_PATCH = '<script data-dsh-mobile-theme-sync="1">!function(){var pref=null;function enforce(){try{var b=document.body;if(!b)return;var want=pref==="dark";var has=b.hasAttribute("data-ds-dark-theme");if(want!==has){if(want)b.setAttribute("data-ds-dark-theme","");else b.removeAttribute("data-ds-dark-theme");}}catch(e){}}function load(){fetch("/__dsh-mobile/api/pair/info",{headers:{"accept":"application/json"}}).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t)});return r.json()}).then(function(d){var v=d&&d.uiTheme;if(typeof v==="string"&&(v==="dark"||v==="light"||v==="system")){pref=v;enforce();}}).catch(function(){})}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",load)}else{load()}try{var mo=new MutationObserver(function(){enforce()});if(document.body)mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});else{var mo2=new MutationObserver(function(){if(document.body){mo2.disconnect();mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});enforce();}});mo2.observe(document.documentElement,{childList:true});}}catch(e){}}();</script>';
 
 export function desktopEnvPatchScript(platform) {
   const p = ['darwin','win32','linux'].includes(platform) ? platform : 'linux';

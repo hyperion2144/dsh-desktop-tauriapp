@@ -82,9 +82,15 @@
 
 ## 手机访问（mobile）关键契约
 
-- 三种访问身份：属主（同机 loopback 直连 lane、无 X-Forwarded-For）＝控制端点
-  （mint/devices/stop/events/probe）放行；已配对设备（隧道 + 会话 cookie）＝代理全量；
-  匿名（隧道）= 仅 /pair 与 /api/pair/accept。反代 auth 无路径前缀豁免（防归一化绕过）。
+- 两级访问（#145）：已配对设备（隧道/局域网 + 会话 cookie）＝**完整访问**——dsh 端口一切请求透传，
+  lane 自有控制端点（配对/设备/隧道/事件）读写全放行；匿名（隧道）= 仅配对入口。属主（同机 loopback、
+  无 X-Forwarded-For）只是「免 cookie 的便利判定」，不再多一级权限。反代 auth 无路径前缀豁免（防归一化绕过）。
+- lane 自有路由住在保留命名空间 `/__dsh-mobile`（`mobile/dsh-mobile-access/lib/lane-routes.mjs` 是唯一事实源）；
+  `/pair`、`/api/pair/*` 是**冻结别名**（只为已发出的二维码与旧客户端存活，不得新增）。命名空间外的一切
+  路径（含 dsh 自有路由与 OPTIONS 预检）原样透传，lane 绝不代答——透传不变式由单测锁死。
+- 远程端能力位：已配对响应注入 `globalThis.__DSH_TRANSPORT__ = { ownsHost: true }`（dsh 客户端 isLoopback
+  判定的官方出口）→ 服务端设置 RPC 解锁，插件设置/dsh 设置/壳的手机访问信息可读可写；旧的 hostname
+  伪装补丁（浏览器禁止伪造 location.hostname）已删除。
 - lane 改写反代默认 127.0.0.1:3091（settings.yaml dsh-desktop-tauriapp: lane_port，env
   DSH_MOBILE_LANE_PORT 优先）；桌面 spawn dsh 时注入 DSH_MOBILE_LANE_PORT /
   DSH_MOBILE_ENABLED / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN。
@@ -95,7 +101,7 @@
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
   → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
- - 测试：mobile-access `npm test`（node 53 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、
+  - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 3 例、
    dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 8 例）；cargo test 94 例；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
