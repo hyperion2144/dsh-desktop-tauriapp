@@ -249,6 +249,12 @@
           "markdownDescription": "允许加载页切换兼容/高级接入模式"
         },
         {
+          "description": "通知（#142）：系统文件选择器挑选音频文件",
+          "type": "string",
+          "const": "allow-choose-notification-sound",
+          "markdownDescription": "通知（#142）：系统文件选择器挑选音频文件"
+        },
+        {
           "description": "下载管理器：清空已完成任务记录",
           "type": "string",
           "const": "allow-clear-finished-downloads",
@@ -315,6 +321,12 @@
           "markdownDescription": "允许加载页轮询模式选择提示状态"
         },
         {
+          "description": "通知（#142）：设置 tab 拉取权限状态 + 配置 + 场景表",
+          "type": "string",
+          "const": "allow-get-notifications-state",
+          "markdownDescription": "通知（#142）：设置 tab 拉取权限状态 + 配置 + 场景表"
+        },
+        {
           "description": "dsh 启动后取回启动时选择的 profile，前端通过 nsSave 持久化",
           "type": "string",
           "const": "allow-get-pending-active-profile",
@@ -325,6 +337,12 @@
           "type": "string",
           "const": "allow-get-proxy-settings",
           "markdownDescription": "允许查询代理设置与当前生效预览（设置表单回显）"
+        },
+        {
+          "description": "通知（#142）：导入自定义音效（校验 + 复制进 sounds/）",
+          "type": "string",
+          "const": "allow-import-notification-sound",
+          "markdownDescription": "通知（#142）：导入自定义音效（校验 + 复制进 sounds/）"
         },
         {
           "description": "下载管理器：读取任务列表快照",
@@ -411,6 +429,12 @@
           "markdownDescription": "允许桌宠切换鼠标穿透"
         },
         {
+          "description": "通知（#142）：试听音效",
+          "type": "string",
+          "const": "allow-preview-notification-sound",
+          "markdownDescription": "通知（#142）：试听音效"
+        },
+        {
           "description": "依赖状态（#122）：用内置 pnpm 重建某 profile 的依赖（迁移 store 大版本）；运行中的 profile 会被拒绝",
           "type": "string",
           "const": "allow-rebuild-profile-dependencies",
@@ -427,6 +451,12 @@
           "type": "string",
           "const": "allow-remove-runtime",
           "markdownDescription": "桌面设置面板：删除已下载的 dsh 运行时（#95）"
+        },
+        {
+          "description": "通知（#142）：申请系统通知权限（macOS UN 授权窗）",
+          "type": "string",
+          "const": "allow-request-notification-permission-cmd",
+          "markdownDescription": "通知（#142）：申请系统通知权限（macOS UN 授权窗）"
         },
         {
           "description": "允许请求重启 dsh 服务（状态标识点击）",
@@ -493,6 +523,12 @@
           "type": "string",
           "const": "allow-set-local-port",
           "markdownDescription": "桌面设置面板：set_local_port"
+        },
+        {
+          "description": "通知（#142）：保存 notifications 配置",
+          "type": "string",
+          "const": "allow-set-notifications-config",
+          "markdownDescription": "通知（#142）：保存 notifications 配置"
         },
         {
           "description": "桌面设置面板：set_profile_port（#90）",

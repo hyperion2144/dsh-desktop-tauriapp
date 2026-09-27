@@ -389,6 +389,14 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
+    // dsh 原生事件桥（#142）：把通知口交给宿主事件脚本（session/event → /notify）；
+    // 通知服务器未启动（port=0）时不注入，宿主脚本自行降级。
+    let nport = app.state::<crate::runtime::state::DshState>().notify_port.load(std::sync::atomic::Ordering::SeqCst);
+    let ntoken = app.state::<crate::runtime::state::DshState>().notify_token.lock().unwrap().clone();
+    if nport > 0 && !ntoken.is_empty() {
+        cmd.env("DSH_DESKTOP_NOTIFY_PORT", nport.to_string())
+            .env("DSH_DESKTOP_NOTIFY_TOKEN", ntoken);
+    }
     let cloudflared = configured_cloudflared_bin();
     if !cloudflared.is_empty() {
         cmd.env("DSH_CLOUDFLARED_BIN", cloudflared);

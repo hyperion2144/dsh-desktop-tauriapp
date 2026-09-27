@@ -60,6 +60,9 @@ use commands::{
     get_proxy_settings, save_proxy_settings, test_proxy_connectivity,
     ui_input_confirm, choose_desktop_mode,
     save_desktop_settings, get_desktop_settings_data, add_remote_address, remove_remote_address,
+    get_notifications_state, set_notifications_config, request_notification_permission_cmd,
+    import_notification_sound, preview_notification_sound,
+    choose_notification_sound,
     list_profile_dependency_status, rebuild_profile_dependencies,
     select_remote_address, set_local_port, switch_profile_command,
     confirm_startup_profile,
@@ -161,6 +164,12 @@ pub fn run() {
             test_proxy_connectivity,
             save_desktop_settings,
             get_desktop_settings_data,
+            get_notifications_state,
+            set_notifications_config,
+            request_notification_permission_cmd,
+            import_notification_sound,
+            choose_notification_sound,
+            preview_notification_sound,
             add_remote_address,
             remove_remote_address,
             select_remote_address,
@@ -255,6 +264,7 @@ pub fn run() {
                             };
                             crate::network::notify::show_notification(
                                 &bg,
+                                 crate::network::notify_policy::scenario::RUNTIME_DOWNLOAD,
                                 "依赖需重建",
                                 &format!(
                                     "{} 的依赖由 pnpm {recorded} 安装（内置 {builtin}），如遇插件安装报错请在设置页「依赖状态」手动重建。",
@@ -393,6 +403,7 @@ pub fn run() {
                     if fresh_install && profile == settings::FRESH_DEFAULT_PROFILE {
                         show_notification(
                             app.handle(),
+                             crate::network::notify_policy::scenario::CONFIG_INFO,
                             "全新安装 · 默认使用 desktop profile",
                             "启动端口 3081；托盘菜单「切换 Profile」可回到 web@3080",
                         );
@@ -420,7 +431,7 @@ pub fn run() {
                         "端口 {port} 被其他实例或程序占用（profile={profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试"
                     );
                     log::error!("{detail}");
-                    show_notification(app.handle(), "DeepSeek Harness Desktop · 启动受阻", &detail);
+                     show_notification(app.handle(), crate::network::notify_policy::scenario::STARTUP_ERROR, "DeepSeek Harness Desktop · 启动受阻", &detail);
                     show_error(app.handle(), "spawn-failed");
                 }
             }
@@ -497,7 +508,7 @@ pub fn run() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(6)).await;
-                    notify_completed(&handle, "这是测试通知：任务完成链路验证");
+                    notify_completed(&handle, crate::network::notify_policy::scenario::TASK_COMPLETE, "这是测试通知：任务完成链路验证");
                 });
             }
             // 守护器：周期探测 dsh 服务。判定规则（防误杀/防抖动循环）：
@@ -546,7 +557,7 @@ pub fn run() {
                         if settings.remote_addr.is_some() {
                             if Instant::now() - last_notify >= Duration::from_secs(300) {
                                 last_notify = Instant::now();
-                                show_notification(&handle, "远程 dsh 不可达", &format!("{verbose}"));
+                                 show_notification(&handle, crate::network::notify_policy::scenario::SERVICE_HEALTH, "远程 dsh 不可达", &format!("{verbose}"));
                             }
                             continue;
                         }
@@ -556,7 +567,7 @@ pub fn run() {
                             if Instant::now() - last_notify >= Duration::from_secs(300) {
                                 last_notify = Instant::now();
                                 log::warn!("[watchdog] 外部 dsh 实例不可达（{verbose}），未自动重启");
-                                show_notification(&handle, "dsh 服务不可达", "复用的外部 dsh 实例已停止，请手动重启服务");
+                                 show_notification(&handle, crate::network::notify_policy::scenario::SERVICE_HEALTH, "dsh 服务不可达", "复用的外部 dsh 实例已停止，请手动重启服务");
                             }
                             continue;
                         }
@@ -566,11 +577,11 @@ pub fn run() {
                         if epoch_failures >= 3 {
                             log::error!("[watchdog] 连续自动恢复失败 3 次，停止自愈");
                             set_status(&handle, STATUS_STARTING, "异常（已停止自愈，请手动重启）");
-                            show_notification(&handle, "dsh 服务异常", "连续自动恢复失败，请手动重启");
+                             show_notification(&handle, crate::network::notify_policy::scenario::SERVICE_HEALTH, "dsh 服务异常", "连续自动恢复失败，请手动重启");
                             continue;
                         }
                         log::warn!("[watchdog] dsh 不可达（{verbose}），自动重启（第 {epoch_failures} 次）");
-                        show_notification(&handle, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
+                         show_notification(&handle, crate::network::notify_policy::scenario::SERVICE_HEALTH, "dsh 服务异常", &format!("服务异常，正在自动重启（第 {epoch_failures} 次）"));
                         let advanced = state.mode.load(Ordering::SeqCst) == crate::runtime::state::MODE_ADVANCED;
                         state.main_worker.request_start(&handle, advanced);
                     }
@@ -647,6 +658,7 @@ pub fn run() {
                         if !state.tray_tip_shown.swap(true, Ordering::SeqCst) {
                             show_notification(
                                 window.app_handle(),
+                                 crate::network::notify_policy::scenario::WINDOW_LIFECYCLE,
                                 "DeepSeek Harness Desktop 仍在运行",
                                 "窗口已隐藏到菜单栏托盘，点击托盘图标可重新打开；托盘菜单可退出。",
                             );

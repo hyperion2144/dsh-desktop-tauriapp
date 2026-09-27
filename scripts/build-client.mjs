@@ -37,7 +37,5 @@ const result = await build({
   footer: {
     js: 'return module.exports;\n  }\n});\n',
   },
-  logLevel: 'info',
 })
-
 if (result.errors.length > 0) process.exit(1)

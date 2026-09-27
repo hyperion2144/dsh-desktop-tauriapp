@@ -12,6 +12,58 @@ use std::path::PathBuf;
 /// 壳设置彻底搬出 dsh 体系——壳是注入式插件，脱离壳后这些设置不应污染 dsh。
 /// 首次启动从旧 settings.yaml 的 dsh-desktop-tauriapp: 块一次性迁移（不碰该文件）。
 /// Rust 单写者：读 + 写都归壳；client 经 Tauri IPC（save_desktop_settings）。
+
+/// 通知场景配置（#142/T3）：单场景开关 + 音效档。
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct NotificationScenarioConfig {
+    pub enabled: bool,
+    /// "default" | "none" | "custom:<sounds 目录下文件名>"
+    pub sound: String,
+}
+
+impl Default for NotificationScenarioConfig {
+    fn default() -> Self {
+        Self { enabled: true, sound: "default".to_string() }
+    }
+}
+
+/// 免打扰（#142/T3）：时段（支持跨午夜）+ 全屏静默。
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+#[serde(default)]
+pub struct NotificationDndConfig {
+    pub on: bool,
+    pub from: String,
+    pub to: String,
+    pub suppress_fullscreen: bool,
+}
+
+impl Default for NotificationDndConfig {
+    fn default() -> Self {
+        Self { on: false, from: "22:00".to_string(), to: "08:00".to_string(), suppress_fullscreen: true }
+    }
+}
+
+/// 通知总配置（desktop-settings.json 的 `notifications` 对象；T3 schema）。
+/// serde default 向后兼容：旧配置无此对象时全场景按 T3 默认值。
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    pub enabled: bool,
+    pub dnd: NotificationDndConfig,
+    pub scenarios: std::collections::BTreeMap<String, NotificationScenarioConfig>,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dnd: NotificationDndConfig::default(),
+            scenarios: crate::network::notify_policy::default_scenarios_map(),
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct DesktopSettings {
@@ -66,6 +118,9 @@ pub struct DesktopSettings {
     /// WS pong 判死超时 ms（lane 读，默认 10000）。
     #[serde(default)]
     pub ws_pong_timeout_ms: Option<u64>,
+    /// 通知配置（#142）：总开关 / 免打扰 / 12 场景开关与音效。
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 /// 壳私有设置文件（#95 v0.1.7 搬出 dsh settings.yaml；收尾修正正位）：
@@ -416,6 +471,11 @@ mod tests {
       tunnel_url: Some("https://t.example.com".into()),
       ws_keepalive_ms: Some(15000),
       ws_pong_timeout_ms: Some(10000),
+      notifications: NotificationsConfig {
+        enabled: true,
+        dnd: NotificationDndConfig::default(),
+        scenarios: crate::network::notify_policy::default_scenarios_map(),
+      },
     };
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();

@@ -44,8 +44,10 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "blo
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tar = "0.4"
+# #142 音效（T5/ADR-0001）：自定义音应用侧播放；精确 pin（默认全量含 symphonia-aac/flac/recording 达 +2.08MB，裁掉后 +1.68MB）
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav", "mp3", "vorbis"] }
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation"] }
 # #118 浏览器 guest：WebView2 COM 历史读控（GoBack/GoForward/CanGoBack/CanGoForward）
 webview2-com = "0.38"
 windows-core = "0.61"
@@ -53,3 +55,5 @@ windows-core = "0.61"
 [target.'cfg(target_os = "macos")'.dependencies]
 # #118 浏览器 guest：WKWebView 历史读控（msg_send goBack/goForward/canGoBack/canGoForward）
 objc2 = "0.6"
+# #142 通知：macOS 直连 UNUserNotificationCenter（插件桌面端权限 API 是桩、投递走已废弃 legacy，见 #130）
+mac-usernotifications = "0.3"

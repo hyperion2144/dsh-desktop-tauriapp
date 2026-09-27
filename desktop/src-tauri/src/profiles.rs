@@ -236,7 +236,7 @@ pub(crate) fn repair_profile(app: &tauri::AppHandle, name: &str) -> Result<Strin
 /// 切换 profile：写 settings 后走统一重启流程（spawn 时按新 profile 拉起）。
 pub(crate) fn switch_profile(app: &AppHandle, name: &str) {
     if !valid_profile_name(name) {
-        show_notification(app, "切换 Profile 失败", "名称不合法");
+         show_notification(app, crate::network::notify_policy::scenario::PROFILE_ERROR, "切换 Profile 失败", "名称不合法");
         return;
     }
     let mut settings = load_desktop_settings();
@@ -803,7 +803,7 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
         if !valid_profile_name(&name) {
             let msg = "名称仅允许字母、数字、_ 与 -（1-32 字符）";
             crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
-            show_notification(&handle, "新建 Profile 失败", &msg);
+             show_notification(&handle, crate::network::notify_policy::scenario::PROFILE_ERROR, "新建 Profile 失败", &msg);
             return;
         }
         // 完整性检查：已存在且完整 → 拦截；不完整 → 修复；不存在 → 创建
@@ -811,7 +811,7 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
         if health.dir_exists && health.missing_files.is_empty() && health.node_modules_exists {
             let msg = format!("{name} 已存在");
             crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
-            show_notification(&handle, "新建 Profile 失败", &msg);
+             show_notification(&handle, crate::network::notify_policy::scenario::PROFILE_ERROR, "新建 Profile 失败", &msg);
             return;
         }
         let name_for_cmd = name.clone();
@@ -832,14 +832,14 @@ pub(crate) fn create_profile_flow(app: &AppHandle) {
                 log::info!("[tray] 新建 profile 成功：{name}");
                 task_finish(Ok(msg.clone()));
                 crate::commands::show_page_message(&handle, "新建 Profile 成功", &msg);
-                show_notification(&handle, "新建 Profile 成功", &msg);
+                 show_notification(&handle, crate::network::notify_policy::scenario::PROFILE_OP, "新建 Profile 成功", &msg);
             }
             Some(detail) => {
                 log::error!("[tray] 新建 profile 失败：{detail}");
                 task_finish(Err(detail.clone()));
                 let msg = format!("{detail}");
                 crate::commands::show_page_message(&handle, "新建 Profile 失败", &msg);
-                show_notification(&handle, "新建 Profile 失败", &detail);
+                 show_notification(&handle, crate::network::notify_policy::scenario::PROFILE_ERROR, "新建 Profile 失败", &detail);
             }
         }
         refresh_tray_mode(&handle);
@@ -1209,7 +1209,7 @@ async fn migrate_profile_inner(
             .unwrap_or_default()
     );
     log::info!("[migrate] {summary}");
-    show_notification(app, "Profile 迁移完成", &summary);
+     show_notification(app, crate::network::notify_policy::scenario::PROFILE_OP, "Profile 迁移完成", &summary);
     Ok(summary)
 }
 
@@ -1245,13 +1245,13 @@ pub(crate) fn migrate_profile_flow(app: &AppHandle) {
                 return;
             };
             if yes.trim() != "YES" {
-                show_notification(&handle, "迁移已取消", "未确认覆盖");
+                 show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_INFO, "迁移已取消", "未确认覆盖");
                 return;
             }
             overwrite = true;
         }
         if let Err(e) = migrate_profile(&handle, source, dest, overwrite).await {
-            show_notification(&handle, "迁移失败", &e);
+             show_notification(&handle, crate::network::notify_policy::scenario::PROFILE_ERROR, "迁移失败", &e);
         }
     });
 }

@@ -297,3 +297,33 @@ commands = { allow = ['browser_guest_set_visible'] }
 identifier = 'allow-browser-guest-state'
 description = '浏览器 guest（#118）：拉取当前状态快照（client 镜像初始化）'
 commands = { allow = ['browser_guest_state'] }
+
+[[permission]]
+identifier = 'allow-get-notifications-state'
+description = '通知（#142）：设置 tab 拉取权限状态 + 配置 + 场景表'
+commands = { allow = ['get_notifications_state'] }
+
+[[permission]]
+identifier = 'allow-set-notifications-config'
+description = '通知（#142）：保存 notifications 配置'
+commands = { allow = ['set_notifications_config'] }
+
+[[permission]]
+identifier = 'allow-request-notification-permission-cmd'
+description = '通知（#142）：申请系统通知权限（macOS UN 授权窗）'
+commands = { allow = ['request_notification_permission_cmd'] }
+
+[[permission]]
+identifier = 'allow-import-notification-sound'
+description = '通知（#142）：导入自定义音效（校验 + 复制进 sounds/）'
+commands = { allow = ['import_notification_sound'] }
+
+[[permission]]
+identifier = 'allow-preview-notification-sound'
+description = '通知（#142）：试听音效'
+commands = { allow = ['preview_notification_sound'] }
+
+[[permission]]
+identifier = 'allow-choose-notification-sound'
+description = '通知（#142）：系统文件选择器挑选音频文件'
+commands = { allow = ['choose_notification_sound'] }

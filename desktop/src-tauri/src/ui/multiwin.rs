@@ -48,11 +48,13 @@ pub(crate) fn open_profile_window(app: &AppHandle, profile: &str) {
         ClaimDecision::Free => spawn_and_attach(app, profile, port),
         ClaimDecision::Ours => show_notification(
             app,
+            crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
             "无法打开窗口",
             &format!("{profile}：实例已在运行但未绑定窗口。托盘「重启 dsh 服务」后可接入。"),
         ),
         _ => show_notification(
             app,
+            crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
             "无法打开窗口",
             &format!("{profile}：端口 {port} 被外部实例或陌生程序占用，已停止自动拉起。"),
         ),
@@ -112,7 +114,7 @@ pub(crate) fn switch_profile_in_window(app: &AppHandle, label: &str, target: &st
         .or_else(|| label.strip_prefix("profile-").map(|s| s.to_string()))
         .unwrap_or_else(crate::settings::configured_profile);
     if current == target {
-        show_notification(app, "无需切换", &format!("该窗口当前已是 {target}。"));
+         show_notification(app, crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE, "无需切换", &format!("该窗口当前已是 {target}。"));
         return;
     }
     let port = crate::settings::port_for_profile(target);
@@ -131,6 +133,7 @@ pub(crate) fn switch_profile_in_window(app: &AppHandle, label: &str, target: &st
         ClaimDecision::Ours => {
             show_notification(
                 app,
+                crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
                 "无法切换",
                 &format!("{target} 实例在运行但访问令牌不可用；托盘「重启 dsh 服务」后再试。"),
             );
@@ -139,6 +142,7 @@ pub(crate) fn switch_profile_in_window(app: &AppHandle, label: &str, target: &st
         _ => {
             show_notification(
                 app,
+                crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
                 "无法切换",
                 &format!("{target}：端口 {port} 被外部实例或陌生程序占用，已停止自动拉起。"),
             );
@@ -262,7 +266,7 @@ fn spawn_and_navigate_to(app: &AppHandle, profile: &str, port: u16, label: Strin
         let worker = crate::process::worker::DshWorker::new(profile.clone(), port, false);
         worker.begin_start(&app, advanced);
         if !crate::process::lifecycle::stop_port_owner(port).await {
-            show_notification(&app, &format!("{profile} 启动失败"), &format!("端口 {port} 未能释放"));
+             show_notification(&app, crate::network::notify_policy::scenario::PROFILE_ERROR, &format!("{profile} 启动失败"), &format!("端口 {port} 未能释放"));
             if !in_place {
                 if let Some(w) = app.get_webview_window(&label) {
                     let _ = w.close();
@@ -276,7 +280,7 @@ fn spawn_and_navigate_to(app: &AppHandle, profile: &str, port: u16, label: Strin
                 crate::runtime::error::SpawnError::NotFound(s)
                 | crate::runtime::error::SpawnError::Other(s) => s.clone(),
             };
-            show_notification(&app, &format!("{profile} 启动失败"), &msg);
+             show_notification(&app, crate::network::notify_policy::scenario::PROFILE_ERROR, &format!("{profile} 启动失败"), &msg);
             if !in_place {
                 if let Some(w) = app.get_webview_window(&label) {
                     let _ = w.close();
@@ -335,6 +339,7 @@ async fn wait_ready_and_attach(
             let tail = app.state::<DshState>().stderr_tail_for(&profile, 10).join(" ⏎ ");
             show_notification(
                 &app,
+                crate::network::notify_policy::scenario::PROFILE_ERROR,
                 &format!("{profile} 实例已退出"),
                 &if tail.is_empty() { "进程退出，详情见主窗口日志".to_string() } else { tail },
             );
@@ -355,6 +360,7 @@ async fn wait_ready_and_attach(
                 if token_rounds > max {
                     show_notification(
                         &app,
+                        crate::network::notify_policy::scenario::PROFILE_ERROR,
                         &format!("{profile} 接入超时"),
                         "未取到该实例的访问令牌；请用托盘「重启 dsh 服务」后在窗口内重试。",
                     );
@@ -433,6 +439,7 @@ async fn supervise_secondary(
         let tail = app.state::<DshState>().stderr_tail_for(&profile, 10).join(" ⏎ ");
         show_notification(
             &app,
+            crate::network::notify_policy::scenario::PROFILE_ERROR,
             &format!("{profile} 实例已退出"),
             &if tail.is_empty() { "进程退出，详情见主窗口日志".to_string() } else { tail },
         );

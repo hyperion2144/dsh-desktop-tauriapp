@@ -5,6 +5,7 @@ import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
 import { installDesktopBrowserBridge } from './desktop-browser-bridge.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
+import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
@@ -117,6 +118,8 @@ export function apply(ctx: ClientContext): void {
   // 纯浏览器无副作用
   installDesktopBrowserBridge()
   registerDesktopSettings(ctx)
+  // 桌面通知设置 tab（#142）：权限卡/总开关/免打扰/12 场景开关与音效
+  registerNotificationsTab(ctx)
   // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
   // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；
   // 模式/平台本就是壳的运行状态，由壳下发。纯浏览器无 IPC → 不激活（原语义不变）。

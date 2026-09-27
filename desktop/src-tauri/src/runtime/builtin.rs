@@ -183,6 +183,7 @@ pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String
             Err(e) => {
                 crate::network::notify::show_notification(
                     app,
+                     crate::network::notify_policy::scenario::RUNTIME_SWITCH,
                     "内置运行时不可用，已回退外部 dsh",
                     &format!("原因：{e}。可在设置中切换来源或检查安装包完整性。"),
                 );
@@ -199,6 +200,7 @@ pub(crate) fn resolve_source(app: &tauri::AppHandle) -> Result<DshSource, String
                 Ok(s) => {
                     crate::network::notify::show_notification(
                         app,
+                         crate::network::notify_policy::scenario::RUNTIME_SWITCH,
                         "外部 dsh 不可用，已回退内置运行时",
                         "未找到外部 dsh（DSH_BIN / PATH / npm 全局）。可安装 dsh 后重启，或在设置中切换来源。",
                     );
