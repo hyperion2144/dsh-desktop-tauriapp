@@ -55,6 +55,10 @@ interface DesktopData {
   remote_list: string[]
   port: number
   profiles: Array<{ name: string; active: boolean; selectable: boolean }>
+  /** #144 网关心跳覆盖（null/缺省 = 壳默认 30s；0 = 不覆盖） */
+  mux_heartbeat_ms?: number | null
+  /** #147 路线 A：手机端是否改用桌面布局 */
+  desktop_layout_on_phones?: boolean | null
 }
 
 interface DshSourceState {
@@ -315,6 +319,13 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
+
+  // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
+  useEffect(() => {
+    setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
+    const hb = desktop.mux_heartbeat_ms
+    setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
+  }, [desktop])
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -461,11 +472,15 @@ function DesktopSettingsPanel(): React.ReactElement {
           proxy_pass: (ns.proxy_pass as string) || p.proxy_pass || '',
         })
         setProxyEffective(p.effective)
+        // 以 **Rust 返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段——
+        // 之前是手写对象，漏字段就静默丢值（#147 实测：勾选保存成功但重开永远不勾）。
         setDesktop({
-          remote_addr: (ns.remote_addr as string | null) ?? null,
+          ...d,
+          remote_addr: (ns.remote_addr as string | null) ?? d.remote_addr ?? null,
           remote_list: (ns.remote_list as string[]) ?? d.remote_list ?? [],
           port: (ns.port as number) || d.port || 3080,
-          profiles: d.profiles,
+          mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
+          desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
         })
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
         if (d.profiles.length > 0) {

@@ -582,6 +582,9 @@ pub(crate) fn get_desktop_settings_data() -> serde_json::Value {
     serde_json::json!({
         "remote_addr": settings.remote_addr,
         "remote_list": settings.remote_list,
+        // #147/#144 壳键：设置面板每次挂载据此回填（只写不回填的话，关掉再进勾选就“丢”了）
+        "mux_heartbeat_ms": settings.mux_heartbeat_ms,
+        "desktop_layout_on_phones": settings.desktop_layout_on_phones,
         "port": configured_port(),
         "profiles": profiles,
     })
