@@ -508,7 +508,7 @@ pub fn run() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(6)).await;
-                    notify_completed(&handle, "这是测试通知：任务完成链路验证");
+                    notify_completed(&handle, crate::network::notify_policy::scenario::TASK_COMPLETE, "这是测试通知：任务完成链路验证");
                 });
             }
             // 守护器：周期探测 dsh 服务。判定规则（防误杀/防抖动循环）：
