@@ -103,13 +103,30 @@ pub(crate) async fn handle_notify_conn(sock: &mut tokio::net::TcpStream, app: &A
         return;
     }
     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
-    let mut msg = "任务已完成".to_string();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-        if let Some(s) = v.get("body").and_then(|x| x.as_str()) {
-            msg = s.to_string();
+    // 事件类型分派（#142 原生事件桥）：宿主脚本按 session/event 类型上报，
+    // 未知/缺省回落任务完成（兼容旧轮询脚本）。
+    let (scenario, msg) = match serde_json::from_str::<serde_json::Value>(&body) {
+        Ok(v) => {
+            let t = v.get("type").and_then(|x| x.as_str()).unwrap_or("task-complete").to_string();
+            let m = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+            match t.as_str() {
+                "dsh-approval" => (
+                    crate::network::notify_policy::scenario::DSH_APPROVAL,
+                    if m.is_empty() { "会话在等待你的审批确认".to_string() } else { m },
+                ),
+                "dsh-error" => (
+                    crate::network::notify_policy::scenario::DSH_ERROR,
+                    if m.is_empty() { "会话运行出错，回来看看详情".to_string() } else { m },
+                ),
+                _ => (
+                    crate::network::notify_policy::scenario::TASK_COMPLETE,
+                    if m.is_empty() { "任务已完成".to_string() } else { m },
+                ),
+            }
         }
-    }
-    notify_completed(app, &msg);
+        Err(_) => (crate::network::notify_policy::scenario::TASK_COMPLETE, "任务已完成".to_string()),
+    };
+    notify_completed(app, scenario, &msg);
     let _ = sock
         .write_all(
             format!("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n{CORS_HEADERS}\r\n")
@@ -118,8 +135,10 @@ pub(crate) async fn handle_notify_conn(sock: &mut tokio::net::TcpStream, app: &A
         .await;
 }
 
-/// 收到任务完成信号后的壳侧动作：Dock 角标 +1；仅窗口失焦/隐藏时弹通知并跳 Dock。
-pub(crate) fn notify_completed(app: &AppHandle, body: &str) {
+/// 收到 dsh 事件后的壳侧动作（#142）：场景化投递；仅窗口失焦/隐藏时计入未读、
+/// 设 Dock 角标、弹横幅并跳 Dock——聚焦时用户正在看，不构成未读（实测反馈：
+/// 角标挂到下次 Focused 才消失是不对行为）。
+pub(crate) fn notify_completed(app: &AppHandle, scenario: &str, body: &str) {
     let distracted = app
         .get_webview_window("main")
         .map(|w| {
@@ -129,13 +148,16 @@ pub(crate) fn notify_completed(app: &AppHandle, body: &str) {
         })
         .unwrap_or(true);
     let state = app.state::<DshState>();
+    // 未读角标语义：聚焦时不计未读、不设角标。
+    if !distracted {
+        log::info!("[notify] {scenario}：{body}（聚焦中，不打扰）");
+        return;
+    }
     let unread = state.unread.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_badge_count(Some(unread as i64));
-        if distracted {
-            show_notification(app, crate::network::notify_policy::scenario::TASK_COMPLETE, "DeepSeek Harness Desktop · 任务完成", body);
+        show_notification(app, scenario, "DeepSeek Harness Desktop · 任务完成", body);
             let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
-        }
     }
     // 桌宠气泡：可见时推送 pet-say 事件（前端气泡 5s 自动收起）
     if let Some(pet) = app.get_webview_window("pet") {
@@ -143,7 +165,7 @@ pub(crate) fn notify_completed(app: &AppHandle, body: &str) {
             let _ = app.emit("pet-say", serde_json::json!({ "body": body }));
         }
     }
-    log::info!("任务完成通知：{}（未读 {unread}，失焦={distracted}）", body);
+    log::info!("[notify] {scenario}：{body}（未读 {unread}，失焦={distracted}）");
 }
 
 /// 生成页面侧任务完成监听脚本：轮询"忙碌→空闲"翻转，翻转即上报。

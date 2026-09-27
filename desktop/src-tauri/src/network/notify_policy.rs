@@ -20,6 +20,8 @@ pub mod scenario {
     pub const PROFILE_ERROR: &str = "profile.error";
     pub const CONFIG_ERROR: &str = "config.error";
     pub const CONFIG_INFO: &str = "config.info";
+    pub const DSH_APPROVAL: &str = "dsh.approval";
+    pub const DSH_ERROR: &str = "dsh.error";
 }
 
 /// 场景展示元数据（设置 tab 分组渲染用；显示名/分组为 T4 原型提案，已获用户采纳）。
@@ -42,8 +44,10 @@ pub const GROUPS: [(&str, &str); 6] = [
     ("g-cfg", "配置"),
 ];
 
-/// 12 场景元数据表（唯一事实源；设置 tab 与配置默认值都从这里派生）。
-pub const SCENARIOS: [ScenarioMeta; 12] = [
+/// 14 场景元数据表（唯一事实源；设置 tab 与配置默认值都从这里派生）。
+/// dsh.approval / dsh.error 为 dsh 原生事件场景（#142 宿主事件桥：session/event 的
+/// approval/asked 与 agent/error），补齐 T1 需求中「dsh 原生事件」的覆盖。
+pub const SCENARIOS: [ScenarioMeta; 14] = [
     ScenarioMeta { id: scenario::STARTUP_ERROR, group: "g-run", name: "启动受阻", desc: "spawn 失败 · 自愈封顶", default_on: true },
     ScenarioMeta { id: scenario::RUNTIME_SWITCH, group: "g-run", name: "运行时切换", desc: "内置 / 外部 dsh 切换结果", default_on: true },
     ScenarioMeta { id: scenario::RUNTIME_DOWNLOAD, group: "g-run", name: "运行时下载", desc: "运行时下载开始 / 失败", default_on: true },
@@ -56,6 +60,8 @@ pub const SCENARIOS: [ScenarioMeta; 12] = [
     ScenarioMeta { id: scenario::TASK_COMPLETE, group: "g-task", name: "任务完成", desc: "失焦时提醒回来看看", default_on: true },
     ScenarioMeta { id: scenario::CONFIG_ERROR, group: "g-cfg", name: "配置错误", desc: "token 无法识别等", default_on: true },
     ScenarioMeta { id: scenario::CONFIG_INFO, group: "g-cfg", name: "配置提示", desc: "端口保存等低危信息", default_on: false },
+    ScenarioMeta { id: scenario::DSH_APPROVAL, group: "g-task", name: "等待审批", desc: "dsh 会话等待你的审批确认", default_on: true },
+    ScenarioMeta { id: scenario::DSH_ERROR, group: "g-task", name: "会话错误", desc: "dsh 会话运行出错", default_on: true },
 ];
 
 pub fn meta_of(scenario_id: &str) -> Option<&'static ScenarioMeta> {
@@ -291,6 +297,6 @@ mod tests {
         let n = ids.len();
         ids.dedup();
         assert_eq!(ids.len(), n);
-        assert_eq!(n, 12);
+        assert_eq!(n, 14);
     }
 }

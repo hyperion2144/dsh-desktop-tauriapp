@@ -163,6 +163,70 @@ export function apply(ctx) {
     )
   } else {
     ctx.logger?.warn('dsh-desktop-tauriapp: skills 服务不可用，跳过技能注册（RPC 桥接不受影响）')
+
+  // ── dsh 原生事件桥（#142）：session/event → 桌面壳 /notify ──
+  // 订阅宿主事件，转发到桌面壳的通知口（端口/令牌由壳 spawn dsh 时注入环境变量）。
+  // 事件映射：turn/end → task-complete；approval/asked → dsh-approval。
+  // 防御性：env 缺失 / 无 ctx.on → 静默降级（不影响 dsh 启动）；
+  // turn/end 按会话 10s 防抖（连环回合事件不刷屏）。
+  const notifyPort = Number(process.env.DSH_DESKTOP_NOTIFY_PORT || 0)
+  const notifyToken = process.env.DSH_DESKTOP_NOTIFY_TOKEN || ''
+  const notifyEnabled = notifyPort > 0 && notifyToken !== ''
+  if (!notifyEnabled || typeof ctx.on !== 'function') return
+
+  const report = (type, body) => {
+    fetch(`http://127.0.0.1:${notifyPort}/notify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${notifyToken}` },
+      body: JSON.stringify({ type, body }),
+    }).catch(() => { /* 壳不在/瞬断：静默，通知不是关键路径 */ })
+  }
+
+  const lastTurnEndAt = new Map()
+  const TURN_END_DEBOUNCE_MS = 10_000
+
+  ctx.on(
+    'session/event',
+    (...args) => {
+      try {
+        // dsh 载荷两种形态：(session, event) 或 { session, event }
+        let session
+        let event
+        if (args.length >= 2) {
+          ;[session, event] = args
+        } else if (args.length === 1 && args[0] && typeof args[0] === 'object') {
+          ;({ session, event } = args[0])
+        }
+        if (!event || typeof event.type !== 'string') return
+
+        if (event.type === 'turn/end') {
+          const sid = session?.id ?? ''
+          const now = Date.now()
+          const last = lastTurnEndAt.get(sid) ?? 0
+          if (now - last < TURN_END_DEBOUNCE_MS) return
+          lastTurnEndAt.set(sid, now)
+          const title = session?.title ?? session?.name ?? ''
+          report('task-complete', title ? `「${title}」回合已结束` : '')
+        } else if (event.type === 'approval/asked') {
+          report('dsh-approval', session?.title ? `「${session.title}」等待你的审批确认` : '')
+        }
+      } catch { /* 单个事件处理失败不影响 dsh */ }
+    },
+    { global: true },
+  )
+
+  ctx.on(
+    'agent/error',
+    (payload = {}) => {
+      try {
+        const agent = payload?.agent
+        const msg = typeof payload?.error === 'string' ? payload.error : (payload?.error?.message ?? '')
+        const title = agent?.session?.title ?? ''
+        report('dsh-error', [title ? `「${title}」` : '', msg].filter(Boolean).join(' ').slice(0, 200))
+      } catch { /* 忽略 */ }
+    },
+    { global: true },
+  )
   }
 
 }
