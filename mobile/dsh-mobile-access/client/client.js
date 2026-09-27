@@ -2014,7 +2014,7 @@ function MobileAccessPanel() {
   const lanQr = (0, import_react.useMemo)(() => makeQr(lanLink), [lanLink]);
   const tunQr = (0, import_react.useMemo)(() => makeQr(tunLink), [tunLink]);
   const cfQr = (0, import_react.useMemo)(() => makeQr(cfLink), [cfLink]);
-  const pairLink = (base, scheme, token) => scheme + "://" + base + LANE_PREFIX + "/pair?token=" + encodeURIComponent(token);
+  const pairLink = (base, scheme, token) => scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
   const mintFor = async (base, scheme, setLink, setHint) => {
     try {
       const r = await lane("/api/pair/mint", { method: "POST", body: {} });

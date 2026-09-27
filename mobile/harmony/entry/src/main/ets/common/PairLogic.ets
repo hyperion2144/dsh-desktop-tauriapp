@@ -43,10 +43,13 @@ export class PairLogic {
     } else if (/^https?:\/\//.test(s)) {
       const u: url.URL = url.URL.parseURL(s);
       token = u.params.get('token') ?? extraToken;
-      const path = u.pathname === '/pair' ? '' : u.pathname;
-      base = u.host + path;
-      // http 配对链接：进入时先访问完整 URL（/pair 自动配对 + 种 cookie + 302 跳转）。
-      if (u.pathname === '/pair' && token !== '') entryUrl = s;
+      // 配对入口路径（历史 /pair 与保留命名空间 /__dsh-mobile/pair，均容忍末尾斜杠）
+      // 不能进 base：否则壳会拼出 http://host/__dsh-mobile/pair/ 这类「把入口当目录」
+      // 的地址，配对路由不命中 → 反代门禁 401（实机踩过，#145 回归）。
+      const entry: boolean = PairLogic.isPairEntryPath(u.pathname);
+      base = entry ? u.host : u.host + u.pathname;
+      // http 配对链接：进入时先访问完整 URL（配对入口自动种 cookie + 302 跳转）。
+      if (entry && token !== '') entryUrl = s;
     } else if (/^[^/\s]+:\d{1,5}$/.test(s)) {
       base = s;
       token = extraToken;
@@ -59,6 +62,15 @@ export class PairLogic {
     return out;
   }
 
+
+  /** 配对入口路径：历史 `/pair` 与保留命名空间 `/__dsh-mobile/pair`（均容忍末尾斜杠）。 */
+  private static isPairEntryPath(pathname: string): boolean {
+    let p = pathname;
+    if (p.length > 1 && p.endsWith('/')) {
+      p = p.replace(/\/+$/, '');
+    }
+    return p === '/pair' || p === '/__dsh-mobile/pair';
+  }
   static buildEntryUrl(pair: PairInput, scheme: string = 'http'): string {
     return pair.entryUrl ?? (scheme + '://' + pair.base + '/');
   }

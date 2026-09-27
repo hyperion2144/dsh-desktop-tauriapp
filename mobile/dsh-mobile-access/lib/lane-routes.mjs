@@ -55,13 +55,17 @@ export const LANE_LEGACY_PATHS = Object.freeze([...LANE_ROUTE_PATHS]);
  */
 export function laneRoutePath(path) {
   if (typeof path !== 'string' || path.length === 0) return null;
-  if (path.startsWith(LANE_PREFIX + '/')) {
-    const relative = path.slice(LANE_PREFIX.length);
+  // 容忍末尾斜杠：ArkWeb/WebView 与旧壳的解析器会把入口规范成目录形式。
+  // 实机踩过：`/__dsh-mobile/pair/` 不命中路由 → 落到反代门禁 → 401 UNPAIRED
+  // （手机上扫完码却显示未配对）。
+  const p = path.length > 1 && path.endsWith('/') ? path.replace(/\/+$/, '') : path;
+  if (p.startsWith(LANE_PREFIX + '/')) {
+    const relative = p.slice(LANE_PREFIX.length);
     return LANE_ROUTE_PATHS.includes(relative) ? relative : null;
   }
   // 命名空间本身（无尾斜杠）：只认配对入口，其余按未命中透传。
-  if (path === LANE_PREFIX + '/pair') return '/pair';
-  return LANE_LEGACY_PATHS.includes(path) ? path : null;
+  if (p === LANE_PREFIX + '/pair') return '/pair';
+  return LANE_LEGACY_PATHS.includes(p) ? p : null;
 }
 
 /** 是否为保留命名空间下的路径（含命名空间根；用于诊断与测试断言）。 */

@@ -424,8 +424,10 @@ function MobileAccessPanel() {
   const cfQr = useMemo(() => makeQr(cfLink), [cfLink]);
 
   // ---- helpers ----
+  // 配对链接地址**刻意用历史形态 `/pair`**（不带命名空间前缀）：已安装的旧壳解析器只认裸
+  // `/pair`，给命名空间形态它会把它当目录拼错地址 → 401（实机踩过）；lane 两种都服务。
   const pairLink = (base, scheme, token) =>
-    scheme + "://" + base + LANE_PREFIX + "/pair?token=" + encodeURIComponent(token);
+    scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
 
   /** 铸造一次性配对链接：mint → 写 link/hint；失败写 hint。 */
   const mintFor = async (base, scheme, setLink, setHint) => {

@@ -32,3 +32,26 @@ test('createPairStore（内存适配器）', () => {
   store.remove('a.cn:3091');
   assert.equal(store.list().length, 1);
 });
+
+test('parsePairInput：配对入口不污染 base（含命名空间形态与末尾斜杠）', () => {
+  // 历史形态：入口路径不进 base，且保留 entryUrl 以便自动配对
+  const legacy = parsePairInput('http://192.168.3.90:3092/pair?token=t1');
+  assert.equal(legacy.base, '192.168.3.90:3092');
+  assert.equal(legacy.entryUrl, 'http://192.168.3.90:3092/pair?token=t1');
+  // 保留命名空间形态（#145）：同样不得把入口当目录
+  const ns = parsePairInput('http://192.168.3.90:3092/__dsh-mobile/pair?token=t2');
+  assert.equal(ns.base, '192.168.3.90:3092');
+  assert.equal(ns.entryUrl, 'http://192.168.3.90:3092/__dsh-mobile/pair?token=t2');
+  // 末尾斜杠（ArkWeb/WebView 归一化）：仍然认作配对入口
+  const slash = parsePairInput('http://192.168.3.90:3092/__dsh-mobile/pair/?token=t3');
+  assert.equal(slash.base, '192.168.3.90:3092');
+  assert.equal(slash.entryUrl, 'http://192.168.3.90:3092/__dsh-mobile/pair/?token=t3');
+  // 非配对路径：整条路径进 base（子路径部署仍可用）
+  const sub = parsePairInput('http://x.cn:3091/gw?token=t4');
+  assert.equal(sub.base, 'x.cn:3091/gw');
+  assert.equal(sub.entryUrl, undefined);
+  // dsh-mobile:// 深链不受影响
+  const deep = parsePairInput('dsh-mobile://pair?token=t5&base=a.cn:3091');
+  assert.equal(deep.base, 'a.cn:3091');
+  assert.equal(deep.entryUrl, undefined);
+});

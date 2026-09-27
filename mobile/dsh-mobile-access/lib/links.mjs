@@ -1,7 +1,6 @@
 // 地址/链接相关纯函数：归一化、局域网 IP 挑选、配对链接与二维码文本。
 // 自实现（不拷贝 dsh-pocket 源码；仅对齐其行为约定）。
 
-import { lanePath } from './lane-routes.mjs';
 
 const PRIVATE_IPV4 = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
 const PHYSICAL_IFACE = /^(?:wlan|wi-?fi|wireless|ethernet|eth\d|en\d|wlp\d|以太网|本地连接)/i;
@@ -50,10 +49,11 @@ export function buildPairLink(bases, token) {
   return 'dsh-mobile://pair?' + q.toString();
 }
 
-/** 浏览器兜底配对链接（http 形态，指向反代保留命名空间下的配对入口）。
- *  历史别名 `/pair` 仍被 lane 接受（已发出的二维码），新链接一律走命名空间。 */
+/** 浏览器兜底配对链接（http 形态）。
+ *  **刻意用历史形态 `/pair`**：已安装的旧壳解析器只认裸 `/pair`（命名空间形态会让它把
+ *  入口当目录拼错地址 → 401，实机踩过）；lane 两种形态都在服务，旧形态对新旧客户端都安全。 */
 export function buildHttpPairLink(base, token) {
-  return 'http://' + base + lanePath('/pair') + '?token=' + encodeURIComponent(token);
+  return 'http://' + base + '/pair?token=' + encodeURIComponent(token);
 }
 
 /** UI 展示用链接（避免长路径）。 */

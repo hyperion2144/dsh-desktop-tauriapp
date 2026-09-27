@@ -83,3 +83,12 @@ test('lane 路由：控制面端点集合是显式快照（新增必须同时改
     '路由表快照：新增控制端点会在此处显形，提醒同步透传不变式测试',
   );
 });
+
+test('lane 路由：容忍末尾斜杠（实机回归——/__dsh-mobile/pair/ 曾落到反代门禁 401）', () => {
+  for (const relative of LANE_ROUTE_PATHS) {
+    assert.equal(laneRoutePath(lanePath(relative) + '/'), relative, `尾斜杠命中 ${relative}`);
+  }
+  assert.equal(laneRoutePath('/pair/'), '/pair', '历史别名尾斜杠');
+  assert.equal(laneRoutePath('/api/pair/devices//'), '/api/pair/devices', '多重尾巴');
+  assert.equal(laneRoutePath('/__dsh-mobile/api/pair/unknown/'), null, '未登记路径仍然透传');
+});
