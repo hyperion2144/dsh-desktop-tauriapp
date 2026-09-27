@@ -110,8 +110,18 @@
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
   → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
+- 手机布局与卡顿根因（#147）：**卡顿在宿主前端**（会话整段挂载 + 逐块 Shiki 高亮；审计见
+  `mobile/dsh-mobile-nav/docs/audits/2026-09-23-session-switch-jank-handover.md`），不在网络、也不在布局插件。
+  两条对策：**A** 壳设置 `desktop_layout_on_phones`（true = 不注入 dsh-web-mobile，手机走 iPad 同款桌面布局）；
+  **B** `src/client/mobile-render-budget.ts` 只在本仓做移动端视觉窗口化（content-visibility），不碰子模块。
+- 会话守卫判定（#144 实机回归）：读数 `null` = 页面**回了消息**（只是它自己的探测请求超时）→ 轻量重连；
+  只有**完全没回消息**才兜底重载，而且要连续 2 次。别改回「读不到 → 重载」——那会让 iPad 周期性假刷新。
+- 远程模式设置可用性：`remote_owns_host_init_script(remote_addr)` 只对壳配置的远程主机注入
+  `__DSH_TRANSPORT__={ownsHost:true}`（否则模型设置报 settings are unavailable in this browser）；不装 dshDesktop 载体。
+- lane 传输层（#147，勿退回）：上游 keep-alive 连接池 + 客户端/上游两侧 setNoDelay + 逐跳头不原样转发；
+  别再写回 `agent: false`，那会让每个请求新建 TCP 并把 `connection: close` 透给浏览器。
   - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 10 例（含会话守卫 7 例）、
-   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 107 例；
+   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 109 例；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 
