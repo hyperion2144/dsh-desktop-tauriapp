@@ -526,8 +526,10 @@ export function createRewriteProxy(opts) {
           onUpstreamFrame: (op, payload) => {
             uFrames++;
             if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`);
-            // #144 诊断：上游主动关帧（op=8）——「服务端判死 vs 隧道断开」的判定依据
-            if (op === 8) {
+            // #144 诊断：上游主动关帧（op=8）——「服务端判死 vs 隧道断开」的判定依据。
+            // **只记一次**：帧解析异常时 op 可能是流中偶合字节，逐帧记录会刷屏（实测同一毫秒
+            // 数百行），而 dsh 的 stdout 由壳同步落盘——刷屏会堵住 dsh 主线程，页面卡到点不动。
+            if (op === 8 && !muxClosed) {
               const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
               muxLog(`上游关闭帧 code=${code}（服务端主动关；0/1000=正常，1006 不会以帧出现）`);
               muxClose('upstream');
