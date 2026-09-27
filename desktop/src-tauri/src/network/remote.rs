@@ -114,7 +114,7 @@ pub(crate) fn add_remote_flow(app: &AppHandle) {
             return;
         };
         let Some(addr) = normalize_remote_url(&input) else {
-            show_notification(&handle, "新增地址失败", "格式应为 dsh web 打印的完整 URL 或 host[:port]");
+             show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_ERROR, "新增地址失败", "格式应为 dsh web 打印的完整 URL 或 host[:port]");
             return;
         };
         // 新版 dsh web 的 token 是必要凭据：URL 里带了就先存入 state，
@@ -153,11 +153,11 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
             return;
         };
         let Ok(port) = input.parse::<u16>() else {
-            show_notification(&handle, "设置端口失败", "请输入 1-65535 的整数");
+             show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_ERROR, "设置端口失败", "请输入 1-65535 的整数");
             return;
         };
         if port == 0 {
-            show_notification(&handle, "设置端口失败", "端口不能为 0");
+             show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_ERROR, "设置端口失败", "端口不能为 0");
             return;
         }
         let mut settings = load_desktop_settings();
@@ -170,7 +170,7 @@ pub(crate) fn set_port_flow(app: &AppHandle) {
         let _ = crate::settings::save_desktop_settings(&settings);
         log::info!("[tray] 本地端口 -> {port}");
         if settings.remote_addr.is_some() {
-            show_notification(&handle, "端口已保存", &format!("{port} 将在本地模式生效"));
+             show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_INFO, "端口已保存", &format!("{port} 将在本地模式生效"));
         } else {
             let mode = handle.state::<DshState>().mode.load(Ordering::SeqCst);
             restart_dsh_in_mode(&handle, mode, None);
@@ -329,7 +329,7 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     }
     if advanced && !remote_has_plugin(addr) {
         log::warn!("[remote] 远程未检测到 dsh-desktop-tauriapp 插件，建议使用兼容模式");
-        show_notification(app, "远程 dsh 未安装桌面插件", "高级模式需要远程安装 dsh-desktop-tauriapp，建议改用兼容模式");
+         show_notification(app, crate::network::notify_policy::scenario::CONFIG_ERROR, "远程 dsh 未安装桌面插件", "高级模式需要远程安装 dsh-desktop-tauriapp，建议改用兼容模式");
     }
     // 完整 URL 原样用（含 token/旧参数）；旧格式补 scheme 与根路径
     let url = if tauri::Url::parse(addr)

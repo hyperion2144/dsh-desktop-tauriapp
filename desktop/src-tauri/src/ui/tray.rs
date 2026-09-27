@@ -370,7 +370,7 @@ pub fn switch_runtime(app: &AppHandle, version: Option<&str>, mode: DshMode) {
     s.dsh_mode = Some(mode.as_str().into());
     if let Err(e) = crate::settings::save_desktop_settings(&s) {
         log::error!("[tray] 保存运行时设置失败：{e}");
-        show_notification(app, "运行时切换失败", &e);
+         show_notification(app, crate::network::notify_policy::scenario::RUNTIME_SWITCH, "运行时切换失败", &e);
         return;
     }
     // 文案：外部来源没有版本号，直接用来源名；内置来源沿用版本号 /「内置版本」
@@ -380,7 +380,7 @@ pub fn switch_runtime(app: &AppHandle, version: Option<&str>, mode: DshMode) {
             format!("dsh {}", s.dsh_runtime.clone().unwrap_or_else(|| "内置版本".into()))
         }
     };
-    show_notification(app, "运行时已切换", &format!("{label}，正在重启服务…"));
+     show_notification(app, crate::network::notify_policy::scenario::RUNTIME_SWITCH, "运行时已切换", &format!("{label}，正在重启服务…"));
     restart_dsh(app);
     // 重启完成后再补一条终态（用户实测反馈：点击后不知道啥时候成功/重启）
     notify_when_ready(app, label);
@@ -392,10 +392,10 @@ fn fetch_runtime_and_switch(app: &AppHandle, version: String) {
     let st = crate::runtime::registry::runtime_download_status();
     if st.get("active").and_then(|v| v.as_bool()).unwrap_or(false) {
         let cur = st.get("version").and_then(|v| v.as_str()).unwrap_or("?");
-        show_notification(app, "运行时下载中", &format!("正在下载 dsh {cur}，完成后可在托盘切换"));
+         show_notification(app, crate::network::notify_policy::scenario::RUNTIME_DOWNLOAD, "运行时下载中", &format!("正在下载 dsh {cur}，完成后可在托盘切换"));
         return;
     }
-    show_notification(app, "开始下载运行时", &format!("dsh {version} 安装中，完成后自动切换并重启"));
+     show_notification(app, crate::network::notify_policy::scenario::RUNTIME_DOWNLOAD, "开始下载运行时", &format!("dsh {version} 安装中，完成后自动切换并重启"));
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         let src = crate::settings::load_desktop_settings()
@@ -420,7 +420,7 @@ fn fetch_runtime_and_switch(app: &AppHandle, version: String) {
             }
             Err(e) => {
                 log::error!("[tray] 运行时 {version} 下载失败：{e}");
-                show_notification(&handle, "运行时下载失败", &e);
+                 show_notification(&handle, crate::network::notify_policy::scenario::RUNTIME_DOWNLOAD, "运行时下载失败", &e);
             }
         }
     });
@@ -471,6 +471,7 @@ fn spawn_download_progress_notifier(app: &AppHandle, version: String) {
             if nums != last_nums && last_at.elapsed() >= Duration::from_secs(15) {
                 show_notification(
                     &handle,
+                    crate::network::notify_policy::scenario::RUNTIME_DOWNLOAD,
                     "运行时下载中",
                     &format!("dsh {version}：解析 {} · 下载 {} · 安装 {} 个包", nums.0, nums.1, nums.2),
                 );
@@ -495,7 +496,7 @@ fn notify_when_ready(app: &AppHandle, label: String) {
                 continue;
             }
             if saw_pending {
-                show_notification(&handle, "运行时切换完成", &format!("✅ {label} 已启动"));
+                 show_notification(&handle, crate::network::notify_policy::scenario::RUNTIME_SWITCH, "运行时切换完成", &format!("✅ {label} 已启动"));
             }
             return;
         }

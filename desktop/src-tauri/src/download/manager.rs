@@ -332,7 +332,7 @@ pub(crate) fn on_task_finished(app: &AppHandle, id: u64, result: Result<(), Stri
             });
             if ok {
                 if let Some(name) = completed_name {
-                    crate::network::notify::show_notification(app, "下载完成", &name);
+                     crate::network::notify::show_notification(app, crate::network::notify_policy::scenario::DOWNLOAD_COMPLETE, "下载完成", &name);
                 }
             }
         }
@@ -602,7 +602,7 @@ pub(crate) fn finish_blob_download(app: &AppHandle, id: u64) -> bool {
     });
     if ok {
         if let Some(name) = completed_name {
-            crate::network::notify::show_notification(app, "下载完成", &name);
+             crate::network::notify::show_notification(app, crate::network::notify_policy::scenario::DOWNLOAD_COMPLETE, "下载完成", &name);
         }
     }
     ok

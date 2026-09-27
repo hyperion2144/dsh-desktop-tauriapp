@@ -457,7 +457,7 @@ pub(crate) fn choose_desktop_mode(app: tauri::AppHandle, mode: String) -> Result
                         } else if normalize_remote_url(&input).is_some() && !input.contains("token=") {
                             log::info!("[mode] 兼容模式：输入为不带 token 的 URL，按老版 dsh 处理");
                         } else if !input.trim().is_empty() {
-                            show_notification(&handle, "未能识别 token", "输入里没有 ?token= 参数，将按老版 dsh 直连（新版会 401）");
+                             show_notification(&handle, crate::network::notify_policy::scenario::CONFIG_ERROR, "未能识别 token", "输入里没有 ?token= 参数，将按老版 dsh 直连（新版会 401）");
                         }
                     }
                 }
@@ -935,6 +935,89 @@ pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Re
     .map_err(|e| format!("删除任务异常：{e}"))?;
     Ok(())
 }
+
+// ── 通知（#142）：设置 tab 的 IPC 面 ──
+
+/// 通知设置面板数据：权限状态 + 全量配置 + 场景元数据表（tab 一次拉全）。
+#[tauri::command]
+pub(crate) fn get_notifications_state() -> Result<serde_json::Value, String> {
+    let cfg = load_desktop_settings().notifications;
+    let permission = if cfg!(target_os = "macos") {
+        crate::network::notify_un::permission_state().to_string()
+    } else {
+        "granted".to_string()
+    };
+    let scenarios: Vec<serde_json::Value> = crate::network::notify_policy::SCENARIOS
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "id": m.id, "group": m.group, "name": m.name, "desc": m.desc,
+                "defaultOn": m.default_on,
+                "config": cfg.scenarios.get(m.id),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "permission": permission,
+        "config": cfg,
+        "scenarios": scenarios,
+        "groups": crate::network::notify_policy::GROUPS,
+        "sounds": crate::network::sounds::list_sounds(),
+    }))
+}
+
+/// 保存通知配置（整体替换 notifications 对象；Rust 单写者语义同 save_desktop_settings）。
+#[tauri::command]
+pub(crate) fn set_notifications_config(config: crate::settings::NotificationsConfig) -> Result<(), String> {
+    let mut current = load_desktop_settings();
+    current.notifications = config;
+    crate::settings::save_desktop_settings(&current)
+}
+
+/// 申请系统通知权限（macOS：UN 授权；其余平台幂等确认）。
+#[tauri::command]
+pub(crate) fn request_notification_permission_cmd() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::network::notify_un::request_auth_state()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("granted".to_string())
+    }
+}
+
+/// 导入自定义音效：校验（扩展名/魔数/≤5MB）+ 复制进 sounds/，返回文件名。
+#[tauri::command]
+pub(crate) fn import_notification_sound(path: String) -> Result<String, String> {
+    crate::network::sounds::import_file(&path)
+}
+
+/// 试听音效："none" 无操作；其余（含 "default" 与 custom 名）走 rodio 播放。
+#[tauri::command]
+pub(crate) fn preview_notification_sound(sound: String) -> Result<(), String> {
+    match sound.as_str() {
+        "none" => Ok(()),
+        name => {
+            crate::network::sounds::preview(name);
+            Ok(())
+        }
+    }
+}
+
+
+/// 选择本地音频文件（tauri-plugin-dialog Rust API；返回绝对路径或 null）。
+#[tauri::command]
+pub(crate) fn choose_notification_sound(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app
+        .dialog()
+        .file()
+        .add_filter("音频文件（wav/mp3/ogg）", &["wav", "mp3", "ogg"])
+        .blocking_pick_file();
+    Ok(picked.and_then(|f| f.into_path().ok()).and_then(|p| p.to_str().map(|s| s.to_string())))
+}
+
 #[cfg(test)]
 mod desktop_settings_tests {
     // 保险丝测试（#127）：随功能废弃移除。

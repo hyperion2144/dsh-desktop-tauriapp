@@ -133,7 +133,7 @@ pub(crate) fn notify_completed(app: &AppHandle, body: &str) {
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.set_badge_count(Some(unread as i64));
         if distracted {
-            show_notification(app, "DeepSeek Harness Desktop · 任务完成", body);
+            show_notification(app, crate::network::notify_policy::scenario::TASK_COMPLETE, "DeepSeek Harness Desktop · 任务完成", body);
             let _ = w.request_user_attention(Some(tauri::UserAttentionType::Informational));
         }
     }
@@ -233,14 +233,37 @@ pub(crate) fn request_notification_permission(app: &tauri::AppHandle) {
     }
 }
 
-/// 发一条系统通知（三平台分派）。
-/// macOS：UNUserNotificationCenter 直连（插件路径在新 macOS 静默失败且吞错，#142）；
-/// Windows/Linux：tauri-plugin-notification。单条投递失败只落日志，不影响调用方流程。
-pub(crate) fn show_notification(app: &tauri::AppHandle, title: &str, body: &str) {
+/// 发一条系统通知（唯一分发口）：场景策略 → 声音档 → 平台分派。
+/// macOS：UNUserNotificationCenter 直连（插件路径在新 macOS 静默失败且吞错，#142），
+/// 授权被拒/投递失败自动转 osascript 兜底；Windows/Linux：tauri-plugin-notification。
+/// 单条投递失败只落日志，不影响调用方流程。
+pub(crate) fn show_notification(
+    app: &tauri::AppHandle,
+    scenario_id: &str,
+    title: &str,
+    body: &str,
+) {
+    use crate::network::notify_policy::{self, SoundChoice};
+
+    let cfg = crate::settings::load_desktop_settings().notifications;
+    let fullscreen = app
+        .get_webview_window("main")
+        .map(|w| w.is_fullscreen().unwrap_or(false))
+        .unwrap_or(false);
+    let decision = notify_policy::decide(&cfg, scenario_id, crate::platform::local_now_hm(), fullscreen);
+    if !decision.deliver {
+        log::debug!("通知被策略拦截：{scenario_id}（{title}）");
+        return;
+    }
+    if let SoundChoice::Custom(name) = &decision.sound {
+        crate::network::sounds::play_custom_async(name);
+    }
+    let with_sound = !decision.silent && decision.sound == SoundChoice::OsDefault;
+
     #[cfg(target_os = "macos")]
     {
-        let _ = app; // macOS 直连 UN，不经 tauri-plugin-notification
-        crate::network::notify_un::show(title, body);
+        let _ = app; // macOS 直连 UN（含 osascript 兜底），不经 tauri-plugin-notification
+        crate::network::notify_un::show(title, body, with_sound);
     }
     #[cfg(not(target_os = "macos"))]
     {

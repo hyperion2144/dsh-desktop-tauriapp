@@ -10,7 +10,8 @@ pub(crate) fn open_external(url: String) -> Result<(), String> {
     if !(url.starts_with("http://")
         || url.starts_with("https://")
         || url.starts_with("mailto:")
-        || url.starts_with("tel:"))
+        || url.starts_with("tel:")
+        || url.starts_with("x-apple.systempreferences:"))
     {
         return Err(format!("不允许打开的链接协议：{url}"));
     }
@@ -61,4 +62,26 @@ pub(crate) fn open_external_impl(url: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// 本地时刻 (小时, 分钟)（通知免打扰判定用；#142）。
+pub(crate) fn local_now_hm() -> (u32, u32) {
+    #[cfg(unix)]
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return (0, 0);
+        }
+        (tm.tm_hour as u32, tm.tm_min as u32)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::SystemInformation::{GetLocalTime, SYSTEMTIME};
+        let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
+        unsafe { GetLocalTime(&mut st) };
+        (st.wHour as u32, st.wMinute as u32)
+    }
+    #[cfg(not(any(unix, windows)))]
+    (0, 0)
 }

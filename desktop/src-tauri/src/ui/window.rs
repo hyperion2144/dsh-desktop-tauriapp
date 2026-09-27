@@ -21,7 +21,7 @@ pub(crate) fn show_error(app: &AppHandle, reason: &str) {
         );
         let _ = w.eval(&js);
     }
-    show_notification(app, "DeepSeek Harness Desktop 启动失败", detail);
+     show_notification(app, crate::network::notify_policy::scenario::STARTUP_ERROR, "DeepSeek Harness Desktop 启动失败", detail);
 }
 
 /// 显示并聚焦主窗口。
