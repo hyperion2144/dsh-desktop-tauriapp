@@ -67,18 +67,63 @@ export function parseGuardProbeResult(raw: string): string | null {
 }
 
 /**
- * 判定一次探针读数是否需要壳侧介入重载。
+ * 会话守卫的判定/退避/脚本（语义源：`mobile/shell-web/session-guard.mjs`，改那里必须同步这里）。
  *
- * `ds`（dsh 客户端在线）是唯一健康信号：`ds0` 表示页面在但客户端没起来，
- * 同样需要重载；`off` 表示设备没网，重载也无济于事，等网络恢复事件再处理。
- *
- * @param reading `parseGuardProbeResult` 的产物
- * @returns true 表示需要重载页面
+ * 维护者 2026-09-27 拍板「都走 B」：回前台/网络换代一律先做**页面内轻量重连**，
+ * 整页重载只在「页面已无法执行脚本」的形态下用（探针读不到/读数残缺/渲染崩溃）。
  */
-export function needsReload(reading: string | null): boolean {
-  if (reading === null) return true;
+export enum GuardAction {
+  NONE = 'none',
+  WAIT_NETWORK = 'wait-network',
+  RECONNECT = 'reconnect',
+  RELOAD = 'reload'
+}
+
+/** 连续这么多次轻量重连仍不健康 → 升级为兜底整页重载。 */
+export const RELOAD_AFTER_RECONNECT_FAILURES = 3;
+/** 连续失败第几次开始退避。 */
+export const BACKOFF_AFTER_FAILURES = 2;
+/** 退避基数（毫秒）。 */
+export const BACKOFF_BASE_MS = 2000;
+/** 退避上限（毫秒）。 */
+export const BACKOFF_CAP_MS = 30000;
+
+/** 第 failures 次连续失败后的退避时长（毫秒）。 */
+export function backoffDelayMs(failures: number): number {
+  if (!Number.isFinite(failures) || failures < BACKOFF_AFTER_FAILURES) return 0;
+  const step = failures - BACKOFF_AFTER_FAILURES;
+  const raw = BACKOFF_BASE_MS * Math.pow(2, step);
+  return raw > BACKOFF_CAP_MS ? BACKOFF_CAP_MS : raw;
+}
+
+/**
+ * 判定读数对应的动作（语义源同上 `actionForReading`）。
+ * `ds` 健康；`off` 设备没网等网络事件；`ds0`/`err` 轻量重连；其余（含解析失败）兜底重载。
+ */
+export function actionForReading(reading: string | null): GuardAction {
+  if (reading === null || reading === undefined) return GuardAction.RELOAD;
   const signal = reading.split('|')[0];
-  if (signal === 'ds') return false;
-  if (signal === 'off') return false;
-  return true;
+  if (signal === 'ds') return GuardAction.NONE;
+  if (signal === 'off') return GuardAction.WAIT_NETWORK;
+  if (signal === 'ds0' || signal === 'err') return GuardAction.RECONNECT;
+  return GuardAction.RELOAD;
+}
+
+/** 轻量重连是否应升级为兜底重载。 */
+export function shouldEscalateToReload(failures: number, reconnects: number): boolean {
+  return failures >= RELOAD_AFTER_RECONNECT_FAILURES && reconnects >= RELOAD_AFTER_RECONNECT_FAILURES;
+}
+
+/**
+ * 页面内轻量重连脚本（语义源同上 `buildLightReconnectScript`）。
+ *
+ * dsh 客户端按 offline/online 事件管理重连：`offline` 中止活动工作并暂停自动重试，随后 `online`
+ * 重置序列、从 500ms 档重试，且每次重试前取消候选/活动 socket 做一次全新物理连接。
+ */
+export function buildLightReconnectScript(): string {
+  return '(function(){try{'
+    + 'var fire=function(t){try{window.dispatchEvent(new Event(t));}catch(e){}};'
+    + 'fire("offline");fire("online");'
+    + 'return "ok";'
+    + '}catch(e){return "err";}})()';
 }

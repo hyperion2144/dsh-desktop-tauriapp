@@ -1,6 +1,14 @@
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { webview } from '@kit.ArkWeb';
-import { buildGuardProbeScript, parseGuardProbeResult } from './GuardScript';
+import {
+  GuardAction,
+  actionForReading,
+  backoffDelayMs,
+  buildGuardProbeScript,
+  buildLightReconnectScript,
+  parseGuardProbeResult,
+  shouldEscalateToReload
+} from './GuardScript';
 
 /**
  * 壳侧会话修复器（#67）。
@@ -25,13 +33,11 @@ const TAG = 'SessionGuard';
 
 /** 修复判定原因（写进日志，真机用 hdc hilog 抓取）。 */
 export enum RepairReason {
-  /** 回前台，后台停留超过阈值，连接大概率已被服务端判死 */
-  FOREGROUND_AFTER_SUSPEND = 'fg-suspend',
-  /** 回前台，后台时间很短，仍探针确认 */
+  /** 回前台（不再区分挂起时长：一律探针确认，不整页重载） */
   FOREGROUND = 'fg',
   /** 网络换代（Wi-Fi ↔ 蜂窝、断网恢复） */
   NETWORK_SWITCH = 'net-switch',
-  /** 渲染进程崩溃（白屏） */
+  /** 渲染进程崩溃（白屏）——页面已无法执行脚本，兜底重载 */
   RENDER_CRASH = 'render-crash'
 }
 
@@ -42,59 +48,25 @@ export interface GuardState {
   attached: boolean;
   /** 连续失败次数（一次成功探针清零） */
   failures: number;
+  /** 连续轻量重连次数（一次成功探针清零） */
+  reconnects: number;
   /** 最近一次探针读数（`信号|在线|套接字`） */
   lastReading: string;
   /** 最近一次修复动作（空串表示没动过手） */
   lastRepair: string;
-  /** 已发生的重载总次数 */
+  /** 已发生的兜底重载总次数（正常路径应当为 0） */
   reloadCount: number;
 }
 
-/** 修复动作判定结果，便于单元推理。 */
-export enum RepairAction {
-  /** 不动手 */
-  NONE = 'none',
-  /** 重载页面 */
-  RELOAD = 'reload',
-  /** 页面没网，等网络恢复事件 */
-  WAIT_NETWORK = 'wait-network',
-  /** 退避期内，跳过本次 */
-  THROTTLED = 'throttled'
-}
-
-/** 连续失败第几次开始退避（前几次直接修，避免把偶发超时拖成慢性病）。 */
-const BACKOFF_AFTER_FAILURES = 2;
-/** 退避步长基数（毫秒）：第 n 次失败等待 `BASE * 2^(n-2)`。 */
-const BACKOFF_BASE_MS = 2000;
-/** 退避上限（毫秒）。 */
-const BACKOFF_CAP_MS = 30000;
-/** 后台停留超过该时长即认为连接已被服务端判死，直接重载、不浪费一次探针。 */
-const SUSPEND_RELOAD_AFTER_MS = 10000;
 /**
- * 重载后的静默期（毫秒）：页面重载本身需要时间。
+ * 一次修复动作（轻量重连或兜底重载）之后的静默期（毫秒）：页面/连接需要时间落定。
  *
- * 少了这道闸会出「刚修好又判它坏」：重载后的前几秒页面还没加载完，探针读到尚未
- * 起来的客户端（ds0）就会再次重载——修一次变修两次。静默期内所有检查直接跳过。
+ * 少了这道闸会出「刚修好又判它坏」：修复后前几秒页面还没恢复，探针读到尚未起来的
+ * 客户端（ds0）就会再修一次——修一次变修两次。静默期内所有检查直接跳过。
  */
 const SETTLE_AFTER_RELOAD_MS = 5000;
-/** `about:blank`：尚未导航到真实页面，重载无意义。 */
+/** `about:blank`：尚未导航到真实页面，修复无意义。 */
 const BLANK_URL = 'about:blank';
-/** 计算第 `failures` 次连续失败后的退避时长（毫秒）。 */
-export function backoffDelayMs(failures: number): number {
-  if (failures < BACKOFF_AFTER_FAILURES) return 0;
-  const step = failures - BACKOFF_AFTER_FAILURES;
-  const raw = BACKOFF_BASE_MS * Math.pow(2, step);
-  return raw > BACKOFF_CAP_MS ? BACKOFF_CAP_MS : raw;
-}
-
-/** 判定探针读数对应的动作（不变量：读不到 = 需要重载）。 */
-export function actionForReading(reading: string | null): RepairAction {
-  if (reading === null) return RepairAction.RELOAD;
-  const signal = reading.split('|')[0];
-  if (signal === 'ds') return RepairAction.NONE;
-  if (signal === 'off') return RepairAction.WAIT_NETWORK;
-  return RepairAction.RELOAD;
-}
 
 /**
  * 会话修复器单例。
@@ -107,11 +79,12 @@ export class SessionGuard {
   private static instance: SessionGuard | undefined = undefined;
   private controller: webview.WebviewController | undefined = undefined;
   private failures: number = 0;
+  private reconnects: number = 0;
   private lastReading: string = '';
   private lastRepair: string = '';
   private reloadCount: number = 0;
   private lastRepairAt: number = 0;
-  /** 后台时刻（`onBackground` 打点），用于判定「挂起多久」。 */
+  /** 后台时刻（`onBackground` 打点），仅用于日志（不再触发整页重载）。 */
   private backgroundAt: number = 0;
   /** 防止并发探针（探针是异步的，回前台与网络事件可能同时触发）。 */
   private probing: boolean = false;
@@ -144,6 +117,7 @@ export class SessionGuard {
     return {
       attached: this.controller !== undefined,
       failures: this.failures,
+      reconnects: this.reconnects,
       lastReading: this.lastReading,
       lastRepair: this.lastRepair,
       reloadCount: this.reloadCount
@@ -151,25 +125,17 @@ export class SessionGuard {
   }
 
   /**
-   * 回前台：超过挂起阈值直接重载；否则探针确认。
+   * 回前台：一律探针确认（维护者 2026-09-27 拍板——不再「挂起 ≥n 秒就整页重载」）。
    *
-   * 直接重载的取舍：离开 10s 以上时进程几乎必然被挂起，服务端已经判死连接，
-   * 此时探针在挂起恢复初期并不可靠，与其等一次可能误判的探针，不如直接重载。
-   * 重载会丢页面内未提交状态，但 dsh 的会话状态在服务端，代价可接受。
+   * 挂起后 mux 大概率已被服务端判死，但页面常常收不到 close；轻量重连优先，
+   * 只有探针读不到（页面已无法执行脚本）才兜底重载。
    */
   async onForeground(): Promise<void> {
     if (this.controller === undefined) return;
     const suspended = this.backgroundAt > 0 ? Date.now() - this.backgroundAt : 0;
     this.backgroundAt = 0;
-    if (suspended >= SUSPEND_RELOAD_AFTER_MS) {
-      // 静默期同样适用于这条路径：刚重载完就退后台再回来，不应再重载一次。
-      if (!this.settled()) {
-        hilog.debug(DOMAIN, TAG, 'suspend reload skipped (settling after reload)');
-        return;
-      }
-      hilog.info(DOMAIN, TAG, 'foreground after %{public}dms suspend -> reload', suspended);
-      this.reload(RepairReason.FOREGROUND_AFTER_SUSPEND);
-      return;
+    if (suspended > 0) {
+      hilog.info(DOMAIN, TAG, 'foreground after %{public}dms suspend -> probe', suspended);
     }
     await this.checkAndRepair(RepairReason.FOREGROUND);
   }
@@ -195,13 +161,13 @@ export class SessionGuard {
     this.reload(RepairReason.RENDER_CRASH);
   }
 
-  /** 探针 + 判定 + 修复。 */
+  /** 探针 + 判定 + 修复（判定表语义源：GuardScript.ets / shell-web/session-guard.mjs）。 */
   private async checkAndRepair(reason: RepairReason): Promise<void> {
     const controller = this.controller;
     if (controller === undefined) return;
-    // 静默期：上一次重载还没落定，此时探针结果不可信。
+    // 静默期：上一次修复还没落定，此时探针结果不可信。
     if (!this.settled()) {
-      hilog.debug(DOMAIN, TAG, 'probe skipped (settling after reload): %{public}s', reason);
+      hilog.debug(DOMAIN, TAG, 'probe skipped (settling after repair): %{public}s', reason);
       return;
     }
     if (this.probing) {
@@ -214,7 +180,7 @@ export class SessionGuard {
       const raw = await controller.runJavaScript(buildGuardProbeScript());
       reading = parseGuardProbeResult(raw);
     } catch (e) {
-      // 注入失败（页面已销毁 / 控制器未附着）：当作「读不到」，走重载判定。
+      // 注入失败（页面已销毁 / 控制器未附着）：当作「读不到」，走兜底重载判定。
       reading = null;
       hilog.warn(DOMAIN, TAG, 'probe failed: %{public}s', this.errText(e));
     } finally {
@@ -223,21 +189,24 @@ export class SessionGuard {
 
     this.lastReading = reading === null ? 'unreadable' : reading;
     const action = actionForReading(reading);
-    hilog.info(DOMAIN, TAG, 'probe[%{public}s] reading=%{public}s action=%{public}s failures=%{public}d',
-      reason, this.lastReading, action, this.failures);
+    hilog.info(DOMAIN, TAG,
+      'probe[%{public}s] reading=%{public}s action=%{public}s failures=%{public}d reconnects=%{public}d',
+      reason, this.lastReading, action, this.failures, this.reconnects);
 
-    if (action === RepairAction.NONE) {
-      // 健康：连续失败计数清零，退避随之解除（下次异常立即修复，不拖成慢性病）。
-      if (this.failures > 0) {
-        hilog.info(DOMAIN, TAG, 'healthy again after %{public}d failures', this.failures);
+    if (action === GuardAction.NONE) {
+      // 健康：连续失败/重连计数清零，退避随之解除（下次异常立即修复，不拖成慢性病）。
+      if (this.failures > 0 || this.reconnects > 0) {
+        hilog.info(DOMAIN, TAG, 'healthy again after %{public}d failures / %{public}d reconnects',
+          this.failures, this.reconnects);
       }
       this.failures = 0;
+      this.reconnects = 0;
       return;
     }
 
     this.failures += 1;
-    if (action === RepairAction.WAIT_NETWORK) {
-      // 设备无网：重载没有意义，等 netCapabilitiesChange 恢复。
+    if (action === GuardAction.WAIT_NETWORK) {
+      // 设备无网：重连/重载都没意义，等 netCapabilitiesChange 恢复。
       hilog.info(DOMAIN, TAG, 'offline, wait for network (%{public}s)', reason);
       return;
     }
@@ -248,7 +217,32 @@ export class SessionGuard {
       hilog.info(DOMAIN, TAG, 'throttled: %{public}dms < backoff %{public}dms', since, delay);
       return;
     }
-    this.reload(reason);
+
+    // 轻量重连优先；页面读不到（action=RELOAD）或连续多次轻量重连仍失败 → 兜底整页重载。
+    if (action === GuardAction.RELOAD || shouldEscalateToReload(this.failures, this.reconnects)) {
+      this.reload(reason);
+      return;
+    }
+    await this.repairByReconnect(reason);
+  }
+
+  /**
+   * 页面内轻量重连（主路径）：不整页重载，让 dsh 客户端按 offline/online 事件重置序列、
+   * 取消活动 socket 并做一次全新物理连接；注入失败（页面已死）则降级为兜底重载。
+   */
+  private async repairByReconnect(reason: RepairReason): Promise<void> {
+    const controller = this.controller;
+    if (controller === undefined) return;
+    try {
+      await controller.runJavaScript(buildLightReconnectScript());
+      this.reconnects += 1;
+      this.lastRepair = reason + '+reconnect';
+      this.lastRepairAt = Date.now();
+      hilog.warn(DOMAIN, TAG, 'light reconnect #%{public}d reason=%{public}s', this.reconnects, reason);
+    } catch (e) {
+      hilog.warn(DOMAIN, TAG, 'light reconnect failed: %{public}s', this.errText(e));
+      this.reload(reason);
+    }
   }
 
   /** 重载页面并记录。 */
