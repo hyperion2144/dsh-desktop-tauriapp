@@ -16,6 +16,17 @@ import { createGzip, createBrotliCompress, constants as zlibConstants } from 'no
 const LOG_PATH = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'mobile-access.log');
 let logStream = null;
 try { logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' }); } catch { /* noop */ }
+
+// ── 上游连接复用与 Nagle（#144 传输层）──
+// 原先每次 http.request 都 agent:false → **每请求新建 TCP**。手机上「打字」这类小请求高频场景
+// （每次输入/回显都是若干小 POST）会被连接建立 + Nagle 小包合并延迟放大；LAN 快不代表公网穿透快。
+// 故：① 上游走 keep-alive 池；② 两侧 socket 关 Nagle（setNoDelay）；③ 逐跳头不原样转发。
+const upstreamAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64 });
+/** 关 Nagle：小包立即发出，不等 ACK 合并。 */
+function noDelay(sock) { try { sock?.setNoDelay?.(true); } catch { /* noop */ } }
+/** 逐跳头（RFC 9110）：不得在代理两侧原样转发——由本次连接自己决定。 */
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade'];
+function stripHopByHop(headers) { for (const k of HOP_BY_HOP) delete headers[k]; return headers; }
 function accessLog(parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}\n`;
   try { logStream?.write(line); } catch { /* noop */ }
@@ -25,29 +36,29 @@ function accessLog(parts) {
 export const POLYFILL = '<script data-dsh-mobile-polyfill="1">!function(){if(self.crypto&&!self.crypto.randomUUID){self.crypto.randomUUID=function(){var b=new Uint8Array(16);self.crypto.getRandomValues(b);b[6]=b[6]&15|64;b[8]=b[8]&63|128;var h="";for(var i=0;i<16;i++){var x=b[i].toString(16);h+=(x.length<2?"0":"")+x;if(i===3||i===5||i===7||i===9)h+="-";}return h;}}}();</script>';
 
 /**
- * 远程浏览器「本地身份」补丁：dsh-client-connection 的 `isLoopback` 只看
- * `location.hostname`（127.x/localhost/[::1]），远程经隧道访问的 hostname 是
- * cpolar/cloudflared 域名 → isLoopback=false → settingsScope 走 memory 模式
- * （注释原文：「remote browsers stay process-local because settings RPCs are
- * loopback-only」）→ ui-theme/locale 等所有服务端设置 fallback 默认（主题变
- * 「跟随系统」）。本补丁把 Location.prototype.hostname 的读取伪装成 127.0.0.1，
- * 抢在 dsh client bundles 之前执行（HS 注入位置在 <head> 最前）。
- * 副作用：settings.describe 等 RPC 在远程端启用（经 lane 配对 cookie 放行），
- * 远程端能读到 Host 的服务端设置——这正是「远程跟随桌面设置」的需求。
- * 注意不伪装 href/origin：dsh 的 /api 信任栅栏走 Host 头（lane 已改写），
- * 且页面相对 URL 仍按真实域名解析（cpolar → lane 路径不变）。
+ * 远程端「页面拥有 Host」能力位（#145）：dsh 客户端把**非 loopback 页面**当远程浏览器，
+ * 特权面（服务端设置 RPC）不开放 → 插件设置、dsh 服务端设置、壳的手机访问信息一律拿不到。
+ * 判定原文（dsh-client-connection）：
+ *   isLoopback = transport?.ownsHost === true || 无 location || hostname ∈ loopback
+ * 浏览器禁止伪造 `location.hostname`（历史 LOOPBACK_HOSTNAME_PATCH 因此失效，已删除），
+ * 但官方留了能力位 `ClientTransportHooks.ownsHost`：声明页面拥有 Host，
+ * `ctx.connection.isLoopback` 即无视页面 authority 一律为真。只给该字段即可——客户端在没有
+ * rpc/fetch/openStream 时回落默认 HTTP + WebSocket 载体
+ * （`rpc ?? createWebConnectionRpc(fetch, openStream)`），请求仍全部经 lane 反代。
+ * 顺序：必须早于 dsh 客户端 bundle 执行（<head> 最前注入）。注入仅发生在已配对响应上
+ * （反代门禁先于注入）。
  */
-export const LOOPBACK_HOSTNAME_PATCH = '<script data-dsh-mobile-loopback="1">!function(){try{var d=Object.getOwnPropertyDescriptor(Location.prototype,"hostname");if(d&&typeof d.get==="function"){Object.defineProperty(Location.prototype,"hostname",{get:function(){return "127.0.0.1"},configurable:true});}}catch(e){}}();</script>';
+export const OWNS_HOST_PATCH = '<script data-dsh-mobile-owns-host="1">!function(){try{var g=globalThis,t=g.__DSH_TRANSPORT__;if(t&&typeof t==="object"){t.ownsHost=true;}else{g.__DSH_TRANSPORT__={ownsHost:true};}}catch(e){}}();</script>';
 
 /**
  * 远程端主题视觉同步：dsh 官方在非 loopback 客户端把 settingsScope 锁成 memory
  * 模式（settings.describe 不发起），ui-theme preference 永远 "system" → body 无
  * `data-ds-dark-theme` → 皮肤 CSS 走浅色背景（§2.2 主题透传）。本补丁从 lane 的
- * `/api/pair/info`（已配对即放行）读桌面端 ui-theme.preference，强制 body 属性，
+ * 保留命名空间端点（`/__dsh-mobile/api/pair/info`，已配对即放行）读桌面端 ui-theme.preference，强制 body 属性，
  * 并用 MutationObserver 守卫（ui-theme publish / React 重渲染可能清掉该属性）。
  * 设置页选项值仍显示 system（官方 memory 模式限制，UI 显示层被锁死，无法注入改）。
  */
-export const THEME_SYNC_PATCH = '<script data-dsh-mobile-theme-sync="1">!function(){var pref=null;function enforce(){try{var b=document.body;if(!b)return;var want=pref==="dark";var has=b.hasAttribute("data-ds-dark-theme");if(want!==has){if(want)b.setAttribute("data-ds-dark-theme","");else b.removeAttribute("data-ds-dark-theme");}}catch(e){}}function load(){fetch("/api/pair/info",{headers:{"accept":"application/json"}}).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t)});return r.json()}).then(function(d){var v=d&&d.uiTheme;if(typeof v==="string"&&(v==="dark"||v==="light"||v==="system")){pref=v;enforce();}}).catch(function(){})}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",load)}else{load()}try{var mo=new MutationObserver(function(){enforce()});if(document.body)mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});else{var mo2=new MutationObserver(function(){if(document.body){mo2.disconnect();mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});enforce();}});mo2.observe(document.documentElement,{childList:true});}}catch(e){}}();</script>';
+export const THEME_SYNC_PATCH = '<script data-dsh-mobile-theme-sync="1">!function(){var pref=null;function enforce(){try{var b=document.body;if(!b)return;var want=pref==="dark";var has=b.hasAttribute("data-ds-dark-theme");if(want!==has){if(want)b.setAttribute("data-ds-dark-theme","");else b.removeAttribute("data-ds-dark-theme");}}catch(e){}}function load(){fetch("/__dsh-mobile/api/pair/info",{headers:{"accept":"application/json"}}).then(function(r){if(!r.ok)return r.text().then(function(t){throw new Error("HTTP "+r.status+" "+t)});return r.json()}).then(function(d){var v=d&&d.uiTheme;if(typeof v==="string"&&(v==="dark"||v==="light"||v==="system")){pref=v;enforce();}}).catch(function(){})}if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",load)}else{load()}try{var mo=new MutationObserver(function(){enforce()});if(document.body)mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});else{var mo2=new MutationObserver(function(){if(document.body){mo2.disconnect();mo.observe(document.body,{attributes:true,attributeFilter:["data-ds-dark-theme"],subtree:false});enforce();}});mo2.observe(document.documentElement,{childList:true});}}catch(e){}}();</script>';
 
 export function desktopEnvPatchScript(platform) {
   const p = ['darwin','win32','linux'].includes(platform) ? platform : 'linux';
@@ -322,6 +333,7 @@ export function createRewriteProxy(opts) {
       const buildHeaders = () => {
         const h = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
         upstreamAuth?.applyTo(h);
+        stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
         return h;
       };
       const targetPath = normalizeRemotePath(req.url);
@@ -344,7 +356,7 @@ export function createRewriteProxy(opts) {
               html = html.replace(/<head[^>]*>/i, (m) => `${m}${inject.join('')}`);
             }
             const out = Buffer.from(html, 'utf8');
-            const outHeaders = { ...proxyRes.headers };
+            const outHeaders = stripHopByHop({ ...proxyRes.headers });
             delete outHeaders['content-length'];
             delete outHeaders['transfer-encoding'];
             outHeaders['content-length'] = String(out.length);
@@ -370,7 +382,7 @@ export function createRewriteProxy(opts) {
 
         if (shouldCompress) {
           const enc = canBr ? 'br' : 'gzip';
-          const outHeaders = { ...proxyRes.headers };
+          const outHeaders = stripHopByHop({ ...proxyRes.headers });
           delete outHeaders['content-length'];
           delete outHeaders['transfer-encoding'];
           outHeaders['content-encoding'] = enc;
@@ -389,7 +401,7 @@ export function createRewriteProxy(opts) {
         if (htmlDoc && isCompressed(proxyRes.headers) && inject.length > 0 && onInjectSkip) {
           onInjectSkip(req.url.split('?')[0]);
         }
-        res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+        res.writeHead(proxyRes.statusCode ?? 502, stripHopByHop({ ...proxyRes.headers }));
         proxyRes.pipe(res);
         // 任一端断开都要清理另一端
         res.on('close', () => proxyRes.destroy());
@@ -399,7 +411,7 @@ export function createRewriteProxy(opts) {
 
       const send = (isRetry) => {
         const proxyReq = http.request(
-          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: false },
+          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: upstreamAgent },
           (proxyRes) => {
             // dsh 401：凭证失效 → 单次重换（重新自取 token + 换新 cookie）并原样重放；仍 401 透传
             if (!isRetry && allowRetry && upstreamAuth && proxyRes.statusCode === 401) {
@@ -425,6 +437,7 @@ export function createRewriteProxy(opts) {
             handleUpstreamResponse(proxyRes);
           },
         );
+        proxyReq.on('socket', noDelay); // 上游方向关 Nagle（小请求高频时差一个数量级）
         proxyReq.on('error', (err) => {
           accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath, '= ERR', err.code ?? err.message]);
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
@@ -464,6 +477,9 @@ export function createRewriteProxy(opts) {
       }
     }
     const headers = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+    // WS upgrade 保留 connection/upgrade（握手必需），只清掉无关的逐跳头
+    delete headers['keep-alive'];
+    delete headers['proxy-connection'];
     // dsh 会话凭证：upgrade 请求同样附带（401 不重放——客户端重连即拿新凭证）
     upstreamAuth?.applyTo(headers);
     const wsPath = normalizeRemotePath(req.url);
@@ -476,6 +492,8 @@ export function createRewriteProxy(opts) {
     const proxyReq = http.request({
       host: upstreamHost, port: upstreamPort, method: req.method, path: normalizeRemotePath(req.url), headers, agent: false,
     });
+    proxyReq.on('socket', noDelay); // 握手与后续帧都不受 Nagle 影响
+    noDelay(socket); // 客户端→lane 方向同样关 Nagle
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
       socket.write('HTTP/1.1 101 Switching Protocols\r\n');
       // 原样回传上游的 upgrade 头（Sec-WebSocket-Accept 等）
@@ -505,7 +523,18 @@ export function createRewriteProxy(opts) {
             teardown();
           },
           onFallbackRaw: () => accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= 帧信封解析失败，回退 raw 透传（字节保真不受影响）']),
-          onUpstreamFrame: (op, payload) => { uFrames++; if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`); },
+          onUpstreamFrame: (op, payload) => {
+            uFrames++;
+            if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`);
+            // #144 诊断：上游主动关帧（op=8）——「服务端判死 vs 隧道断开」的判定依据。
+            // **只记一次**：帧解析异常时 op 可能是流中偶合字节，逐帧记录会刷屏（实测同一毫秒
+            // 数百行），而 dsh 的 stdout 由壳同步落盘——刷屏会堵住 dsh 主线程，页面卡到点不动。
+            if (op === 8 && !muxClosed) {
+              const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
+              muxLog(`上游关闭帧 code=${code}（服务端主动关；0/1000=正常，1006 不会以帧出现）`);
+              muxClose('upstream');
+            }
+          },
         });
         proxySocket.on('data', (c) => pump.onData(c));
         socket.on('data', () => pump.noteClientActivity());
@@ -522,6 +551,11 @@ export function createRewriteProxy(opts) {
             if (f === undefined) { muxLog('client 帧信封非法，停止帧级记录'); cFrames = 99; break; }
             cFrames++;
             muxLog(`client帧#${cFrames} op=${f.opcode} len=${f.payload.length} :: ${f.payload.toString('utf8').slice(0, 140)}`);
+            if (f.opcode === 8) {
+              const code = f.payload.length >= 2 ? f.payload.readUInt16BE(0) : 0;
+              muxLog(`客户端关闭帧 code=${code}（页面侧主动关）`);
+              muxClose('client');
+            }
             off += f.total;
             if (cFrames >= 3) break;
           }
@@ -550,8 +584,9 @@ export function createRewriteProxy(opts) {
         if (force.unref) force.unref();
         try { if (!socket.destroyed) socket.destroy(); } catch { /* noop */ }
       };
-      proxySocket.on('close', teardown);
-      socket.on('close', teardown);
+      // #144 诊断：谁先关（close 由哪侧先触发）——实机日志即可区分服务端判死与隧道断开
+      proxySocket.on('close', () => { muxClose('upstream'); teardown(); });
+      socket.on('close', () => { muxClose('client'); teardown(); });
     });
     // 上游返回普通 HTTP 响应（非 101）：把状态码/头回写后断开，别让客户端永久挂起
     proxyReq.on('response', (proxyRes) => {

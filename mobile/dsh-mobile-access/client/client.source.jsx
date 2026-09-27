@@ -38,11 +38,19 @@ export function apply(ctx) {
 }
 
 const lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
-const LANE = "http://127.0.0.1:" + lanePort;
+/** lane 控制面的保留命名空间（与 lib/lane-routes.mjs 的 LANE_PREFIX 同值）。 */
+const LANE_PREFIX = "/__dsh-mobile";
+/** 页面自身是否就在回环源上（桌面壳内的设置页）；远程/手机端一律走同源。 */
+const LANE_LOOPBACK =
+  typeof location !== "undefined" &&
+  /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
+/** 回环页直连属主 lane 端口；远程页走同源（页面本身就由 lane 提供）。
+ *  旧实现无条件打 127.0.0.1:lanePort——在手机上那是手机自己，必然失败（#145）。 */
+const LANE = LANE_LOOPBACK ? "http://127.0.0.1:" + lanePort : "";
 
-/** lane 属主通道直 fetch。CORS 由 lane 端按 Origin 反射放行（仅放行回环源）。 */
+/** lane 控制面直 fetch（保留命名空间）。回环页 CORS 由 lane 按 Origin 反射放行；远程页同源无 CORS。 */
 async function lane(path, opts = {}) {
-  const res = await fetch(LANE + path, {
+  const res = await fetch(LANE + LANE_PREFIX + path, {
     method: opts.method ?? "GET",
     headers: { "content-type": "application/json" },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -416,6 +424,8 @@ function MobileAccessPanel() {
   const cfQr = useMemo(() => makeQr(cfLink), [cfLink]);
 
   // ---- helpers ----
+  // 配对链接地址**刻意用历史形态 `/pair`**（不带命名空间前缀）：已安装的旧壳解析器只认裸
+  // `/pair`，给命名空间形态它会把它当目录拼错地址 → 401（实机踩过）；lane 两种都服务。
   const pairLink = (base, scheme, token) =>
     scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
 

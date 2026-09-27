@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet, SafeAreaView, Platform } from 'react
 import { WebView, type WebViewNavigation } from 'react-native-webview';
 import { palette } from '../theme';
 import type { EnterTarget } from './HomeScreen';
+import { useSessionGuard } from '../lib/use-session-guard';
 
 export interface AndroidBackRefs {
   /** WebView 内部历史能否后退（onNavigationStateChange 更新） */
@@ -17,6 +18,8 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
   androidBackRefs?: AndroidBackRefs;
 }) {
   const webRef = useRef<WebView>(null);
+  // #144 会话守卫：回前台/网络换代 → 探针 → 页面内轻量重连优先；仅页面已无法执行脚本时才兜底重载。
+  const guard = useSessionGuard(webRef, target.base);
 
   function onShouldStartLoadWithRequest(nav: WebViewNavigation): boolean {
     // 外链（非当前 base 域名）交系统浏览器；应用内导航放行。
@@ -45,6 +48,8 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
           setSupportMultipleWindows={false}
           allowsBackForwardNavigationGestures
           originWhitelist={['*']}
+          onMessage={guard.onMessage}
+          onRenderProcessGone={guard.onRenderProcessGone}
           onNavigationStateChange={(nav) => {
             if (androidBackRefs) {
               androidBackRefs.canGoBack.current = nav.canGoBack;
@@ -81,6 +86,8 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
         setSupportMultipleWindows={false}
         allowsBackForwardNavigationGestures
         originWhitelist={['*']}
+        onMessage={guard.onMessage}
+        onContentProcessDidTerminate={guard.onRenderProcessGone}
       />
     </View>
   );

@@ -3,7 +3,8 @@
 import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createRewriteProxy, POLYFILL, LOOPBACK_HOSTNAME_PATCH, THEME_SYNC_PATCH } from './proxy.mjs';
+import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH } from './proxy.mjs';
+import { LANE_PREFIX, laneRoutePath } from './lane-routes.mjs';
 import { createDshUpstreamAuth } from './dshauth.mjs';
 import { PairingStore, createFileStorage, deviceNameFromUA } from './pairing.mjs';
 import { selectLanIPv4, buildPairLink, buildHttpPairLink, normalizeRemote } from './links.mjs';
@@ -89,20 +90,21 @@ export function createMobileAccessService(opts = {}) {
     upstreamAuth: dshAuth,
     ...(wsPingIntervalMs !== undefined ? { wsPingIntervalMs } : {}),
     ...(wsPongTimeoutMs !== undefined ? { wsPongTimeoutMs } : {}),
-    // 仅注入 POLYFILL + LOOPBACK_HOSTNAME_PATCH + THEME_SYNC_PATCH（顺序：补丁先于 polyfill、先于 dsh scripts）。
+    // 注入顺序：能力位补丁先于 polyfill、先于 dsh scripts。
+    // OWNS_HOST_PATCH（#145）：远程端声明「页面拥有 Host」→ 解锁服务端设置 RPC（插件设置/
+    //   dsh 设置/壳的手机访问信息）；替代已失效的 hostname 伪装补丁（浏览器禁止伪造，已删除）。
+    // THEME_SYNC_PATCH：主题视觉兜底（从 lane 保留命名空间读桌面端 ui-theme.preference）。
+    // POLYFILL：老内核补 crypto.randomUUID。
     // ⚠️ 不注入 desktopEnvPatchScript：对齐 pocket 行为——只在 DSH Desktop 壳内注入，
     // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
     // 走「桌面分支」假设 Tauri IPC、皮肤 mount 时序，远程浏览器没 __TAURI__ 也没准备好
     // 的 DOM → classList null / 皮肤不加载（§2.2）。POLYFILL 单独无害。
-    // LOOPBACK_HOSTNAME_PATCH：已证实浏览器禁止伪造 hostname（configurable:false），
-    // 该补丁不再生效，保留仅为记录。THEME_SYNC_PATCH 是视觉兜底方案：读 /api/pair/info
-    // 的 uiTheme 强制 body[data-ds-dark-theme]，让远程端背景与桌面一致（设置项显示值
-    // 仍为 system——dsh 官方 memory 模式限制）。
-    inject: [LOOPBACK_HOSTNAME_PATCH, THEME_SYNC_PATCH, POLYFILL],
+    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL],
     auth: (req) => {
       // 配对门禁：所有到达反代本体的路径都必须是已配对设备（携带会话 cookie）。
-      // 不做任何 /api/pair/* 前缀豁免——配对/控制路由全部由 routePairing 先行处理，
-      // 打到这里的不属于路由表，一律要求 cookie，杜绝「前缀豁免 + 上游路径归一化」绕过。
+      // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），
+      // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
+      // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
       const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
       return { ok: store.isDevice(cookie) };
     },
@@ -272,7 +274,10 @@ export function createMobileAccessService(opts = {}) {
 
   // 配对/授权路由（先于上游转发）：
   function routePairing(req, res) {
-    const path = req.url.split('?')[0];
+    // 路径分类：只认 lane 保留命名空间与冻结别名；返回 null 即「不归 lane 管」——
+    // 包括 OPTIONS 预检与 dsh 自有路径，一律交还反代透传，lane 绝不代答（#145）。
+    const path = laneRoutePath(req.url.split('?')[0]);
+    if (path === null) return false;
     const authed = store.isDevice(parseCookie(req.headers.cookie, 'dsh_mobile_session'));
     const owner = isLocalOwner(req);
     const canManage = owner || authed;
@@ -326,7 +331,7 @@ export function createMobileAccessService(opts = {}) {
     if (path === '/api/pair/info' && req.method === 'GET') {
       // 属主 + 已配对设备：配对候选地址（二维码/链接用）；已配对设备需要 uiTheme
       // 让注入脚本同步桌面主题偏好（视觉一致，§2.2）。
-      if (!owner && !authed) { unpaired401(); return true; }
+      if (!canManage) { unpaired401(); return true; }
       const lanIp = selectLanIPv4(os.networkInterfaces?.() ?? {});
       let customTunnelUrl = customTunnel;
       if (!customTunnelUrl) {
@@ -343,8 +348,9 @@ export function createMobileAccessService(opts = {}) {
       return true;
     }
     if (path === '/api/pair/tunnel' && req.method === 'POST') {
-      // 仅属主：保存第三方隧道地址（cpolar 等）用于生成配对二维码；空串清除。
-      if (!owner) { unpaired401(); return true; }
+      // 保存第三方隧道地址（cpolar 等）用于生成配对二维码；空串清除。
+      // 作用域两级（#145）：已配对设备＝完整访问（管理动作不再限属主）；匿名/未配对 401。
+      if (!canManage) { unpaired401(); return true; }
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', () => {
@@ -365,16 +371,18 @@ export function createMobileAccessService(opts = {}) {
       return true;
     }
     if (path === '/api/pair/mint' && req.method === 'POST') {
-      // 仅属主：铸造新令牌（旧令牌自动作废）
-      if (!owner) { unpaired401(); return true; }
+      // 铸造新令牌（旧令牌自动作废）
+      // 作用域两级（#145）：已配对设备也可铸造令牌（管理＝完整访问）。
+      if (!canManage) { unpaired401(); return true; }
       const token = store.mint();
       json(200, { ok: true, token, expiresAt: store.tokenExpiresAt });
       return true;
     }
     if (path === '/api/pair/probe' && req.method === 'GET') {
-      // 仅属主：校验第三方隧道地址（cpolar 等）。要求 http(s) URL，探测其 /pair
-      // 路由可达（改写反代放行）；loopback 与 tauri.localhost 拒绝。
-      if (!owner) { unpaired401(); return true; }
+      // 校验第三方隧道地址（cpolar 等）：要求 http(s) URL，探测其配对入口路由
+      // 可达（改写反代放行）；loopback 与 tauri.localhost 拒绝。
+      // 作用域两级（#145）：已配对设备同样可探测隧道地址。
+      if (!canManage) { unpaired401(); return true; }
       const raw = new URL(req.url, 'http://x').searchParams.get('url') ?? '';
       void runProbe(raw, json);
       return true;
@@ -405,8 +413,8 @@ export function createMobileAccessService(opts = {}) {
       return true;
     }
     if (path === '/api/pair/remove' && req.method === 'POST') {
-      // 移除单个设备配对（属主控制台操作）。
-      if (!owner) { unpaired401(); return true; }
+      // 移除单个设备配对（属主控制台与已配对设备同级，作用域两级，#145）。
+      if (!canManage) { unpaired401(); return true; }
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', () => {
@@ -443,8 +451,8 @@ export function createMobileAccessService(opts = {}) {
       return true;
     }
     if (path === '/api/pair/cloudflared' && req.method === 'GET') {
-      // 仅属主：查询隧道配置与运行状态。
-      if (!owner) { unpaired401(); return true; }
+      // 查询隧道配置与运行状态（已配对设备可读，#145 完整访问）。
+      if (!canManage) { unpaired401(); return true; }
       json(200, {
         bin: tunnel.bin,
         url: tunnel.url,
@@ -454,8 +462,8 @@ export function createMobileAccessService(opts = {}) {
       return true;
     }
     if (path === '/api/pair/cloudflared' && req.method === 'POST') {
-      // 仅属主：设置 cloudflared 路径（应用并持久化）或停止隧道。
-      if (!owner) { unpaired401(); return true; }
+      // 设置 cloudflared 路径（应用并持久化）或停止隧道（已配对设备可管，#145）。
+      if (!canManage) { unpaired401(); return true; }
       let body = '';
       req.on('data', (c) => { body += c; });
       req.on('end', async () => {
@@ -748,7 +756,8 @@ function apply(ctx) {
       try { ctx?.logger?.error?.(`dsh-mobile-access: lane ${lanePort} 启动失败: ${e}`); } catch { /* noop */ }
       return;
     }
-    try { ctx?.logger?.info?.(`dsh-mobile-access: lane 改写反代已监听 127.0.0.1:${lanePort} → ${svc.proxy.upstream}`); } catch { /* noop */ }
+    // 启动横幅：报出上游与自有控制面的保留命名空间——命名空间外的一切路径原样透传（#145）。
+    try { ctx?.logger?.info?.(`dsh-mobile-access: lane 改写反代已监听 127.0.0.1:${lanePort} → ${svc.proxy.upstream}（控制面 ${LANE_PREFIX}/，其余全量透传）`); } catch { /* noop */ }
     // 预热 dsh 会话凭证（异步，失败不阻塞：首个上游 401 会触发自动重换）
     void svc.dshAuth?.ensure?.();
     // 启动时按 env（桌面壳 spawn 注入）优先，其次 settings.yaml 持久化值；

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createMobileAccessService, parseCookie } from '../lib/index.mjs';
 import { createMemoryStorage } from '../lib/pairing.mjs';
+import { LANE_PREFIX, lanePath } from '../lib/lane-routes.mjs';
 
 function startStub() { const s = http.createServer((_q, res) => { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('upstream'); }); return s; }
 
@@ -80,6 +81,97 @@ test('控制端点鉴权：隧道访问（外部 Host+XFF）匿名一律 401；�
     assert.equal((await jget('http://127.0.0.1:' + lp + '/api/pair/devices')).status, 200, '属主 devices 放行');
     assert.equal((await jget('http://127.0.0.1:' + lp + '/api/pair/mint', { method: 'POST', body: '{}' })).status, 200, '属主 mint 放行');
     assert.equal((await jget('http://127.0.0.1:' + lp + '/api/pair/stop', { method: 'POST', body: '{}' })).status, 200, '属主 stop 放行');
+  } finally {
+    svc.proxy.server.closeAllConnections?.(); stub.closeAllConnections?.();
+    await svc.close();
+    stub.close();
+  }
+});
+
+test('#145 完整访问：已配对设备（隧道）＝属主同级；命名空间内可管、命名空间外全量透传', async () => {
+  const stub = startStub();
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  const svc = createMobileAccessService({ storage: createMemoryStorage(), upstreamPort: stub.address().port });
+  const lp = await svc.listen();
+  const base = 'http://127.0.0.1:' + lp;
+  const tunnel = { Host: 'xxxx.trycloudflare.com', 'x-forwarded-for': '203.0.113.7' };
+  try {
+    // 命名空间下的配对入口
+    const token = svc.store.mint();
+    const acc = await jget(base + lanePath('/api/pair/accept'), {
+      method: 'POST',
+      headers: tunnel,
+      body: JSON.stringify({ token, name: 'iPad' }),
+    });
+    assert.equal(acc.status, 200, '命名空间配对入口可用');
+    const hdr = { ...tunnel, cookie: acc.setCookie.split(';')[0] };
+    const call = (p, opt = {}) => jget(base + p, { method: opt.method ?? 'GET', body: opt.body, headers: hdr });
+    const raw = (p, opt = {}) => textGet(base + p, { method: opt.method ?? 'GET', body: opt.body, headers: hdr });
+
+    // 已配对设备（隧道）＝完整访问：读与管理都不再限属主
+    assert.equal((await call(lanePath('/api/pair/info'))).status, 200, 'info 可读');
+    assert.equal((await call(lanePath('/api/pair/devices'))).status, 200, 'devices 可读');
+    assert.equal((await call(lanePath('/api/pair/cloudflared'))).status, 200, 'cloudflared 状态可读');
+    assert.equal(
+      (await call(lanePath('/api/pair/cloudflared'), { method: 'POST', body: JSON.stringify({ action: 'stop' }) })).status,
+      200,
+      'cloudflared 可管',
+    );
+    assert.equal(
+      (await call(lanePath('/api/pair/tunnel'), { method: 'POST', body: JSON.stringify({ url: '' }) })).status,
+      200,
+      '第三方隧道地址可写',
+    );
+    assert.equal((await call(lanePath('/api/pair/mint'), { method: 'POST', body: '{}' })).status, 200, 'mint 可管');
+    assert.equal(
+      (await call(lanePath('/api/pair/remove'), { method: 'POST', body: JSON.stringify({ deviceId: 'nope' }) })).status,
+      404,
+      'remove 授权通过（目标不存在 → 404，而非 401）',
+    );
+    assert.notEqual((await call(lanePath('/api/pair/probe') + '?url=notaurl')).status, 401, 'probe 授权通过');
+
+    // 冻结别名仍可用（已发出的二维码/旧客户端）
+    assert.equal((await call('/api/pair/devices')).status, 200, '历史别名 /api/pair/devices 仍放行');
+
+    // 透传不变式：命名空间外的一切请求（含 dsh 自有路径与 OPTIONS 预检）原样到达上游
+    assert.equal((await raw('/api/settings/describe')).text, 'upstream', 'dsh 自有路径透传');
+    assert.equal((await raw('/some/plugin/route?x=1')).text, 'upstream', '未知路径透传');
+    const preflight = await raw('/api/settings/describe', { method: 'OPTIONS' });
+    assert.equal(preflight.status, 200, 'OPTIONS 预检不得被 lane 代答');
+    assert.equal(preflight.text, 'upstream', 'OPTIONS 预检透传到上游');
+
+    // 认证边界不变：匿名（无 cookie）在命名空间内外都是 401
+    const anon = (p, opt = {}) => jget(base + p, { method: opt.method ?? 'GET', body: opt.body, headers: tunnel });
+    assert.equal((await anon(lanePath('/api/pair/devices'))).status, 401, '匿名 devices 401');
+    assert.equal((await anon(lanePath('/api/pair/mint'), { method: 'POST', body: '{}' })).status, 401, '匿名 mint 401');
+    assert.equal((await anon('/api/pair/devices')).status, 401, '匿名旧别名 401');
+    assert.equal((await textGet(base + '/api/settings/describe', { headers: tunnel })).status, 401, '匿名透传路径 401');
+
+    // 停用访问（清空设备表）——放最后，会注销本测试自己的 cookie
+    assert.equal((await call(lanePath('/api/pair/stop'), { method: 'POST', body: '{}' })).status, 200, 'stop 可管');
+  } finally {
+    svc.proxy.server.closeAllConnections?.(); stub.closeAllConnections?.();
+    await svc.close();
+    stub.close();
+  }
+});
+
+test('#145 保留命名空间：/__dsh-mobile 之外的 dsh 路径不被 lane 吞掉', async () => {
+  const stub = startStub();
+  await new Promise((r) => stub.listen(0, '127.0.0.1', r));
+  const svc = createMobileAccessService({ storage: createMemoryStorage(), upstreamPort: stub.address().port });
+  const lp = await svc.listen();
+  const base = 'http://127.0.0.1:' + lp;
+  const tunnel = { Host: 'x.cn', 'x-forwarded-for': '203.0.113.9' };
+  try {
+    const token = svc.store.mint();
+    const acc = await jget(base + lanePath('/api/pair/accept'), {
+      method: 'POST', headers: tunnel, body: JSON.stringify({ token, name: 'phone' }),
+    });
+    const hdr = { ...tunnel, cookie: acc.setCookie.split(';')[0] };
+    // 命名空间前缀本身不是路由：交给上游（而不是 lane 返回 404/401 之类）
+    assert.equal((await textGet(base + LANE_PREFIX, { headers: hdr })).text, 'upstream', '命名空间根透传');
+    assert.equal((await textGet(base + LANE_PREFIX + '/api/pair/unknown', { headers: hdr })).text, 'upstream', '命名空间内未登记路径透传');
   } finally {
     svc.proxy.server.closeAllConnections?.(); stub.closeAllConnections?.();
     await svc.close();

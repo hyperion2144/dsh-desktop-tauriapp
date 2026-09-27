@@ -67,12 +67,45 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     // 首行 connection scope 补丁：DSH 0.1.5 Web profile 的 connection 条目缺少
     // webRuntime/webServer 注入，导致 rpc.handle 注册的 channel 不会挂 HTTP 路由
     // （浏览器侧报 transport failure）。与 dsh-mnemon 的 cordis.patch.yml 同一手法。
-    let content = "- id: connection\n  inject: [webRuntime, webServer]\n\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-web-mobile\n      name: dsh-web-mobile\n";
+    // #144：附带 dsh 网关心跳覆盖（typert-gateway → websocketHeartbeatIntervalMs），
+    // 否则 dsh 默认 2s Ping + 连丢 2 次 terminate 会把移动端挂起/弱网的连接秒判死。
+    let content = format!(
+        "- id: connection\n  inject: [webRuntime, webServer]\n{}\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n{}",
+        gateway_patch_block(crate::settings::configured_mux_heartbeat_ms()),
+        mobile_layout_insert_block(crate::settings::configured_desktop_layout_on_phones())
+    );
     let stale = std::fs::read_to_string(&path).map(|t| t != content).unwrap_or(true);
     if stale {
         let _ = std::fs::write(&path, content);
     }
     path
+}
+
+/// dsh 网关（`typert-gateway` 条目，载入 `@deepseek-ai/dsh-api-gateway`）的 mux 心跳覆盖（#144）。
+///
+/// dsh 0.1.7 网关默认每 2s 对 `/api/remote.mux` 发 Ping、连丢 2 次即 terminate——移动端切后台/
+/// 弱网数秒就被判死，而页面常常收不到 close（表现为「能发消息、收不到新消息」）。壳把心跳抬到
+/// `DEFAULT_MUX_HEARTBEAT_MS`，并可经 `mux_heartbeat_ms` 调整或关闭覆盖。
+/// `None`（= 设置里写 0）表示不覆盖：不写该行，dsh 用自身默认值。
+pub(crate) fn gateway_patch_block(heartbeat_ms: Option<u32>) -> String {
+    match heartbeat_ms {
+        None => String::new(),
+        Some(ms) => format!("\n- id: typert-gateway\n  config:\n    websocketHeartbeatIntervalMs: {ms}\n"),
+    }
+}
+
+/// 移动布局插件（dsh-web-mobile）的注入行（#147 卡顿对策 A，与心跳覆盖同一补丁文件）。
+///
+/// 背景：手机上的卡顿来自**宿主前端**（会话整段挂载 + 逐块 Shiki 高亮；审计见子模块
+/// docs/audits/2026-09-23-session-switch-jank-handover.md），桌面布局路径（iPad）明显更快。
+/// `desktop_layout_on_phones = true` 时**不注入**该行：手机拿到桌面布局（牺牲排版换流畅），
+/// 用户可随时改回；缺省 false 保持现行行为。
+pub(crate) fn mobile_layout_insert_block(desktop_layout_on_phones: bool) -> String {
+    if desktop_layout_on_phones {
+        String::new()
+    } else {
+        String::from("    - id: dsh-web-mobile\n      name: dsh-web-mobile\n")
+    }
 }
 
 /// 定位手机访问插件包目录（dsh-mobile-access / dsh-mobile-nav）：
@@ -383,6 +416,39 @@ pub(crate) fn desktop_platform_tag() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mobile_layout_insert_block_follows_setting() {
+        // 缺省（false）：保留 dsh-web-mobile 注入行（现行移动布局）
+        let on = mobile_layout_insert_block(false);
+        assert!(on.contains("- id: dsh-web-mobile"));
+        assert!(on.contains("name: dsh-web-mobile"));
+        // 开启桌面布局：整行不写 → 手机拿到桌面布局（#147 路线 A）
+        assert_eq!(mobile_layout_insert_block(true), "");
+    }
+    #[test]
+    fn gateway_patch_block_covers_heartbeat() {
+        // 开启覆盖：写出 typert-gateway 条目与毫秒值（patch 的 config 是合并语义）
+        let on = gateway_patch_block(Some(30_000));
+        assert!(on.contains("- id: typert-gateway"));
+        assert!(on.contains("websocketHeartbeatIntervalMs: 30000"));
+        assert!(on.ends_with('\n'), "块尾保留换行，拼接后不粘连后续条目");
+        // 不覆盖：不产生任何行（dsh 用自身默认 2s）
+        assert_eq!(gateway_patch_block(None), "");
+    }
+
+    #[test]
+    fn heartbeat_normalization_defaults_and_clamps() {
+        // 缺省 = 壳默认 30s（覆盖开启）；0 = 回退 dsh 默认；其余值钳制在 1s..=10min
+        assert_eq!(
+            crate::settings::normalize_mux_heartbeat_ms(None),
+            Some(crate::settings::DEFAULT_MUX_HEARTBEAT_MS)
+        );
+        assert_eq!(crate::settings::normalize_mux_heartbeat_ms(Some(0)), None);
+        assert_eq!(crate::settings::normalize_mux_heartbeat_ms(Some(5)), Some(1_000));
+        assert_eq!(crate::settings::normalize_mux_heartbeat_ms(Some(45_000)), Some(45_000));
+        assert_eq!(crate::settings::normalize_mux_heartbeat_ms(Some(9_999_999)), Some(600_000));
+    }
 
     #[test]
     fn link_ownership_scopes_cleanup_to_this_instance() {

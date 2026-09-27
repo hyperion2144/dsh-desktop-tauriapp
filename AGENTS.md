@@ -82,21 +82,46 @@
 
 ## 手机访问（mobile）关键契约
 
-- 三种访问身份：属主（同机 loopback 直连 lane、无 X-Forwarded-For）＝控制端点
-  （mint/devices/stop/events/probe）放行；已配对设备（隧道 + 会话 cookie）＝代理全量；
-  匿名（隧道）= 仅 /pair 与 /api/pair/accept。反代 auth 无路径前缀豁免（防归一化绕过）。
+（决策背景见 `docs/adr/0002-mobile-remote-full-access.md`：为何远程端＝完整访问、为何用 `ownsHost`。）
+- 两级访问（#145）：已配对设备（隧道/局域网 + 会话 cookie）＝**完整访问**——dsh 端口一切请求透传，
+  lane 自有控制端点（配对/设备/隧道/事件）读写全放行；匿名（隧道）= 仅配对入口。属主（同机 loopback、
+  无 X-Forwarded-For）只是「免 cookie 的便利判定」，不再多一级权限。反代 auth 无路径前缀豁免（防归一化绕过）。
+- lane 自有路由住在保留命名空间 `/__dsh-mobile`（`mobile/dsh-mobile-access/lib/lane-routes.mjs` 是唯一事实源）；
+  `/pair`、`/api/pair/*` 是**冻结别名**（只为已发出的二维码与旧客户端存活，不得新增）。命名空间外的一切
+  路径（含 dsh 自有路由与 OPTIONS 预检）原样透传，lane 绝不代答——透传不变式由单测锁死。
+- 远程端能力位：已配对响应注入 `globalThis.__DSH_TRANSPORT__ = { ownsHost: true }`（dsh 客户端 isLoopback
+  判定的官方出口）→ 服务端设置 RPC 解锁，插件设置/dsh 设置/壳的手机访问信息可读可写；旧的 hostname
+  伪装补丁（浏览器禁止伪造 location.hostname）已删除。
 - lane 改写反代默认 127.0.0.1:3091（settings.yaml dsh-desktop-tauriapp: lane_port，env
   DSH_MOBILE_LANE_PORT 优先）；桌面 spawn dsh 时注入 DSH_MOBILE_LANE_PORT /
   DSH_MOBILE_ENABLED / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN。
-- WS 空闲保活：lane 反代对 upgrade 后的 WebSocket 空闲时在帧边界注入 ping（防中间代理空闲
-  超时揧断 dsh /api/remote.mux 复用长连接——手机端「连接异常」循环的对策）；pong 超时判死主动
-  断开触发 dsh 客户端快速重连。settings.yaml dsh-desktop-tauriapp: ws_keepalive_ms（ping 间隔
-  ms，0=关闭，默认 15000）、ws_pong_timeout_ms（判死超时 ms，默认 10000），改动重启 lane 生效。
+- WS 心跳与保活（#144 校准）：①**dsh 侧**——0.1.7 起网关自己每 2s 对 `/api/remote.mux` 发 Ping、
+  连丢 2 次即 terminate，移动端挂起/弱网秒级被判死；壳生成 profile 补丁时写入 `typert-gateway` →
+  `config.websocketHeartbeatIntervalMs`（壳默认 30s；`desktop-settings.json` 的 `mux_heartbeat_ms`
+  可调，`0` = 不覆盖、回退 dsh 默认 2s）。②**lane 侧**——upgrade 后仍做帧感知泵：空闲时在帧边界
+  注入 ping（防中间代理空闲掐断），pong 超时判死主动断开触发客户端快速重连；`ws_keepalive_ms`
+  （默认 15000，0=关）、`ws_pong_timeout_ms`（默认 10000），改动重启 lane 生效。③**诊断**——lane
+  记录 mux 先关闭侧与关闭码（`关闭（先关闭侧=…）`、`上游/客户端关闭帧 code=…`），实机日志可区分
+  服务端判死 vs 隧道断开。
+- 移动壳会话守卫（#144）：iOS(expo) 与鸿蒙壳都有「回前台 / 网络换代 / 渲染崩溃 → 页面内探针 → 判定」，
+  **一律先做页面内轻量重连**（`offline→online` 事件对，走 dsh 客户端官方重连路径），整页重载只在
+  「探针读不到 / 白屏」时兜底，且带退避 + 静默期；共享逻辑源 `mobile/shell-web/session-guard.mjs`
+  （shell-web 单测锁死语义，两端按其移植，勿各自漂移）。旧行为「鸿蒙挂起 ≥10s 直接整页重载」已删。
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
   → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
- - 测试：mobile-access `npm test`（node 53 例，含 WS 空闲保活帧泵 7 例）、shell-web 3 例、
-   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 8 例）；cargo test 94 例；
+- 手机布局与卡顿根因（#147）：**卡顿在宿主前端**（会话整段挂载 + 逐块 Shiki 高亮；审计见
+  `mobile/dsh-mobile-nav/docs/audits/2026-09-23-session-switch-jank-handover.md`），不在网络、也不在布局插件。
+  两条对策：**A** 壳设置 `desktop_layout_on_phones`（true = 不注入 dsh-web-mobile，手机走 iPad 同款桌面布局）；
+  **B** `src/client/mobile-render-budget.ts` 只在本仓做移动端视觉窗口化（content-visibility），不碰子模块。
+- 会话守卫判定（#144 实机回归）：读数 `null` = 页面**回了消息**（只是它自己的探测请求超时）→ 轻量重连；
+  只有**完全没回消息**才兜底重载，而且要连续 2 次。别改回「读不到 → 重载」——那会让 iPad 周期性假刷新。
+- 远程模式设置可用性：`remote_owns_host_init_script(remote_addr)` 只对壳配置的远程主机注入
+  `__DSH_TRANSPORT__={ownsHost:true}`（否则模型设置报 settings are unavailable in this browser）；不装 dshDesktop 载体。
+- lane 传输层（#147，勿退回）：上游 keep-alive 连接池 + 客户端/上游两侧 setNoDelay + 逐跳头不原样转发；
+  别再写回 `agent: false`，那会让每个请求新建 TCP 并把 `connection: close` 透给浏览器。
+  - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 10 例（含会话守卫 7 例）、
+   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 109 例；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 

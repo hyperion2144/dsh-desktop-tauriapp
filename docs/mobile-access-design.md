@@ -68,7 +68,7 @@ HarmonyOS NEXT（ArkUI 原生 + ArkWeb(WebView) 组件，UI 尽量与另两端�
 - 内部包 dsh-mobile-access（host+client 双半区，参照 dsh-pocket 结构）
   host：改写反代（HTTP+WS，Host/Origin→loopback）+ cloudflared 快速隧道（二进制随包
   分发：GitHub latest + 国内镜像 + 多线程分块下载，参照 pocket tunnel.mjs）
-  + 配对令牌/设备会话 + /api/pair 路由族 + SSE 状态（$DSH_HOME 下 0600 文件存令牌；授权=cookie 会话，无密码）。
+  + 配对令牌/设备会话 + `/__dsh-mobile/api/pair` 路由族（历史别名 `/api/pair`，冻结）+ SSE 状态（$DSH_HOME 下 0600 文件存令牌；授权=cookie 会话，无密码）。
   client：settings.section「手机访问」Tab（二维码/刷新/停止/已配对设备列表/状态）。
   转发目标默认 127.0.0.1:<当前配置端口>（读 settings.yaml 的 dsh-desktop-tauriapp:port）。
 - 反代监听：127.0.0.1:<lanePort>（仅隧道用）与 0.0.0.0:<lanePort>（局域网直连）；
@@ -116,7 +116,8 @@ HarmonyOS NEXT（ArkUI 原生 + ArkWeb(WebView) 组件，UI 尽量与另两端�
 - 配对令牌一次性+限时；刷新/停止即时作废；设备会话与令牌分开存；
 - 无访问密码：授权完全由一次性令牌+HttpOnly cookie 承担；令牌仅存本机 0600；
 - cloudflared 生命周期随 dsh 子进程重启自动恢复（参照 pocket）；
-- 已配对设备仅能访问反代暴露面：/api/pair 等控制端点仅 loopback。
+- 已配对设备＝**完整访问**（#145）：dsh 端口全量透传（含 dsh 自有 `/api/*`、插件路由、WS upgrade、SSE），
+  lane 控制端点在 `/__dsh-mobile` 命名空间下读写全放行；属主判定只免除 cookie 要求，不再多一级权限。
 
 ## 4. 实施顺序（评审通过后）
 

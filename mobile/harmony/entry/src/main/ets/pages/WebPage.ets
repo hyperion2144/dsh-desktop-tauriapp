@@ -43,6 +43,8 @@ struct WebPage {
     // 注册控制器：EntryAbility / NetworkWatcher 侧的会话检查靠它找到页面。
     SessionGuard.get().attach(this.controller);
     this.tuneSocketIdleTimeout();
+    // ArkWeb 性能：提前建连/预解析（#147）——首屏能省一次 DNS+TCP 往返。
+    this.preconnect();
   }
 
   aboutToDisappear(): void {
@@ -56,9 +58,16 @@ struct WebPage {
   build() {
     Column() {
       // 无顶部栏：系统左缘右滑返回手势直接回上一页（router 栈默认支持）。
-      Web({ src: this.url, controller: this.controller })
+      // renderMode 属于 WebOptions（不是链式属性）：ASYNC_RENDER 走自渲染管线，
+      // 滚动/动画帧率明显好于同步渲染（#147 卡顿对策）。
+      Web({ src: this.url, controller: this.controller, renderMode: RenderMode.ASYNC_RENDER })
         .javaScriptAccess(true)
         .domStorageAccess(true)
+        // ArkWeb 性能开关：异步渲染（自渲染管线）显著改善滚动/动画帧率；
+        // 关闭回弹与横行滚动条，减少多余的重绘与手势竞争。
+        .overScrollMode(OverScrollMode.NEVER)
+        .horizontalScrollBarAccess(false)
+        .zoomAccess(false)
         .fileAccess(true)
         .onlineImageAccess(true)
         .onErrorReceive((event) => {
@@ -89,6 +98,22 @@ struct WebPage {
     .width('100%')
     .height('100%')
     .backgroundColor(Theme.Bg)
+  }
+
+  /**
+   * ArkWeb 预热：对当前地址做预连接（DNS + TCP/TLS）与预解析，首屏少一程往返（#147）。
+   * 预热失败一律静默降级——它不是加载的前置条件。
+   */
+  private preconnect(): void {
+    if (this.url === '' || this.url === 'about:blank') return;
+    try {
+      // 静态方法（3 参）：对目标地址预建 numSockets 条连接并预解析，首屏省一程往返。
+      webview.WebviewController.prepareForPageLoad(this.url, true, 2);
+    } catch (e) {
+      const err = e as Error;
+      hilog.info(DOMAIN, TAG, 'prepareForPageLoad skipped: %{public}s',
+        err !== undefined && err !== null && err.message !== undefined ? err.message : String(e));
+    }
   }
 
   /** 尽量缩短引擎侧 socket 空闲回收窗口；API < 21 静默降级。 */

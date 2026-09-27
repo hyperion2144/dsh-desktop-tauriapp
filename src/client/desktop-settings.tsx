@@ -55,6 +55,10 @@ interface DesktopData {
   remote_list: string[]
   port: number
   profiles: Array<{ name: string; active: boolean; selectable: boolean }>
+  /** #144 网关心跳覆盖（null/缺省 = 壳默认 30s；0 = 不覆盖） */
+  mux_heartbeat_ms?: number | null
+  /** #147 路线 A：手机端是否改用桌面布局 */
+  desktop_layout_on_phones?: boolean | null
 }
 
 interface DshSourceState {
@@ -310,6 +314,18 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [concurrencyInput, setConcurrencyInput] = useState<string>('3')
   const concurrencyTouchedRef = useRef(false)
 
+
+  // 手机访问（远程连接）：dsh 网关 mux 心跳覆盖（#144）
+  // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
+  const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
+  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
+
+  // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
+  useEffect(() => {
+    setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
+    const hb = desktop.mux_heartbeat_ms
+    setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
+  }, [desktop])
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -456,11 +472,15 @@ function DesktopSettingsPanel(): React.ReactElement {
           proxy_pass: (ns.proxy_pass as string) || p.proxy_pass || '',
         })
         setProxyEffective(p.effective)
+        // 以 **Rust 返回的完整对象为基底**，只覆盖三个以 ns 优先的展示字段——
+        // 之前是手写对象，漏字段就静默丢值（#147 实测：勾选保存成功但重开永远不勾）。
         setDesktop({
-          remote_addr: (ns.remote_addr as string | null) ?? null,
+          ...d,
+          remote_addr: (ns.remote_addr as string | null) ?? d.remote_addr ?? null,
           remote_list: (ns.remote_list as string[]) ?? d.remote_list ?? [],
           port: (ns.port as number) || d.port || 3080,
-          profiles: d.profiles,
+          mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
+          desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
         })
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
         if (d.profiles.length > 0) {
@@ -671,6 +691,39 @@ function DesktopSettingsPanel(): React.ReactElement {
       .then(() => invoke('set_download_concurrency', { value: v }))
       .then(() => setDownloadBoxNote(`已保存：并发上限 ${v}`))
       .catch(() => setDownloadBoxNote('保存失败（无 Tauri IPC？）'))
+  }
+
+  /** #144：保存 dsh 网关心跳覆盖（mux_heartbeat_ms）。空/非数字→保留 30000；0 = 不覆盖。 */
+  const handleSaveMuxHeartbeat = (): void => {
+    const raw = muxHeartbeatInput.trim()
+    const parsed = raw === '' ? 30000 : parseInt(raw, 10)
+    if (Number.isNaN(parsed) || parsed < 0) {
+      setDownloadBoxNote('心跳间隔需为整数毫秒（0 = 不覆盖，回退 dsh 默认 2s）')
+      return
+    }
+    const v = Math.min(600000, parsed)
+    void nsSave({ mux_heartbeat_ms: v })
+      .then(() =>
+        setDownloadBoxNote(
+          v === 0
+            ? '已保存：不覆盖心跳（dsh 默认 2s），重启 dsh 生效。'
+            : `已保存：mux 心跳 ${v}ms（dsh 原生 2s），重启 dsh 生效。`
+        )
+      )
+      .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
+  }
+
+  /** #147 路线 A：保存「手机端改用桌面布局」开关。 */
+  const handleSaveMobileLayout = (): void => {
+    void nsSave({ desktop_layout_on_phones: desktopLayoutOnPhones })
+      .then(() =>
+        setDownloadBoxNote(
+          desktopLayoutOnPhones
+            ? '已保存：手机使用桌面布局（不加载移动布局插件），重启 dsh 生效。'
+            : '已保存：手机使用移动布局，重启 dsh 生效。'
+        )
+      )
+      .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
   }
 
   const handleSaveProxy = (): void => {
@@ -1429,6 +1482,40 @@ function DesktopSettingsPanel(): React.ReactElement {
         {downloadBoxNote && <div style={NOTE_STYLE}>{downloadBoxNote}</div>}
         <div style={NOTE_STYLE}>同时进行的下载数上限，超出排队；改动立即生效。</div>
       </SectionBox>
+      {/* ── 手机访问（远程连接，#144）── */}
+      <SectionBox title="手机访问（远程连接）">
+        <div style={ROW_STYLE}>
+          <input
+            placeholder="30000"
+            data-desktop-settings="mux-heartbeat-ms"
+            style={{ ...INPUT_BASE_STYLE, width: 100 }}
+            value={muxHeartbeatInput}
+            onChange={(e) => setMuxHeartbeatInput(e.target.value)}
+          />
+          <PfBtn variant="ghost" onClick={handleSaveMuxHeartbeat}>保存</PfBtn>
+        </div>
+        <div style={NOTE_STYLE}>
+          dsh 网关对 <code>/api/remote.mux</code> 的心跳间隔（毫秒）。dsh 原生 2s 且连丢 2 次即断开，
+          移动端切后台/弱网会被秒判死（表现为「能发消息、收不到新消息」）；壳默认覆盖为 30000。
+          填 0 = 不覆盖（回退 dsh 默认），改动重启 dsh 生效。
+        </div>
+      </SectionBox>
+        <div style={ROW_STYLE}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              data-desktop-settings="desktop-layout-on-phones"
+              checked={desktopLayoutOnPhones}
+              onChange={(e) => setDesktopLayoutOnPhones(e.target.checked)}
+            />
+            手机端改用桌面布局（不加载移动布局插件）
+          </label>
+          <PfBtn variant="ghost" onClick={handleSaveMobileLayout}>保存</PfBtn>
+        </div>
+        <div style={NOTE_STYLE}>
+          手机上的卡顿来自宿主前端（会话整段挂载 + 逐块代码高亮），不是网络。勾选后手机走与 iPad
+          相同的桌面布局：明显更流畅，代价是排版更挤（可横屏缓解）。不勾选 = 移动布局。改动重启 dsh 生效。
+        </div>
 
       {/* ── 代理设置 ── */}
       <SectionBox title="代理设置">

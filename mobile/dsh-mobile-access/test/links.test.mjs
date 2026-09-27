@@ -24,10 +24,15 @@ test('selectLanIPv4：RFC1918 优先、物理网卡加分、VPN 减分', () => {
   assert.equal(selectLanIPv4({}), null);
 });
 
+import { laneRoutePath } from '../lib/lane-routes.mjs';
+
 test('buildPairLink / buildHttpPairLink 编码', () => {
   const a = buildPairLink(['192.168.1.23:3091'], 'tok_1');
   assert.match(a, /^dsh-mobile:\/\/pair\?token=tok_1&base=192\.168\.1\.23%3A3091$/);
   const b = buildHttpPairLink('x.cn:3091', 't2');
+  // 浏览器兜底链接**刻意用历史形态 /pair**：已安装的旧壳解析器只认裸 /pair（命名空间形态
+  // 会被当目录拼错 → 401，实机踩过）；lane 两种形态都服务，旧形态对新旧客户端都安全。
   assert.equal(b, 'http://x.cn:3091/pair?token=t2');
+  assert.equal(laneRoutePath('/pair'), '/pair', '旧链接路径仍是 lane 路由（冻结别名）');
 });
 

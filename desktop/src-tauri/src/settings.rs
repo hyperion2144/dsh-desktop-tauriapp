@@ -91,6 +91,14 @@ pub struct DesktopSettings {
     pub proxy_pass: Option<String>,
     /// 下载管理器：并发下载数上限（默认 3，1-32）。
     pub download_concurrency: Option<u32>,
+    /// dsh 网关注册心跳覆盖（#144）：`websocketHeartbeatIntervalMs`，单位毫秒。
+    /// 缺省 = 用壳默认 30s（移动端挂起/弱网不被误判死）；`0` = 不覆盖（dsh 默认 2s）；
+    /// `n` = 覆盖为 n ms。可经 desktop-settings.json 或设置页调整。
+    pub mux_heartbeat_ms: Option<u32>,
+    /// 手机端是否改用**桌面布局**（#147 卡顿对策 A）：`true` = 不注入 dsh-web-mobile，
+    /// 手机得到与 iPad 相同的桌面布局（不卡但 UI 拥挤）；缺省/false = 现行移动布局。
+    /// 改动重启 dsh 生效（补丁文件在 spawn 前重写）。
+    pub desktop_layout_on_phones: Option<bool>,
     /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
     /// 其余 profile 首次 spawn 时按公式分配并持久化到这里，保证后续启动稳定。
     pub profile_ports: Option<std::collections::BTreeMap<String, u16>>,
@@ -416,6 +424,30 @@ pub fn configured_download_concurrency() -> u32 {
         .clamp(1, 32)
 }
 
+/// 壳默认的网关心跳覆盖值（#144）：30s（dsh 默认 2s + 连丢 2 次即 terminate，对移动链路太紧）。
+pub const DEFAULT_MUX_HEARTBEAT_MS: u32 = 30_000;
+
+/// 网关心跳覆盖（#144）：`Some(ms)` = 覆盖为 ms（钳制 1s..=10min）；`None` = 不覆盖（dsh 默认 2s）。
+/// 网关心跳覆盖的归一化（纯函数，可单测）：`Some(0)` = 不覆盖（dsh 默认 2s）；
+/// 缺省 = 壳默认 30s；其余值钳制在 1s..=10min（防误配置成 1ms 风暴或过大失去判活意义）。
+pub(crate) fn normalize_mux_heartbeat_ms(raw: Option<u32>) -> Option<u32> {
+    match raw {
+        Some(0) => None,
+        None => Some(DEFAULT_MUX_HEARTBEAT_MS),
+        Some(ms) => Some(ms.clamp(1_000, 600_000)),
+    }
+}
+
+/// 网关心跳覆盖（#144，读壳设置 desktop-settings.json 的 mux_heartbeat_ms）。
+pub fn configured_mux_heartbeat_ms() -> Option<u32> {
+    normalize_mux_heartbeat_ms(load_desktop_settings().mux_heartbeat_ms)
+}
+
+/// 手机端是否改用桌面布局（#147 路线 A）：缺省 false（保持移动布局，行为不变）。
+pub fn configured_desktop_layout_on_phones() -> bool {
+    load_desktop_settings().desktop_layout_on_phones.unwrap_or(false)
+}
+
 /// cloudflared 可执行文件路径（settings.yaml cloudflared_bin；空=不启用公网隧道）。
 pub fn configured_cloudflared_bin() -> String {
     load_desktop_settings().cloudflared_bin.unwrap_or_default()
@@ -462,6 +494,8 @@ mod tests {
       proxy_user: Some("alice".into()),
       proxy_pass: Some("s3cret".into()),
       download_concurrency: Some(5),
+      mux_heartbeat_ms: Some(30000),
+      desktop_layout_on_phones: Some(true),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
        dsh_mode: Some("builtin".into()),
@@ -480,6 +514,8 @@ mod tests {
     let y = serde_yaml::to_string(&s).unwrap();
     let back: DesktopSettings = serde_yaml::from_str(&y).unwrap();
     assert_eq!(back.download_concurrency, Some(5));
+  // #144：网关心跳覆盖随序列化往返不丢
+  assert_eq!(back.mux_heartbeat_ms, Some(30000));
     assert_eq!(back.profile_ports.as_ref().and_then(|m| m.get("desktop")).copied(), Some(3081));
     assert_eq!(back.profile_lane_ports.as_ref().and_then(|m| m.get("web")).copied(), Some(3091));
     assert_eq!(back.port, Some(3081));
