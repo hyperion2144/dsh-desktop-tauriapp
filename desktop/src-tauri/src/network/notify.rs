@@ -3,6 +3,7 @@
 //! 迁移自 lib.rs 功能区域（notify）。
 
 use tauri::{AppHandle, Manager, Emitter};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_notification::NotificationExt;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -206,31 +207,46 @@ pub(crate) fn inject_task_notifier(app: AppHandle, port: u16, token: &str) {
 
 /// 最小 TCP+HTTP 探测：连接成功且 GET / 返回 <400 视为健康。
 
-/// 确认/申请系统通知权限（三平台通用）。
-/// tauri-plugin-notification 桌面端 `request_permission`/`permission_state` 返回
-/// `PermissionState`：macOS 走 UNUserNotificationCenter、Windows 走 Toast（AUMID）、
-/// Linux 走 dbus 通知。放任何 `.show()` 之前 best-effort 调用并记录结果，便于排查
-/// “通知不生效”（显示权限被拒 / 平台不支持 / 请求失败等）。
+/// 确认/申请系统通知权限（三平台分派）。
+/// macOS：直连 UNUserNotificationCenter 真实授权（#142；插件桌面端权限 API 是硬编码
+/// Granted 的桩，绝不走插件，见 notify_un 模块注释）；Windows/Linux：插件幂等确认。
+/// 放任何 `.show()` 之前 best-effort 调用并记录结果，便于排查「通知不生效」。
 pub(crate) fn request_notification_permission(app: &tauri::AppHandle) {
-    use tauri::plugin::PermissionState;
-    match app.notification().permission_state() {
-        Ok(PermissionState::Granted) => log::info!("通知权限：已授予"),
-        Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
-            match app.notification().request_permission() {
-                Ok(_) => log::info!("通知权限：未决定，已发起请求"),
-                Err(e) => log::warn!("申请通知权限失败：{e}"),
+    #[cfg(target_os = "macos")]
+    {
+        crate::network::notify_un::request_auth(app);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri::plugin::PermissionState;
+        match app.notification().permission_state() {
+            Ok(PermissionState::Granted) => log::info!("通知权限：已授予"),
+            Ok(PermissionState::Prompt | PermissionState::PromptWithRationale) => {
+                match app.notification().request_permission() {
+                    Ok(_) => log::info!("通知权限：未决定，已发起请求"),
+                    Err(e) => log::warn!("申请通知权限失败：{e}"),
+                }
             }
+            Ok(PermissionState::Denied) => log::warn!("通知权限：被拒绝，任务完成通知将不可见"),
+            Err(e) => log::warn!("查询通知权限失败：{e}"),
         }
-        Ok(PermissionState::Denied) => log::warn!("通知权限：被拒绝，任务完成通知将不可见"),
-        Err(e) => log::warn!("查询通知权限失败：{e}"),
     }
 }
 
-/// 发一条系统通知并记录发送失败（用于排查“通知不生效”）。
-/// `.show()` 返回的错在插件内部被吞掉，这里统一落日志。
+/// 发一条系统通知（三平台分派）。
+/// macOS：UNUserNotificationCenter 直连（插件路径在新 macOS 静默失败且吞错，#142）；
+/// Windows/Linux：tauri-plugin-notification。单条投递失败只落日志，不影响调用方流程。
 pub(crate) fn show_notification(app: &tauri::AppHandle, title: &str, body: &str) {
-    match app.notification().builder().title(title).body(body).show() {
-        Ok(()) => log::info!("系统通知已发送：{title}"),
-        Err(e) => log::warn!("系统通知发送失败（{title}）：{e}"),
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app; // macOS 直连 UN，不经 tauri-plugin-notification
+        crate::network::notify_un::show(title, body);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        match app.notification().builder().title(title).body(body).show() {
+            Ok(()) => log::info!("系统通知已发送：{title}"),
+            Err(e) => log::warn!("系统通知发送失败（{title}）：{e}"),
+        }
     }
 }
