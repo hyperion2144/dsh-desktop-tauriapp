@@ -263,7 +263,7 @@ function NotificationSettingsPanel(): React.ReactElement {
           <div className="n-grp" key={gid}>
             <div className="n-gname">{groupLabel(gid)}</div>
             {rows.map((s) => {
-              const conf = s.config ?? { enabled: s.defaultOn, sound: 'default' }
+              const conf = data.config.scenarios[s.id] ?? { enabled: s.defaultOn, sound: 'default' }
               return (
                 <div className="n-srow" key={s.id}>
                   <div className="n-sinfo">
@@ -309,12 +309,11 @@ function NotificationSettingsPanel(): React.ReactElement {
             })}
           </div>
         ))}
-        <div className="n-note">
-          显示名 / 分组为 T4 原型定稿；场景 id 与默认值来自 T3 决议。自定义音效文件（wav/mp3/ogg，≤5MB）
-          导入后存放于数据目录 sounds/。{busy ? ' · 保存中…' : ''}
+         <div className="n-note">
+           自定义音效文件（wav / mp3 / ogg，≤5MB）导入后存放于数据目录 sounds/，可随时在下拉中切换或覆盖。{busy ? ' · 保存中…' : ''}
+         </div>
         </div>
       </div>
-    </div>
   )
 }
 

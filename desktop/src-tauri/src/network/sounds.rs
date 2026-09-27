@@ -2,9 +2,11 @@
 //!
 //! 声音三分语义里 `custom:<名>` 的应用侧半区：文件入库（扩展名+魔数+大小校验，
 //! 复制进 `$DSH_HOME/sounds/`）与播放（rodio，10s 截断）。`default`/`none` 不经过本模块。
+//! `default` 档的试听走系统音（afplay），不经过本模块的文件解析。
 
 use crate::settings::dsh_home;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// 单文件大小上限（T5 决议：5MB）。
@@ -187,4 +189,34 @@ pub fn list_sounds() -> Vec<String> {
         .unwrap_or_default();
     out.sort();
     out
+}
+
+/// 系统默认提示音试听（macOS：afplay 播 /System/Library/Sounds；纯放音，
+/// 不涉及通知投递身份，与被否决的 osascript 通知兜底无关）。
+pub fn play_system_default_async() {
+    #[cfg(target_os = "macos")]
+    std::thread::spawn(|| {
+        for name in ["Ping.aiff", "Boop.aiff", "Tink.aiff"] {
+            let p = format!("/System/Library/Sounds/{name}");
+            if std::path::Path::new(&p).exists() {
+                let ok = Command::new("afplay")
+                    .arg(&p)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map(|mut c| {
+                        let _ = c.wait();
+                        true
+                    })
+                    .unwrap_or(false);
+                if ok {
+                    return;
+                }
+            }
+        }
+        log::warn!("[sounds] 系统默认音试听失败（未找到系统音文件）");
+    });
+    #[cfg(not(target_os = "macos"))]
+    log::info!("[sounds] 当前平台暂无系统默认音试听实现");
 }

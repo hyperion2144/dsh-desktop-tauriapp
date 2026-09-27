@@ -968,7 +968,7 @@ pub(crate) fn get_notifications_state() -> Result<serde_json::Value, String> {
 
 /// 保存通知配置（整体替换 notifications 对象；Rust 单写者语义同 save_desktop_settings）。
 #[tauri::command]
-pub(crate) fn set_notifications_config(config: crate::settings::NotificationsConfig) -> Result<(), String> {
+pub(crate) async fn set_notifications_config(config: crate::settings::NotificationsConfig) -> Result<(), String> {
     let mut current = load_desktop_settings();
     current.notifications = config;
     crate::settings::save_desktop_settings(&current)
@@ -976,7 +976,7 @@ pub(crate) fn set_notifications_config(config: crate::settings::NotificationsCon
 
 /// 申请系统通知权限（macOS：UN 授权；其余平台幂等确认）。
 #[tauri::command]
-pub(crate) fn request_notification_permission_cmd() -> Result<String, String> {
+pub(crate) async fn request_notification_permission_cmd() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
         crate::network::notify_un::request_auth_state()
@@ -989,15 +989,20 @@ pub(crate) fn request_notification_permission_cmd() -> Result<String, String> {
 
 /// 导入自定义音效：校验（扩展名/魔数/≤5MB）+ 复制进 sounds/，返回文件名。
 #[tauri::command]
-pub(crate) fn import_notification_sound(path: String) -> Result<String, String> {
+pub(crate) async fn import_notification_sound(path: String) -> Result<String, String> {
     crate::network::sounds::import_file(&path)
 }
 
 /// 试听音效："none" 无操作；其余（含 "default" 与 custom 名）走 rodio 播放。
 #[tauri::command]
-pub(crate) fn preview_notification_sound(sound: String) -> Result<(), String> {
-    match sound.as_str() {
+pub(crate) async fn preview_notification_sound(sound: String) -> Result<(), String> {
+    let trimmed = sound.strip_prefix("custom:").unwrap_or(&sound).to_string();
+    match trimmed.as_str() {
         "none" => Ok(()),
+        "default" => {
+            crate::network::sounds::play_system_default_async();
+            Ok(())
+        }
         name => {
             crate::network::sounds::preview(name);
             Ok(())
@@ -1006,9 +1011,10 @@ pub(crate) fn preview_notification_sound(sound: String) -> Result<(), String> {
 }
 
 
+
 /// 选择本地音频文件（tauri-plugin-dialog Rust API；返回绝对路径或 null）。
 #[tauri::command]
-pub(crate) fn choose_notification_sound(app: tauri::AppHandle) -> Result<Option<String>, String> {
+pub(crate) async fn choose_notification_sound(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let picked = app
         .dialog()
