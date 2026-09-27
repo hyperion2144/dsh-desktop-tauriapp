@@ -205,8 +205,18 @@ export function apply(ctx) {
           const last = lastTurnEndAt.get(sid) ?? 0
           if (now - last < TURN_END_DEBOUNCE_MS) return
           lastTurnEndAt.set(sid, now)
-          const title = session?.title ?? session?.name ?? ''
-          report('task-complete', title ? `「${title}」回合已结束` : '')
+          // event.data.reason.kind 区分结束原因（dsh-notifier 同源语义），
+          // 文案不依赖 session.title（实测载荷中常不可用）。
+          const kind = event.data?.reason?.kind ?? 'done'
+          const kindText = {
+            error: '回合异常结束',
+            blocked: '回合被阻塞',
+            'max-tokens': '回合达到 token 上限',
+            interrupted: '回合被打断',
+            done: '回合已结束',
+          }[kind] ?? '回合已结束'
+          const err = kind === 'error' ? (event.data?.reason?.error?.message ?? '') : ''
+          report('task-complete', err ? `${kindText}：${err}`.slice(0, 200) : kindText)
         } else if (event.type === 'approval/asked') {
           report('dsh-approval', session?.title ? `「${session.title}」等待你的审批确认` : '')
         }
