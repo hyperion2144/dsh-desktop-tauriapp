@@ -12,6 +12,7 @@
         "targetSdkVersion": "26.0.0",
         "compatibleSdkVersion": "5.0.0(12)",
         "runtimeOS": "HarmonyOS",
+        "signingConfig": "default",
         "buildOption": {
           "strictMode": {
             "caseSensitiveCheck": true,
