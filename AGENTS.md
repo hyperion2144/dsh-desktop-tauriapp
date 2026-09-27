@@ -82,6 +82,7 @@
 
 ## 手机访问（mobile）关键契约
 
+（决策背景见 `docs/adr/0002-mobile-remote-full-access.md`：为何远程端＝完整访问、为何用 `ownsHost`。）
 - 两级访问（#145）：已配对设备（隧道/局域网 + 会话 cookie）＝**完整访问**——dsh 端口一切请求透传，
   lane 自有控制端点（配对/设备/隧道/事件）读写全放行；匿名（隧道）= 仅配对入口。属主（同机 loopback、
   无 X-Forwarded-For）只是「免 cookie 的便利判定」，不再多一级权限。反代 auth 无路径前缀豁免（防归一化绕过）。
