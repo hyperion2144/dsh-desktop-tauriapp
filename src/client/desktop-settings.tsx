@@ -310,6 +310,9 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [concurrencyInput, setConcurrencyInput] = useState<string>('3')
   const concurrencyTouchedRef = useRef(false)
 
+
+  // 手机访问（远程连接）：dsh 网关 mux 心跳覆盖（#144）
+  const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -671,6 +674,26 @@ function DesktopSettingsPanel(): React.ReactElement {
       .then(() => invoke('set_download_concurrency', { value: v }))
       .then(() => setDownloadBoxNote(`已保存：并发上限 ${v}`))
       .catch(() => setDownloadBoxNote('保存失败（无 Tauri IPC？）'))
+  }
+
+  /** #144：保存 dsh 网关心跳覆盖（mux_heartbeat_ms）。空/非数字→保留 30000；0 = 不覆盖。 */
+  const handleSaveMuxHeartbeat = (): void => {
+    const raw = muxHeartbeatInput.trim()
+    const parsed = raw === '' ? 30000 : parseInt(raw, 10)
+    if (Number.isNaN(parsed) || parsed < 0) {
+      setDownloadBoxNote('心跳间隔需为整数毫秒（0 = 不覆盖，回退 dsh 默认 2s）')
+      return
+    }
+    const v = Math.min(600000, parsed)
+    void nsSave({ mux_heartbeat_ms: v })
+      .then(() =>
+        setDownloadBoxNote(
+          v === 0
+            ? '已保存：不覆盖心跳（dsh 默认 2s），重启 dsh 生效。'
+            : `已保存：mux 心跳 ${v}ms（dsh 原生 2s），重启 dsh 生效。`
+        )
+      )
+      .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
   }
 
   const handleSaveProxy = (): void => {
@@ -1428,6 +1451,24 @@ function DesktopSettingsPanel(): React.ReactElement {
         </div>
         {downloadBoxNote && <div style={NOTE_STYLE}>{downloadBoxNote}</div>}
         <div style={NOTE_STYLE}>同时进行的下载数上限，超出排队；改动立即生效。</div>
+      </SectionBox>
+      {/* ── 手机访问（远程连接，#144）── */}
+      <SectionBox title="手机访问（远程连接）">
+        <div style={ROW_STYLE}>
+          <input
+            placeholder="30000"
+            data-desktop-settings="mux-heartbeat-ms"
+            style={{ ...INPUT_BASE_STYLE, width: 100 }}
+            value={muxHeartbeatInput}
+            onChange={(e) => setMuxHeartbeatInput(e.target.value)}
+          />
+          <PfBtn variant="ghost" onClick={handleSaveMuxHeartbeat}>保存</PfBtn>
+        </div>
+        <div style={NOTE_STYLE}>
+          dsh 网关对 <code>/api/remote.mux</code> 的心跳间隔（毫秒）。dsh 原生 2s 且连丢 2 次即断开，
+          移动端切后台/弱网会被秒判死（表现为「能发消息、收不到新消息」）；壳默认覆盖为 30000。
+          填 0 = 不覆盖（回退 dsh 默认），改动重启 dsh 生效。
+        </div>
       </SectionBox>
 
       {/* ── 代理设置 ── */}
