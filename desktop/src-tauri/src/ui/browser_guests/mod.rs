@@ -565,6 +565,36 @@ pub(crate) const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
 })();
 "#;
 
+/// 远程窗口的「页面拥有 Host」能力位（远程模式设置不可用的修复）。
+///
+/// 壳配置了 `remote_addr` 时，主窗加载的是**用户自己的远程 dsh**，页面 hostname 是远程主机 →
+/// dsh 把页面当「远程浏览器」，设置类 RPC 不可用（模型设置报 `settings are unavailable in this
+/// browser`）。对**壳自己配置的那个主机**注入官方能力位 `__DSH_TRANSPORT__ = { ownsHost: true }`，
+/// 语义与 lane 对已配对设备做的事同源（见 docs/adr/0002）；**不**安装 dshDesktop 载体——远程窗口
+/// 仍走 iframe 浏览器模式（载体只在本地 loopback origin 装）。
+///
+/// `remote` 为空（未配置远程）时脚本自禁用，等于零注入。
+pub(crate) fn remote_owns_host_init_script(remote: Option<&str>) -> String {
+    let host = remote.unwrap_or("").trim();
+    // 防御：只接受 host[:port] 形态（normalize_remote 已校验过，这里再挡一次引号/换行注入）
+    let safe = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    if !safe {
+        return String::from("(function () { 'use strict'; })();");
+    }
+    format!(
+        r#"(function () {{
+  'use strict';
+  var host = "{host}";
+  if (location.host !== host && location.hostname !== host) return;
+  var t = globalThis.__DSH_TRANSPORT__;
+  if (t && typeof t === 'object') {{ t.ownsHost = true; }} else {{ globalThis.__DSH_TRANSPORT__ = {{ ownsHost: true }}; }}
+}})();"#
+    )
+}
+
 /// 释放指定宿主 webview 名下的全部 guest，返回释放数。
 /// 双调用点：client pagehide 兑底（IPC 可能丢）+ 宿主页每次 Started 加载自愈
 /// （dsh 重启/重导航后旧 guest 原生层会浮在新页面上，必须确定性清理）。
@@ -607,6 +637,23 @@ fn _assert_state_type(_: &DshState) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_owns_host_script_gates_on_configured_host() {
+        // 未配置远程：脚本自禁用（空函数，不注入任何能力位）
+        let none = remote_owns_host_init_script(None);
+        assert!(!none.contains("ownsHost"), "无远程配置时不得注入能力位");
+        // 配置了远程：只对那个 host 生效，并注入官方能力位
+        let s = remote_owns_host_init_script(Some("192.168.3.32:3080"));
+        assert!(s.contains("__DSH_TRANSPORT__"));
+        assert!(s.contains("ownsHost: true"));
+        assert!(s.contains("192.168.3.32:3080"));
+        assert!(s.contains("location.host !== host"), "必须按 host 门控，不对其它站点生效");
+        // 非法字符（引号/换行注入尝试）→ 退化为空脚本
+        let bad = remote_owns_host_init_script(Some("evil\"; alert(1);//"));
+        assert!(!bad.contains("ownsHost"));
+        assert!(!bad.contains("alert"));
+    }
 
     #[test]
     fn workspace_store_id_is_deterministic_and_distinct() {

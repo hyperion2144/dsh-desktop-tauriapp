@@ -70,8 +70,9 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     // #144：附带 dsh 网关心跳覆盖（typert-gateway → websocketHeartbeatIntervalMs），
     // 否则 dsh 默认 2s Ping + 连丢 2 次 terminate 会把移动端挂起/弱网的连接秒判死。
     let content = format!(
-        "- id: connection\n  inject: [webRuntime, webServer]\n{}\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n    - id: dsh-web-mobile\n      name: dsh-web-mobile\n",
-        gateway_patch_block(crate::settings::configured_mux_heartbeat_ms())
+        "- id: connection\n  inject: [webRuntime, webServer]\n{}\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n{}",
+        gateway_patch_block(crate::settings::configured_mux_heartbeat_ms()),
+        mobile_layout_insert_block(crate::settings::configured_desktop_layout_on_phones())
     );
     let stale = std::fs::read_to_string(&path).map(|t| t != content).unwrap_or(true);
     if stale {
@@ -90,6 +91,20 @@ pub(crate) fn gateway_patch_block(heartbeat_ms: Option<u32>) -> String {
     match heartbeat_ms {
         None => String::new(),
         Some(ms) => format!("\n- id: typert-gateway\n  config:\n    websocketHeartbeatIntervalMs: {ms}\n"),
+    }
+}
+
+/// 移动布局插件（dsh-web-mobile）的注入行（#147 卡顿对策 A，与心跳覆盖同一补丁文件）。
+///
+/// 背景：手机上的卡顿来自**宿主前端**（会话整段挂载 + 逐块 Shiki 高亮；审计见子模块
+/// docs/audits/2026-09-23-session-switch-jank-handover.md），桌面布局路径（iPad）明显更快。
+/// `desktop_layout_on_phones = true` 时**不注入**该行：手机拿到桌面布局（牺牲排版换流畅），
+/// 用户可随时改回；缺省 false 保持现行行为。
+pub(crate) fn mobile_layout_insert_block(desktop_layout_on_phones: bool) -> String {
+    if desktop_layout_on_phones {
+        String::new()
+    } else {
+        String::from("    - id: dsh-web-mobile\n      name: dsh-web-mobile\n")
     }
 }
 
@@ -402,6 +417,15 @@ pub(crate) fn desktop_platform_tag() -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mobile_layout_insert_block_follows_setting() {
+        // 缺省（false）：保留 dsh-web-mobile 注入行（现行移动布局）
+        let on = mobile_layout_insert_block(false);
+        assert!(on.contains("- id: dsh-web-mobile"));
+        assert!(on.contains("name: dsh-web-mobile"));
+        // 开启桌面布局：整行不写 → 手机拿到桌面布局（#147 路线 A）
+        assert_eq!(mobile_layout_insert_block(true), "");
+    }
     #[test]
     fn gateway_patch_block_covers_heartbeat() {
         // 开启覆盖：写出 typert-gateway 条目与毫秒值（patch 的 config 是合并语义）

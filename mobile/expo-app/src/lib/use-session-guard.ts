@@ -25,6 +25,8 @@ import {
 const SHELL_PROBE_TIMEOUT_MS = GUARD_PROBE_TIMEOUT_MS + 800;
 /** 前台可达性看门狗间隔（毫秒）。 */
 const REACHABILITY_INTERVAL_MS = 20000;
+/** 连续这么多次探针无回传才判「页面无法执行脚本」（单次先重试一次） */
+const MISSED_PROBE_LIMIT = 2;
 
 interface GuardCounters {
   failures: number;
@@ -32,6 +34,8 @@ interface GuardCounters {
   reloads: number;
   lastRepairAt: number;
   probing: boolean;
+  /** 连续「无回传」次数（能回消息即清零）：达到上限才判页面无法执行脚本 */
+  missedProbes: number;
   reachable: boolean | null;
   probeTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -59,6 +63,7 @@ export function useSessionGuard(
     reloads: 0,
     lastRepairAt: 0,
     probing: false,
+    missedProbes: 0,
     reachable: null,
     probeTimer: null,
   });
@@ -94,6 +99,15 @@ export function useSessionGuard(
       c.current.probeTimer = setTimeout(() => {
         c.current.probing = false;
         c.current.probeTimer = null;
+        // 单次无回传不等于页面已死：先重试一次（大会话/长任务会让回传超出壳侧超时），
+        // 连续 MISSED_PROBE_LIMIT 次无回传才判「页面无法执行脚本」→ 兜底重载。
+        // 实机回归（iPad）：无此门控时每 20s 的看门狗探针偶发超时 → 周期性假刷新。
+        c.current.missedProbes += 1;
+        if (c.current.missedProbes < MISSED_PROBE_LIMIT) {
+          console.warn(`[${label}] probe[${reason}] 无回传第 ${c.current.missedProbes} 次 → 重试`);
+          probe(`${reason}:retry`);
+          return;
+        }
         handleReading(null, `${reason}:timeout`);
       }, SHELL_PROBE_TIMEOUT_MS);
       webRef.current?.injectJavaScript(buildGuardProbeScript());
@@ -138,7 +152,7 @@ export function useSessionGuard(
         c.current.probeTimer = null;
       }
       c.current.probing = false;
-      handleReading(reading, 'page');
+      c.current.missedProbes = 0; // 能回消息就说明页面活着
     },
     [handleReading],
   );
@@ -184,9 +198,9 @@ export function useSessionGuard(
         c.current.failures = 0;
         c.current.reconnects = 0;
         probe('network-switch');
-      } else if (ok && AppState.currentState === 'active') {
-        probe('watchdog');
       }
+      // 注意：**不再**在长期停留前台时周期性探针（#144 实机：iPad 每 20s 被假重载一次）。
+      // 探测只发生在「回前台」与「可达性失败→成功跳变」两个真实事件上。
     };
     const iv = setInterval(() => void tick(), REACHABILITY_INTERVAL_MS);
     return () => {

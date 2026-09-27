@@ -16,6 +16,17 @@ import { createGzip, createBrotliCompress, constants as zlibConstants } from 'no
 const LOG_PATH = path.join(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'), 'mobile-access.log');
 let logStream = null;
 try { logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' }); } catch { /* noop */ }
+
+// ── 上游连接复用与 Nagle（#144 传输层）──
+// 原先每次 http.request 都 agent:false → **每请求新建 TCP**。手机上「打字」这类小请求高频场景
+// （每次输入/回显都是若干小 POST）会被连接建立 + Nagle 小包合并延迟放大；LAN 快不代表公网穿透快。
+// 故：① 上游走 keep-alive 池；② 两侧 socket 关 Nagle（setNoDelay）；③ 逐跳头不原样转发。
+const upstreamAgent = new http.Agent({ keepAlive: true, keepAliveMsecs: 15000, maxSockets: 64 });
+/** 关 Nagle：小包立即发出，不等 ACK 合并。 */
+function noDelay(sock) { try { sock?.setNoDelay?.(true); } catch { /* noop */ } }
+/** 逐跳头（RFC 9110）：不得在代理两侧原样转发——由本次连接自己决定。 */
+const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'transfer-encoding', 'te', 'trailer', 'upgrade'];
+function stripHopByHop(headers) { for (const k of HOP_BY_HOP) delete headers[k]; return headers; }
 function accessLog(parts) {
   const line = `[${new Date().toISOString()}] ${parts.join(' ')}\n`;
   try { logStream?.write(line); } catch { /* noop */ }
@@ -322,6 +333,7 @@ export function createRewriteProxy(opts) {
       const buildHeaders = () => {
         const h = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
         upstreamAuth?.applyTo(h);
+        stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
         return h;
       };
       const targetPath = normalizeRemotePath(req.url);
@@ -344,7 +356,7 @@ export function createRewriteProxy(opts) {
               html = html.replace(/<head[^>]*>/i, (m) => `${m}${inject.join('')}`);
             }
             const out = Buffer.from(html, 'utf8');
-            const outHeaders = { ...proxyRes.headers };
+            const outHeaders = stripHopByHop({ ...proxyRes.headers });
             delete outHeaders['content-length'];
             delete outHeaders['transfer-encoding'];
             outHeaders['content-length'] = String(out.length);
@@ -370,7 +382,7 @@ export function createRewriteProxy(opts) {
 
         if (shouldCompress) {
           const enc = canBr ? 'br' : 'gzip';
-          const outHeaders = { ...proxyRes.headers };
+          const outHeaders = stripHopByHop({ ...proxyRes.headers });
           delete outHeaders['content-length'];
           delete outHeaders['transfer-encoding'];
           outHeaders['content-encoding'] = enc;
@@ -389,7 +401,7 @@ export function createRewriteProxy(opts) {
         if (htmlDoc && isCompressed(proxyRes.headers) && inject.length > 0 && onInjectSkip) {
           onInjectSkip(req.url.split('?')[0]);
         }
-        res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+        res.writeHead(proxyRes.statusCode ?? 502, stripHopByHop({ ...proxyRes.headers }));
         proxyRes.pipe(res);
         // 任一端断开都要清理另一端
         res.on('close', () => proxyRes.destroy());
@@ -399,7 +411,7 @@ export function createRewriteProxy(opts) {
 
       const send = (isRetry) => {
         const proxyReq = http.request(
-          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: false },
+          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: upstreamAgent },
           (proxyRes) => {
             // dsh 401：凭证失效 → 单次重换（重新自取 token + 换新 cookie）并原样重放；仍 401 透传
             if (!isRetry && allowRetry && upstreamAuth && proxyRes.statusCode === 401) {
@@ -425,6 +437,7 @@ export function createRewriteProxy(opts) {
             handleUpstreamResponse(proxyRes);
           },
         );
+        proxyReq.on('socket', noDelay); // 上游方向关 Nagle（小请求高频时差一个数量级）
         proxyReq.on('error', (err) => {
           accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath, '= ERR', err.code ?? err.message]);
           if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
@@ -464,6 +477,9 @@ export function createRewriteProxy(opts) {
       }
     }
     const headers = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+    // WS upgrade 保留 connection/upgrade（握手必需），只清掉无关的逐跳头
+    delete headers['keep-alive'];
+    delete headers['proxy-connection'];
     // dsh 会话凭证：upgrade 请求同样附带（401 不重放——客户端重连即拿新凭证）
     upstreamAuth?.applyTo(headers);
     const wsPath = normalizeRemotePath(req.url);
@@ -476,6 +492,8 @@ export function createRewriteProxy(opts) {
     const proxyReq = http.request({
       host: upstreamHost, port: upstreamPort, method: req.method, path: normalizeRemotePath(req.url), headers, agent: false,
     });
+    proxyReq.on('socket', noDelay); // 握手与后续帧都不受 Nagle 影响
+    noDelay(socket); // 客户端→lane 方向同样关 Nagle
     proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
       socket.write('HTTP/1.1 101 Switching Protocols\r\n');
       // 原样回传上游的 upgrade 头（Sec-WebSocket-Accept 等）

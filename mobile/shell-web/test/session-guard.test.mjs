@@ -42,13 +42,15 @@ test('探针读数解析：合法形态保留，其余一律 null（绝不误判
   assert.equal(parseGuardProbeResult(null), null);
 });
 
-test('判定表：健康不动手、掉线轻量重连、无网等网络、读不到才兜底重载', () => {
+test('判定表：健康不动手、掉线轻量重连、无网等网络、只有完全没回消息才兜底重载', () => {
   assert.equal(actionForReading('ds|1|12'), GUARD_ACTION.NONE);
   assert.equal(actionForReading('ds0|1|12'), GUARD_ACTION.RECONNECT, '页面在但客户端没起来 → 轻量重连');
   assert.equal(actionForReading('err|1|-'), GUARD_ACTION.RECONNECT, '探针请求失败 → 轻量重连');
   assert.equal(actionForReading('off|0|-'), GUARD_ACTION.WAIT_NETWORK);
-  assert.equal(actionForReading('null|1|-'), GUARD_ACTION.RELOAD, '页面无响应 → 兜底重载');
-  assert.equal(actionForReading(null), GUARD_ACTION.RELOAD, '注入失败/解析失败 → 兜底重载');
+  // 关键回归（#144 实机：iPad 隔一会刷新一次）：`null` 是**页面回了消息**但它的探测请求超时，
+  // 页面明明活着 → 只能轻量重连；把它当“读不到”会变成周期性假重载。
+  assert.equal(actionForReading('null|1|-'), GUARD_ACTION.RECONNECT, '页面回了 null（探测超时）→ 轻量重连');
+  assert.equal(actionForReading(null), GUARD_ACTION.RELOAD, '完全没回消息/注入失败 → 兜底重载');
   assert.equal(actionForReading('ds'), GUARD_ACTION.RELOAD, '残缺读数 → 兜底重载');
 });
 

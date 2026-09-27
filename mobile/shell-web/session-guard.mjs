@@ -74,7 +74,8 @@ export function parseGuardProbeResult(raw) {
  * - `off` 页面自己说没网 → 等网络恢复事件（重连/重载都没意义）
  * - `ds0` 页面在、客户端没起来 → 轻量重连（不再整页重载）
  * - `err` 页面在、探针请求失败 → 轻量重连
- * - 其它（含解析失败）→ 页面可能已无法执行脚本 → 兜底重载
+ * - `null` **页面回了消息**、只是它自己的探测请求超时 → 轻量重连（能回消息就证明页面活着）
+ * - 其它（含**完全没回消息**、读数残缺）→ 兜底重载（页面可能已无法执行脚本）
  *
  * 需要「页面完全无法执行脚本且连探针都投不进去」的判定由壳侧承担：注入失败同样传 `null`。
  */
@@ -86,7 +87,7 @@ export function actionForReading(reading) {
   const signal = parsed.split('|')[0];
   if (signal === 'ds') return GUARD_ACTION.NONE;
   if (signal === 'off') return GUARD_ACTION.WAIT_NETWORK;
-  if (signal === 'ds0' || signal === 'err') return GUARD_ACTION.RECONNECT;
+  if (signal === 'ds0' || signal === 'err' || signal === 'null') return GUARD_ACTION.RECONNECT;
   return GUARD_ACTION.RELOAD;
 }
 

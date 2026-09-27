@@ -312,7 +312,9 @@ function DesktopSettingsPanel(): React.ReactElement {
 
 
   // 手机访问（远程连接）：dsh 网关 mux 心跳覆盖（#144）
+  // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
+  const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
   // 代理测试
   const [testResult, setTestResult] = useState<string | null>(null)
   const [testBusy, setTestBusy] = useState(false)
@@ -691,6 +693,19 @@ function DesktopSettingsPanel(): React.ReactElement {
           v === 0
             ? '已保存：不覆盖心跳（dsh 默认 2s），重启 dsh 生效。'
             : `已保存：mux 心跳 ${v}ms（dsh 原生 2s），重启 dsh 生效。`
+        )
+      )
+      .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
+  }
+
+  /** #147 路线 A：保存「手机端改用桌面布局」开关。 */
+  const handleSaveMobileLayout = (): void => {
+    void nsSave({ desktop_layout_on_phones: desktopLayoutOnPhones })
+      .then(() =>
+        setDownloadBoxNote(
+          desktopLayoutOnPhones
+            ? '已保存：手机使用桌面布局（不加载移动布局插件），重启 dsh 生效。'
+            : '已保存：手机使用移动布局，重启 dsh 生效。'
         )
       )
       .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
@@ -1470,6 +1485,22 @@ function DesktopSettingsPanel(): React.ReactElement {
           填 0 = 不覆盖（回退 dsh 默认），改动重启 dsh 生效。
         </div>
       </SectionBox>
+        <div style={ROW_STYLE}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              data-desktop-settings="desktop-layout-on-phones"
+              checked={desktopLayoutOnPhones}
+              onChange={(e) => setDesktopLayoutOnPhones(e.target.checked)}
+            />
+            手机端改用桌面布局（不加载移动布局插件）
+          </label>
+          <PfBtn variant="ghost" onClick={handleSaveMobileLayout}>保存</PfBtn>
+        </div>
+        <div style={NOTE_STYLE}>
+          手机上的卡顿来自宿主前端（会话整段挂载 + 逐块代码高亮），不是网络。勾选后手机走与 iPad
+          相同的桌面布局：明显更流畅，代价是排版更挤（可横屏缓解）。不勾选 = 移动布局。改动重启 dsh 生效。
+        </div>
 
       {/* ── 代理设置 ── */}
       <SectionBox title="代理设置">

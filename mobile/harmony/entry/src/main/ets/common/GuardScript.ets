@@ -98,14 +98,16 @@ export function backoffDelayMs(failures: number): number {
 
 /**
  * 判定读数对应的动作（语义源同上 `actionForReading`）。
- * `ds` 健康；`off` 设备没网等网络事件；`ds0`/`err` 轻量重连；其余（含解析失败）兜底重载。
+ * `ds` 健康；`off` 设备没网等网络事件；`ds0`/`err` 轻量重连；
+ * `null` **页面回了消息**但它的探测请求超时 → 轻量重连（能回消息就证明页面活着；
+ * 把它当“读不到”会让 iPad 每 20s 假重载一次，已实机回归）；其余（完全没回消息/残缺）→ 兜底重载。
  */
 export function actionForReading(reading: string | null): GuardAction {
   if (reading === null || reading === undefined) return GuardAction.RELOAD;
   const signal = reading.split('|')[0];
   if (signal === 'ds') return GuardAction.NONE;
   if (signal === 'off') return GuardAction.WAIT_NETWORK;
-  if (signal === 'ds0' || signal === 'err') return GuardAction.RECONNECT;
+  if (signal === 'ds0' || signal === 'err' || signal === 'null') return GuardAction.RECONNECT;
   return GuardAction.RELOAD;
 }
 

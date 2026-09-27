@@ -95,6 +95,10 @@ pub struct DesktopSettings {
     /// 缺省 = 用壳默认 30s（移动端挂起/弱网不被误判死）；`0` = 不覆盖（dsh 默认 2s）；
     /// `n` = 覆盖为 n ms。可经 desktop-settings.json 或设置页调整。
     pub mux_heartbeat_ms: Option<u32>,
+    /// 手机端是否改用**桌面布局**（#147 卡顿对策 A）：`true` = 不注入 dsh-web-mobile，
+    /// 手机得到与 iPad 相同的桌面布局（不卡但 UI 拥挤）；缺省/false = 现行移动布局。
+    /// 改动重启 dsh 生效（补丁文件在 spawn 前重写）。
+    pub desktop_layout_on_phones: Option<bool>,
     /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
     /// 其余 profile 首次 spawn 时按公式分配并持久化到这里，保证后续启动稳定。
     pub profile_ports: Option<std::collections::BTreeMap<String, u16>>,
@@ -439,6 +443,11 @@ pub fn configured_mux_heartbeat_ms() -> Option<u32> {
     normalize_mux_heartbeat_ms(load_desktop_settings().mux_heartbeat_ms)
 }
 
+/// 手机端是否改用桌面布局（#147 路线 A）：缺省 false（保持移动布局，行为不变）。
+pub fn configured_desktop_layout_on_phones() -> bool {
+    load_desktop_settings().desktop_layout_on_phones.unwrap_or(false)
+}
+
 /// cloudflared 可执行文件路径（settings.yaml cloudflared_bin；空=不启用公网隧道）。
 pub fn configured_cloudflared_bin() -> String {
     load_desktop_settings().cloudflared_bin.unwrap_or_default()
@@ -486,6 +495,7 @@ mod tests {
       proxy_pass: Some("s3cret".into()),
       download_concurrency: Some(5),
       mux_heartbeat_ms: Some(30000),
+      desktop_layout_on_phones: Some(true),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
        dsh_mode: Some("builtin".into()),

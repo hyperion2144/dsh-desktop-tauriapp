@@ -35,12 +35,13 @@ test('探针读数解析：合法形态保留，其余一律 null', () => {
   expect(parseGuardProbeResult(null)).toBeNull();
 });
 
-test('判定表：健康不动手、掉线轻量重连、无网等网络、读不到才兜底重载', () => {
+test('判定表：健康不动手、掉线轻量重连、无网等网络、只有完全没回消息才兜底重载', () => {
   expect(actionForReading('ds|1|12')).toBe('none');
   expect(actionForReading('ds0|1|12')).toBe('reconnect');
   expect(actionForReading('err|1|-')).toBe('reconnect');
   expect(actionForReading('off|0|-')).toBe('wait-network');
-  expect(actionForReading('null|1|-')).toBe('reload');
+  // 关键回归：页面回了 null（它自己的探测请求超时）证明页面活着 → 轻量重连，不整页重载
+  expect(actionForReading('null|1|-')).toBe('reconnect');
   expect(actionForReading(null)).toBe('reload');
   expect(actionForReading('ds')).toBe('reload');
 });

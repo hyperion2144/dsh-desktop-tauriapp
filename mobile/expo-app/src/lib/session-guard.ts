@@ -41,14 +41,18 @@ export function parseGuardProbeResult(raw: unknown): string | null {
   return `${match[1]}|${match[2]}|${match[3]}`;
 }
 
-/** 读数 → 动作（先过解析，残缺输入按「页面可能已无法执行脚本」处理）。 */
+/**
+ * 读数 → 动作（先过解析，残缺输入按「页面可能已无法执行脚本」处理）。
+ * 语义源同 `mobile/shell-web/session-guard.mjs`：`null` = 页面回了消息但它的探测请求超时，
+ * 属于「页面活着、链路不健康」→ 轻量重连；只有**完全没回消息**才算页面可能已死 → 兜底重载。
+ */
 export function actionForReading(reading: unknown): GuardAction {
   const parsed = parseGuardProbeResult(reading);
   if (parsed === null) return 'reload';
   const signal = parsed.split('|')[0];
   if (signal === 'ds') return 'none';
   if (signal === 'off') return 'wait-network';
-  if (signal === 'ds0' || signal === 'err') return 'reconnect';
+  if (signal === 'ds0' || signal === 'err' || signal === 'null') return 'reconnect';
   return 'reload';
 }
 

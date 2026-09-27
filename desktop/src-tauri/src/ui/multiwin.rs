@@ -203,7 +203,11 @@ fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
         .min_inner_size(940.0, 620.0)
         .disable_drag_drop_handler()
         // #118/#134：同主窗——注入 dshDesktop 载体标记（仅本地 loopback 生效）
-        .initialization_script(crate::ui::browser_guests::DESKTOP_CARRIER_INIT_SCRIPT)
+.initialization_script(crate::ui::browser_guests::DESKTOP_CARRIER_INIT_SCRIPT)
+        // 远程模式：同主窗——对壳配置的远程主机注入 ownsHost 能力位
+        .initialization_script(crate::ui::browser_guests::remote_owns_host_init_script(
+            crate::settings::load_desktop_settings().remote_addr.as_deref(),
+        ))
         // #118：同主窗——宿主页 Started 加载时清理旧 guest（dsh 重启后旧实例自愈）
         .on_page_load(|w, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {

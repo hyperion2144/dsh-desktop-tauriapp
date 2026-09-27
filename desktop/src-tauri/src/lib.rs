@@ -292,7 +292,12 @@ pub fn run() {
             // #118/#134：注入 dshDesktop 载体标记（document-start，仅本地
             // loopback origin 生效）——dsh 探测到载体即选 guest 模式，侧边栏浏览器
             // 从 iframe 切换为独立子 webview。
-            .initialization_script(DESKTOP_CARRIER_INIT_SCRIPT)
+.initialization_script(DESKTOP_CARRIER_INIT_SCRIPT)
+            // 远程模式：只对壳自己配置的远程主机注入 ownsHost 能力位（否则远程 dsh 仍把页面当
+            // 「远程浏览器」→ 设置类 RPC 不可用，模型设置报 settings are unavailable in this browser）
+            .initialization_script(crate::ui::browser_guests::remote_owns_host_init_script(
+                crate::settings::load_desktop_settings().remote_addr.as_deref(),
+            ))
             // #118：宿主 dsh 页每次 Started 加载时确定性清理旧 guest——dsh 重启/
             // 重导航后 pagehide 的 IPC 兑底可能丢，旧 guest 原生层会浮在新页面上
             .on_page_load(|w, payload| {
