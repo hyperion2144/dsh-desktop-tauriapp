@@ -505,7 +505,16 @@ export function createRewriteProxy(opts) {
             teardown();
           },
           onFallbackRaw: () => accessLog(['WS', req.headers.host ?? '-', '->', wsPath, '= 帧信封解析失败，回退 raw 透传（字节保真不受影响）']),
-          onUpstreamFrame: (op, payload) => { uFrames++; if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`); },
+          onUpstreamFrame: (op, payload) => {
+            uFrames++;
+            if (uFrames <= 5) muxLog(`upstream帧#${uFrames} op=${op} len=${payload.length} :: ${payload.toString('utf8').slice(0, 140)}`);
+            // #144 诊断：上游主动关帧（op=8）——「服务端判死 vs 隧道断开」的判定依据
+            if (op === 8) {
+              const code = payload.length >= 2 ? payload.readUInt16BE(0) : 0;
+              muxLog(`上游关闭帧 code=${code}（服务端主动关；0/1000=正常，1006 不会以帧出现）`);
+              muxClose('upstream');
+            }
+          },
         });
         proxySocket.on('data', (c) => pump.onData(c));
         socket.on('data', () => pump.noteClientActivity());
@@ -522,6 +531,11 @@ export function createRewriteProxy(opts) {
             if (f === undefined) { muxLog('client 帧信封非法，停止帧级记录'); cFrames = 99; break; }
             cFrames++;
             muxLog(`client帧#${cFrames} op=${f.opcode} len=${f.payload.length} :: ${f.payload.toString('utf8').slice(0, 140)}`);
+            if (f.opcode === 8) {
+              const code = f.payload.length >= 2 ? f.payload.readUInt16BE(0) : 0;
+              muxLog(`客户端关闭帧 code=${code}（页面侧主动关）`);
+              muxClose('client');
+            }
             off += f.total;
             if (cFrames >= 3) break;
           }
@@ -550,8 +564,9 @@ export function createRewriteProxy(opts) {
         if (force.unref) force.unref();
         try { if (!socket.destroyed) socket.destroy(); } catch { /* noop */ }
       };
-      proxySocket.on('close', teardown);
-      socket.on('close', teardown);
+      // #144 诊断：谁先关（close 由哪侧先触发）——实机日志即可区分服务端判死与隧道断开
+      proxySocket.on('close', () => { muxClose('upstream'); teardown(); });
+      socket.on('close', () => { muxClose('client'); teardown(); });
     });
     // 上游返回普通 HTTP 响应（非 101）：把状态码/头回写后断开，别让客户端永久挂起
     proxyReq.on('response', (proxyRes) => {

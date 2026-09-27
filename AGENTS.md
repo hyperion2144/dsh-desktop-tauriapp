@@ -94,15 +94,23 @@
 - lane 改写反代默认 127.0.0.1:3091（settings.yaml dsh-desktop-tauriapp: lane_port，env
   DSH_MOBILE_LANE_PORT 优先）；桌面 spawn dsh 时注入 DSH_MOBILE_LANE_PORT /
   DSH_MOBILE_ENABLED / DSH_DESKTOP_PORT / DSH_CLOUDFLARED_BIN。
-- WS 空闲保活：lane 反代对 upgrade 后的 WebSocket 空闲时在帧边界注入 ping（防中间代理空闲
-  超时揧断 dsh /api/remote.mux 复用长连接——手机端「连接异常」循环的对策）；pong 超时判死主动
-  断开触发 dsh 客户端快速重连。settings.yaml dsh-desktop-tauriapp: ws_keepalive_ms（ping 间隔
-  ms，0=关闭，默认 15000）、ws_pong_timeout_ms（判死超时 ms，默认 10000），改动重启 lane 生效。
+- WS 心跳与保活（#144 校准）：①**dsh 侧**——0.1.7 起网关自己每 2s 对 `/api/remote.mux` 发 Ping、
+  连丢 2 次即 terminate，移动端挂起/弱网秒级被判死；壳生成 profile 补丁时写入 `typert-gateway` →
+  `config.websocketHeartbeatIntervalMs`（壳默认 30s；`desktop-settings.json` 的 `mux_heartbeat_ms`
+  可调，`0` = 不覆盖、回退 dsh 默认 2s）。②**lane 侧**——upgrade 后仍做帧感知泵：空闲时在帧边界
+  注入 ping（防中间代理空闲掐断），pong 超时判死主动断开触发客户端快速重连；`ws_keepalive_ms`
+  （默认 15000，0=关）、`ws_pong_timeout_ms`（默认 10000），改动重启 lane 生效。③**诊断**——lane
+  记录 mux 先关闭侧与关闭码（`关闭（先关闭侧=…）`、`上游/客户端关闭帧 code=…`），实机日志可区分
+  服务端判死 vs 隧道断开。
+- 移动壳会话守卫（#144）：iOS(expo) 与鸿蒙壳都有「回前台 / 网络换代 / 渲染崩溃 → 页面内探针 → 判定」，
+  **一律先做页面内轻量重连**（`offline→online` 事件对，走 dsh 客户端官方重连路径），整页重载只在
+  「探针读不到 / 白屏」时兜底，且带退避 + 静默期；共享逻辑源 `mobile/shell-web/session-guard.mjs`
+  （shell-web 单测锁死语义，两端按其移植，勿各自漂移）。旧行为「鸿蒙挂起 ≥10s 直接整页重载」已删。
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
   → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
-  - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 3 例、
-   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 8 例）；cargo test 94 例；
+  - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 10 例（含会话守卫 7 例）、
+   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 107 例；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 

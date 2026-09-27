@@ -46,7 +46,11 @@ lane 自有控制面住在**保留命名空间** `/__dsh-mobile` 下（`lib/lane
 ## 隧道与连接稳定性（WS 保活）
 
 dsh 0.1.7 起网关自身每 2s 对 `/api/remote.mux` 发 Ping、连丢 2 次即 terminate（挂起/弱网极易触发，
-见 #144）；中间隧道/代理（cpolar、cloudflared、反代等）对静默连接的空闲超时同样会掐断长连接，
+见 #144）。**壳会把它覆盖到 30s**：profile 补丁写入 `typert-gateway` → `websocketHeartbeatIntervalMs`，
+`desktop-settings.json` 的 `mux_heartbeat_ms` 可调（`0` = 不覆盖、回退 dsh 默认 2s）。
+lane 还会记录 mux 的**先关闭侧与关闭码**（`关闭（先关闭侧=…）`、`上游/客户端关闭帧 code=…`），
+实机日志即可区分「服务端判死」与「隧道断开」。
+中间隧道/代理（cpolar、cloudflared、反代等）对静默连接的空闲超时同样会掐断长连接，
 手机端表现为 dsh「连接异常」
 反复出现。lane 反代在 upgrade 后对 上游→客户端 方向做帧感知泵：空闲时在帧边界注入
 WS ping（浏览器按 RFC 6455 自动回 pong），任意中间环节的空闲计时都会被重置；pong
