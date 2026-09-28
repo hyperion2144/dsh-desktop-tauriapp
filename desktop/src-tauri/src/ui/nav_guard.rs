@@ -39,7 +39,7 @@ pub fn navigate_guard(url: &tauri::Url) -> bool {
                 .unwrap()
                 .iter()
                 .any(|h| h == host);
-            let internal = host == "127.0.0.1" || host == "::1" || host == "localhost" || host == "tauri.localhost" || runtime_internal;
+            let internal = host == "127.0.0.1" || host == "::1" || host == "localhost" || host == "tauri.localhost" || host == "dshapp.localhost" || runtime_internal;
             if internal {
                 return true;
             }

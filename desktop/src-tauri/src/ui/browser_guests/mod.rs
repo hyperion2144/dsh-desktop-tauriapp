@@ -532,10 +532,46 @@ pub(crate) fn browser_guest_state(
 /// 方法体惰性转发到 `__dshShellBridgeImpl`（由壳 client 插件稍后安装——
 /// dsh 只在用户首次打开浏览器标签时才调用桥方法，时序天然安全）。
 /// 远程桌面窗口（非 loopback origin）不装载体，dsh 回落 iframe 模式（现状）。
-pub(crate) const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
+/// 载体脚本里的 origin 判定占位符：注入时换成真实判定（占位符让 JS 本体仍然是 `const`
+/// 字符串，不必把满屏的 `{`/`}` 改成 `{{`/`}}`）。
+const SHELL_ORIGIN_TEST: &str = "__DSH_SHELL_ORIGIN_TEST__";
+
+/// 载体初始化脚本（真正注入给宿主页的那一份）。
+///
+/// **页面 origin 的唯一事实源是壳自己的协议**（[`crate::network::shell_origin::scheme::PAGE_ORIGIN`]：
+/// macOS/Linux 是 `dshapp://localhost`，Windows 是 `http://dshapp.localhost`）——壳内页面的
+/// origin 已经不再是 `http://127.0.0.1:<port>`，判定必须跟着走，否则页面拿不到
+/// `globalThis.dshDesktop`，dsh 就回落 iframe 浏览器模式（macOS 上子框架导航被守卫取消，
+/// 侧边栏永远停在「正在打开…」）。旧的 loopback 形态一并保留，便于回滚与旧窗口。
+pub(crate) fn desktop_carrier_init_script() -> String {
+    DESKTOP_CARRIER_INIT_SCRIPT.replace(SHELL_ORIGIN_TEST, &origin_test())
+}
+
+/// 生成 origin 判定表达式（JS 函数字面量）。
+fn origin_test() -> String {
+    let allowed: Vec<&str> = vec![
+        crate::network::shell_origin::scheme::PAGE_ORIGIN,
+        "http://127.0.0.1",
+        "http://localhost",
+    ];
+    let list = serde_json::to_string(&allowed).unwrap_or_else(|_| "[]".to_string());
+    // 带端口的旧形态（`127.0.0.1:<port>` / `localhost:<port>` / `dshapp.localhost:<port>`）也算。
+    format!(concat!(
+        "function (o) {{ return {list}.indexOf(o) >= 0",
+        " || /^https?:\\/\\/(?:127\\.0\\.0\\.1|localhost|\\[::1\\]|dshapp\\.localhost)(?::\\d+)?$/.test(o); }}"
+    ), list = list)
+}
+
+/// 注入到宿主窗口的 dshDesktop 载体标记（document-start 运行，先于 dsh 插件）。
+///
+/// 仅壳内 dsh 页面安装：dsh 的 carrier 探测读取 `globalThis.dshDesktop`，存在且
+/// protocolVersion===1 即选 guest 模式；方法体惰性转发到 `__dshShellBridgeImpl`（由壳 client
+/// 插件稍后安装——dsh 只在用户首次打开浏览器标签时才调用桥方法，时序天然安全）。
+/// 注入时用 [`desktop_carrier_init_script`] 把占位符换成真实判定。
+const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
   'use strict';
-  var m = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.exec(location.origin);
-  if (!m || globalThis.dshDesktop) return;
+  var isShellPage = __DSH_SHELL_ORIGIN_TEST__;
+  if (!isShellPage(location.origin) || globalThis.dshDesktop) return;
   function impl() { return globalThis.__dshShellBridgeImpl; }
   // 宽限等待：client 插件（bridge 实现）在插件装载期可能尚未就绪；轮询至多 4s。
   // 升级期残留旧插件（壳新、页面 client 旧）时超时后干净报错而非立即炸。

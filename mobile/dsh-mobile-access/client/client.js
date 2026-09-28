@@ -1678,8 +1678,16 @@ var stringToBytes = qrcode.stringToBytes;
 
 // mobile/dsh-mobile-access/client/client.source.jsx
 var import_jsx_runtime = require("react/jsx-runtime");
-var inject = ["slots"];
+var inject = ["slots", "connection"];
 function apply(ctx) {
+  const rpc = ctx?.connection?.rpc;
+  if (rpc && typeof rpc.call === "function") {
+    hostRpc = (channel, endpoint, payload) => rpc.call(channel, endpoint, payload);
+  } else {
+    ctx?.logger?.warn?.(
+      "dsh-mobile-access: connection.rpc \u4E0D\u53EF\u7528\uFF0C\u8FDC\u7A0B\u8BBF\u95EE\u9762\u677F\u65E0\u6CD5\u4E0E host \u901A\u4FE1"
+    );
+  }
   const slots = ctx?.slots;
   if (!slots || typeof slots.inject !== "function" || typeof slots.register !== "function") {
     ctx?.logger?.warn?.("dsh-mobile-access: slots \u670D\u52A1\u4E0D\u53EF\u7528\uFF0C\u8DF3\u8FC7\u8BBE\u7F6E\u5165\u53E3");
@@ -1699,25 +1707,12 @@ function apply(ctx) {
   );
 }
 var lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
-var LANE_PREFIX = "/__dsh-mobile";
-var LANE_LOOPBACK = typeof location !== "undefined" && /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
-var LANE = LANE_LOOPBACK ? "http://127.0.0.1:" + lanePort : "";
-async function lane(path, opts = {}) {
-  const res = await fetch(LANE + LANE_PREFIX + path, {
-    method: opts.method ?? "GET",
-    headers: { "content-type": "application/json" },
-    body: opts.body ? JSON.stringify(opts.body) : void 0
-  });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = (await res.json())?.error || "";
-    } catch {
-    }
-    throw new Error("HTTP " + res.status + (detail ? " " + detail : ""));
-  }
-  if (res.status === 204) return null;
-  return res.json();
+var hostRpc = null;
+async function hostCall(endpoint, payload = {}) {
+  if (!hostRpc) throw new Error("host \u901A\u9053\u4E0D\u53EF\u7528\uFF08connection.rpc \u7F3A\u5931\uFF09");
+  const r = await hostRpc("/dsh-mobile-access", endpoint, payload);
+  if (!r || !r.ok) throw new Error(r?.error?.message ?? "rpc-error");
+  return r.value;
 }
 function readCssVar(name, fallback) {
   if (typeof document === "undefined") return fallback;
@@ -1923,7 +1918,7 @@ function MobileAccessPanel() {
   tunSavedUrlRef.current = tunSavedUrl;
   const refreshDevices = (0, import_react.useCallback)(async () => {
     try {
-      const st = await lane("/api/pair/devices");
+      const st = await hostCall("devices.list");
       setDevices(st.devices ?? []);
       setDevicesError(null);
       setDeviceErrors({});
@@ -1934,7 +1929,7 @@ function MobileAccessPanel() {
   }, []);
   const refreshCf = (0, import_react.useCallback)(async () => {
     try {
-      const st = await lane("/api/pair/cloudflared");
+      const st = await hostCall("cloudflared.get");
       setCfState({
         bin: st.bin ?? "",
         url: st.url ?? null,
@@ -1951,7 +1946,7 @@ function MobileAccessPanel() {
   }, []);
   const refreshLanBase = (0, import_react.useCallback)(async () => {
     try {
-      const info = await lane("/api/pair/info");
+      const info = await hostCall("info");
       if (info.lanIp) {
         lanBaseRef.current = {
           base: info.lanIp + ":" + (info.lanePort ?? lanePort),
@@ -2017,7 +2012,7 @@ function MobileAccessPanel() {
   const pairLink = (base, scheme, token) => scheme + "://" + base + "/pair?token=" + encodeURIComponent(token);
   const mintFor = async (base, scheme, setLink, setHint) => {
     try {
-      const r = await lane("/api/pair/mint", { method: "POST", body: {} });
+      const r = await hostCall("token.mint");
       const link = pairLink(base, scheme, r.token);
       setLink(link);
       setHint({
@@ -2134,14 +2129,9 @@ function MobileAccessPanel() {
                       return;
                     }
                     try {
-                      const r = await lane(
-                        "/api/pair/probe?url=" + encodeURIComponent(url)
-                      );
+                      const r = await hostCall("tunnel.probe", { url });
                       if (r.ok) {
-                        await lane("/api/pair/tunnel", {
-                          method: "POST",
-                          body: { url }
-                        });
+                        await hostCall("tunnel.save", { url });
                         setTunSavedUrl(url);
                         setTunResult({
                           text: "\u2713 \u53EF\u8FBE\u5DF2\u4FDD\u5B58\uFF08HTTP " + (r.status ?? "") + "\uFF09",
@@ -2248,10 +2238,7 @@ function MobileAccessPanel() {
                     });
                     setCfStatusError(null);
                     try {
-                      const r = await lane("/api/pair/cloudflared", {
-                        method: "POST",
-                        body: { bin: "", action: "apply" }
-                      });
+                      const r = await hostCall("cloudflared.apply", { bin: "" });
                       setCfState({
                         bin: r.bin ?? "",
                         url: r.url ?? null,
@@ -2278,10 +2265,7 @@ function MobileAccessPanel() {
                   cssVars,
                   onClick: async () => {
                     try {
-                      await lane("/api/pair/cloudflared", {
-                        method: "POST",
-                        body: { action: "stop" }
-                      });
+                      await hostCall("cloudflared.stop");
                       setCfState((prev) => ({
                         bin: prev.bin,
                         url: null,
@@ -2307,9 +2291,8 @@ function MobileAccessPanel() {
                     setCfInFlight({ text: "\u5E94\u7528\u4E2D\u2026", color: cssVars.text2 });
                     setCfStatusError(null);
                     try {
-                      const r = await lane("/api/pair/cloudflared", {
-                        method: "POST",
-                        body: { bin: cfInputValue.trim(), action: "apply" }
+                      const r = await hostCall("cloudflared.apply", {
+                        bin: cfInputValue.trim()
                       });
                       setCfState({
                         bin: r.bin ?? "",
@@ -2393,11 +2376,31 @@ function MobileAccessPanel() {
                     gap: 8
                   },
                   children: [
-                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { style: { color: cssVars.text, fontSize: 13 }, children: [
-                      d.name,
-                      " \xB7 ",
-                      d.online ? "\u5728\u7EBF" : "\u79BB\u7EBF"
-                    ] }),
+                    /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(
+                      "span",
+                      {
+                        style: {
+                          color: cssVars.text,
+                          fontSize: 13,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 2,
+                          minWidth: 0
+                        },
+                        children: [
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+                            d.name,
+                            " \xB7 ",
+                            d.online ? "\u5728\u7EBF" : "\u79BB\u7EBF"
+                          ] }),
+                          /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { style: { color: cssVars.text2, fontSize: 11 }, children: [
+                            d.model || d.platformLabel,
+                            d.browserLabel,
+                            d.ip ? d.ip + (d.entryLabel ? " \xB7 " + d.entryLabel : "") : d.entryLabel
+                          ].filter(Boolean).join(" \xB7 ") || "\u8BBE\u5907\u4FE1\u606F\u5F85\u8865\u5168\uFF08\u8BE5\u8BBE\u5907\u4E0B\u6B21\u8BBF\u95EE\u65F6\u5237\u65B0\uFF09" })
+                        ]
+                      }
+                    ),
                     /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { style: { display: "flex", alignItems: "center", gap: 8 }, children: [
                       /* @__PURE__ */ (0, import_jsx_runtime.jsx)(
                         PanelButton,
@@ -2407,10 +2410,7 @@ function MobileAccessPanel() {
                           cssVars,
                           onClick: async () => {
                             try {
-                              await lane("/api/pair/remove", {
-                                method: "POST",
-                                body: { deviceId: d.deviceId }
-                              });
+                              await hostCall("devices.remove", { deviceId: d.deviceId });
                               await refreshDevices();
                             } catch (e) {
                               setDeviceErrors((prev) => ({

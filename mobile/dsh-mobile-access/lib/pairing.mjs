@@ -3,6 +3,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { describeClient } from './client-info.mjs';
 
 export const TOKEN_TTL_MS = 10 * 60 * 1000; // 10 分钟
 
@@ -72,6 +73,17 @@ export class PairingStore {
               cookie: d.cookie,
               lastSeen: Number(d.lastSeen ?? Date.now()),
               online: d.online !== false,
+              // 展示字段（#145 延伸）：老记录没有这些键，取空串即可，
+              // 设备下次发请求时 isDevice() 会用最新 UA/IP 把它们补上。
+              platform: typeof d.platform === 'string' ? d.platform : '',
+              platformLabel: typeof d.platformLabel === 'string' ? d.platformLabel : '',
+              browser: typeof d.browser === 'string' ? d.browser : '',
+              browserLabel: typeof d.browserLabel === 'string' ? d.browserLabel : '',
+              model: typeof d.model === 'string' ? d.model : '',
+              ip: typeof d.ip === 'string' ? d.ip : '',
+              entry: typeof d.entry === 'string' ? d.entry : '',
+              entryLabel: typeof d.entryLabel === 'string' ? d.entryLabel : '',
+              ua: typeof d.ua === 'string' ? d.ua : '',
             });
           }
         }
@@ -119,11 +131,30 @@ export class PairingStore {
     this._persist();
   }
   // 接受配对：令牌正确 & 未过期 → 创建设备会话；接受后令牌作废（一次性）。
-  accept(token, { name = '未知设备' } = {}) {
+
+  // `meta`（ua/ip/entry）由调用方从请求里取：面板要展示「什么设备・从哪连进来的」，
+  // 解析规则集中在 client-info.mjs（纯函数、单测锁死各家 UA 形态）。
+  accept(token, { name, ua = '', ip = '', entry = '' } = {}) {
     if (!this.validate(token)) return null;
     const deviceId = randomBytes(8).toString('hex');
     const cookie = randomBytes(16).toString('hex');
-    this.devices.set(deviceId, { name, pairedAt: Date.now(), cookie, lastSeen: Date.now(), online: true });
+    const info = describeClient({ ua, ip, entry });
+    this.devices.set(deviceId, {
+      name: name || info.name,
+      pairedAt: Date.now(),
+      cookie,
+      lastSeen: Date.now(),
+      online: true,
+      platform: info.platform,
+      platformLabel: info.platformLabel,
+      browser: info.browser,
+      browserLabel: info.browserLabel,
+      model: info.model,
+      ip: info.ip,
+      entry: info.entry,
+      entryLabel: info.entryLabel,
+      ua: String(ua),
+    });
     this.revoke();
     this._persist();
     this.emit('devices', this.snapshotDevices());
@@ -131,13 +162,36 @@ export class PairingStore {
     return { deviceId, cookie };
   }
   // 会话 cookie 是否仍然有效。
-  isDevice(authCookie) {
+  // 会话 cookie 是否仍然有效；带上 `meta` 时顺手把 IP/UA/入口刷新到该设备上。
+  // 这一步让**已配对的老设备**也能被富化（不用重新配对）。
+  isDevice(authCookie, meta = null) {
     if (!authCookie) return false;
     for (const d of this.devices.values()) {
-      if (d.cookie === authCookie) { d.lastSeen = Date.now(); return true; }
+      if (d.cookie === authCookie) {
+        d.lastSeen = Date.now();
+        if (meta) {
+          const info = describeClient({ ua: meta.ua ?? '', ip: meta.ip ?? '', entry: meta.entry ?? '' });
+          // 名字：之前已识别出机型/平台就不覆盖（避免同一台机器在两种入口下名字跳来跳去）。
+          if (!d.name || d.name === '未知设备') d.name = info.name;
+          // 壳自己的记录（配对时无 UA）保持「桌面壳」身份：它后续经代理发来的请求带的是
+          // **页面**的 UA（macOS Safari 之类），拿它当真会把桌壳标成 Mac。
+          if (d.platform !== 'shell') {
+            d.platform = info.platform;
+            d.platformLabel = info.platformLabel;
+            d.browser = info.browser;
+            d.browserLabel = info.browserLabel;
+            if (info.model) d.model = info.model;
+          }
+          if (info.ip) d.ip = info.ip;
+          if (info.entry) { d.entry = info.entry; d.entryLabel = info.entryLabel; }
+          if (meta.ua) d.ua = String(meta.ua);
+        }
+        return true;
+      }
     }
     return false;
   }
+
   // 取消单个设备配对。
   removeDevice(deviceId) {
     const had = this.devices.delete(deviceId);
@@ -158,6 +212,10 @@ export class PairingStore {
   snapshotDevices() {
     return [...this.devices.entries()].map(([deviceId, d]) => ({
       deviceId, name: d.name, pairedAt: d.pairedAt, lastSeen: d.lastSeen, online: d.online,
+      platform: d.platform ?? '', platformLabel: d.platformLabel ?? '',
+      browser: d.browser ?? '', browserLabel: d.browserLabel ?? '',
+      model: d.model ?? '', ip: d.ip ?? '',
+      entry: d.entry ?? '', entryLabel: d.entryLabel ?? '', ua: d.ua ?? '',
     }));
   }
   // SSE 事件帧编码（event/data 两行）。

@@ -26,7 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 log = "0.4"
-tokio = { version = "1", features = ["time", "net", "io-util", "sync", "rt-multi-thread"] }
+tokio = { version = "1", features = ["time", "net", "io-util", "sync", "rt-multi-thread", "fs", "macros"] }
+# 壳内 loopback origin 服务（#154）：转发到远程 https 上游需要 TLS（与 reqwest 同一 native-tls 后端）
+tokio-native-tls = "0.3"
 base64 = "0.22"
 netstat2 = "0.11.2"
 libc = "0.2.189"
@@ -46,8 +48,10 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tar = "0.4"
 # #142 音效（T5/ADR-0001）：自定义音应用侧播放；精确 pin（默认全量含 symphonia-aac/flac/recording 达 +2.08MB，裁掉后 +1.68MB）
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav", "mp3", "vorbis"] }
+# 本地通知服务 token：必须用操作系统熵（时间戳+pid 既可预测，又会在同一时钟刻度内重复）
+getrandom = "0.3"
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_System_Time"] }
 # #118 浏览器 guest：WebView2 COM 历史读控（GoBack/GoForward/CanGoBack/CanGoForward）
 webview2-com = "0.38"
 windows-core = "0.61"

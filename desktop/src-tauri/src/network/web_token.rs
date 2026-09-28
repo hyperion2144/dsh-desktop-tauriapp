@@ -50,12 +50,23 @@ pub(crate) fn clear_web_token(app: &AppHandle) {
 /// HttpOnly; SameSite=Strict; Path=/; Max-Age=30 天）。
 /// 返回 Set-Cookie 的 cookie 名与值（不含属性），失败返回 None。
 pub(crate) fn exchange_token_for_cookie(host_port: &str, token: &str) -> Option<(String, String)> {
+    exchange_entry_for_cookie(host_port, "/", token)
+}
+
+/// 用**入口路径**换会话 cookie（#154：桌面远程与本地共用这一条）：
+/// 本地是 `/?token=…`，手机访问 lane 的配对链接是 `/pair?token=…`（规范形态 `/__dsh-mobile/pair`）。
+/// 判据与返回值与 [`exchange_token_for_cookie`] 完全一致（3xx + `set-cookie` → `name=value`）。
+pub(crate) fn exchange_entry_for_cookie(
+    host_port: &str,
+    entry: &str,
+    token: &str,
+) -> Option<(String, String)> {
     use std::io::{Read, Write};
     let mut stream = std::net::TcpStream::connect(host_port).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let req = format!(
-        "GET /?token={token} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+        "GET {entry}?token={token} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).ok()?;
     let mut buf = Vec::with_capacity(8192);
@@ -165,8 +176,22 @@ pub(crate) fn session_cookie_accepts(host_port: &str, name: &str, value: &str) -
     )
 }
 
-/// 生成本地通知服务器的访问 token（防本机其它进程误触发；非加密学强度）。
+/// 生成本地通知服务器的访问 token（防本机其它进程误触发）。
+///
+/// **用操作系统熵**（getrandom），不用时间戳+pid 拼：后者可预测（知道 pid 与大致时间即可猜到，
+/// 也就是本地任意进程能伪造成壳的通知请求），而且同一时钟刻度内会重复——实测连续 64 次只
+//  得到 12 个不同值。系统熵不可用时回落到时间戳拼装（仅降级，不至于开天窗）。
 pub(crate) fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    if getrandom::fill(&mut bytes).is_ok() {
+        let mut out = String::with_capacity(3 + 32);
+        out.push_str("xnl");
+        for b in bytes {
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
+            out.push(char::from_digit((b & 0x0f) as u32, 16).unwrap_or('0'));
+        }
+        return out;
+    }
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -174,6 +199,7 @@ pub(crate) fn random_token() -> String {
         .unwrap_or(0);
     format!("xnl{:x}{:x}", nanos, std::process::id())
 }
+
 
 
 #[cfg(test)]
@@ -214,10 +240,15 @@ mod tests {
 
     #[test]
     fn random_token_nonempty_and_unique() {
-        let a = random_token();
-        let b = random_token();
-        assert!(!a.is_empty());
-        assert_ne!(a, b, "连续两次生成的 token 不应相同");
+        // 连生成 64 个并断言互不相同：旧实现（纳秒时间戳+pid）只能产出十几个不同值，
+        // 这条测试就是当时那个缺陷的护栏。
+        let tokens: Vec<String> = (0..64).map(|_| random_token()).collect();
+        assert!(tokens.iter().all(|t| !t.is_empty()));
+        let mut sorted = tokens.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), tokens.len(), "生成的 token 不应重复");
     }
+
 
 }

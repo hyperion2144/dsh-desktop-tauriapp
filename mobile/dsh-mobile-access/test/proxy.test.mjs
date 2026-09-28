@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, desktopEnvPatchScript } from '../lib/proxy.mjs';
+import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, desktopEnvPatchScript, loopbackTarget, LOOPBACK_URL_PATCH } from '../lib/proxy.mjs';
 import { lanePath } from '../lib/lane-routes.mjs';
 
 function startUpstream() {
@@ -277,5 +277,53 @@ test('#78 回归：WS upgrade 请求同样补齐 sec-fetch-site（mux 握手路�
   } finally {
     proxy.server.closeAllConnections?.(); proxy.server.close();
     upstream.closeAllConnections?.(); upstream.close();
+  }
+});
+
+// ── #154：回环端口映射（远程侧“其它插件访问本机其它端口”的通道）─────────────
+
+test('loopbackTarget：解析映射路径，拒绝非法端口与非映射路径', () => {
+  assert.deepEqual(loopbackTarget('/_loopback/4000/api/x?y=1'), { host: '127.0.0.1', port: 4000, path: '/api/x?y=1' });
+  assert.deepEqual(loopbackTarget('/_loopback/3081'), { host: '127.0.0.1', port: 3081, path: '/' });
+  assert.equal(loopbackTarget('/api/remote.mux'), null);
+  assert.equal(loopbackTarget('/__dsh-mobile/api/pair/info'), null);
+  assert.equal(loopbackTarget('/_loopback/0/x'), null);
+  assert.equal(loopbackTarget('/_loopback/70000/x'), null);
+  assert.equal(loopbackTarget('/_loopback/abc/x'), null);
+});
+
+test('LOOPBACK_URL_PATCH 覆盖 ws/http 四类入口且指向映射命名空间', () => {
+  for (const marker of ['WebSocket', 'fetch', 'XMLHttpRequest', 'EventSource']) {
+    assert.ok(LOOPBACK_URL_PATCH.includes(marker), `补丁应包住 ${marker}`);
+  }
+  assert.ok(LOOPBACK_URL_PATCH.includes('/_loopback/'));
+});
+
+test('#154：映射路径转发到目标回环端口（不经上游 dsh），且不注入 HTML 补丁', async () => {
+  const other = startUpstream();
+  const otherPort = await listen(other.server);
+  const dsh = startUpstream();
+  const dshPort = await listen(dsh.server);
+  let dshHits = [];
+  dsh.server.prependListener('request', (req) => dshHits.push(req.url));
+  const proxy = createRewriteProxy({
+    upstreamHost: '127.0.0.1',
+    upstreamPort: dshPort,
+    inject: [OWNS_HOST_PATCH],
+  });
+  const lp = await listen(proxy.server);
+  try {
+    const r = await getRaw(`http://127.0.0.1:${lp}/_loopback/${otherPort}/api/hello?q=1`);
+    assert.equal(r.status, 200);
+    const body = JSON.parse(r.body);
+    assert.equal(body.url, '/api/hello?q=1', '映射路径应去掉前缀后转发给目标端口');
+    assert.equal(body.host, `127.0.0.1:${otherPort}`, 'Host 应改写成目标回环权威');
+    assert.deepEqual(dshHits, [], '映射请求绝不能打到 dsh 上游');
+    // 目标端口回 HTML 时也不得注入 dsh 专用补丁（那是 dsh 页面才需要的）
+    const html = await getRaw(`http://127.0.0.1:${lp}/_loopback/${otherPort}/`);
+    assert.ok(!html.body.includes('dsh-mobile-owns-host'), '映射响应不得注入 dsh 补丁');
+  } finally {
+    proxy.server.closeAllConnections?.(); proxy.server.close();
+    other.closeAll(); dsh.closeAll();
   }
 });

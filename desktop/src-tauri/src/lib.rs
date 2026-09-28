@@ -40,7 +40,7 @@ use ui::tray::{build_tray, apply_titlebar};
 use ui::pet::{read_pet_state, write_pet_state, setup_pet, pet_show_main, pet_hide, pet_quit, pet_toggle_passthrough};
 use ui::nav_guard::nav_guard_plugin;
 use ui::browser_guests::{
-    GuestRegistry, DESKTOP_CARRIER_INIT_SCRIPT,
+    GuestRegistry, desktop_carrier_init_script,
     browser_guest_acquire, browser_guest_release, browser_guest_release_all,
     browser_guest_navigate, browser_guest_control, browser_guest_set_bounds,
     browser_guest_set_visible, browser_guest_state,
@@ -105,7 +105,7 @@ use process::plugin::{desktop_plugin_dir, mobile_package_dir, materialize_pool_p
 #[cfg(windows)] // copy_dir_all 仅 Windows 实现存在；macOS/Linux 测试构建会因导入不存在项而失败
 use process::plugin::copy_dir_all;
 #[cfg(test)]
-use network::remote::{normalize_remote_url, extract_token_from_url, remote_has_plugin};
+use network::remote::{normalize_remote_url, extract_token_from_url};
 
 /// 带 / 之外路径与带凭据的输入（token URL 的路径恒为 /）。
 
@@ -144,6 +144,16 @@ pub fn run() {
         }))
     };
     builder
+        // #154：页面走**壳自己注册的协议**（官方 Electron `dsh-app://` 的 Tauri 对应物）。
+        // 关键不在“本地”，而在 Tauri 的 origin 判定：`is_local_url` 认「用户自定义协议」
+        // → `Origin::Local` → IPC 命中 `capabilities/default.json` 的完整权限集；
+        // 若页面放在 http://127.0.0.1:<port> 上则被判 `Origin::Remote`，设置类 IPC 被整片拒掉。
+        .register_asynchronous_uri_scheme_protocol(
+            crate::network::shell_origin::scheme::SCHEME,
+            |ctx, request, responder| {
+                crate::network::shell_origin::scheme::handle(ctx.app_handle(), request, responder);
+            },
+        )
         .invoke_handler(tauri::generate_handler![
             pet_show_main,
             pet_hide,
@@ -292,7 +302,7 @@ pub fn run() {
             // #118/#134：注入 dshDesktop 载体标记（document-start，仅本地
             // loopback origin 生效）——dsh 探测到载体即选 guest 模式，侧边栏浏览器
             // 从 iframe 切换为独立子 webview。
-.initialization_script(DESKTOP_CARRIER_INIT_SCRIPT)
+.initialization_script(desktop_carrier_init_script())
             // 远程模式：只对壳自己配置的远程主机注入 ownsHost 能力位（否则远程 dsh 仍把页面当
             // 「远程浏览器」→ 设置类 RPC 不可用，模型设置报 settings are unavailable in this browser）
             .initialization_script(crate::ui::browser_guests::remote_owns_host_init_script(
@@ -335,6 +345,12 @@ pub fn run() {
             if let Err(e) = main_window {
                 log::error!("[main] 主窗口创建失败：{e}");
             }
+            // #154：壳内 loopback origin 服务（本地资产 + 反代 + WS 透传）。
+            // 必需在主窗导航之前就绪——导航目标就是它的页面 URL。
+            match crate::network::shell_origin::start(app.handle().clone()) {
+                Some(url) => log::info!("[main] 本地资产路径可用：{url}"),
+                None => log::warn!("[main] 壳内 origin 服务未启动，本次回退旧导航路径"),
+            }
             // #87：在首次端口分配（会落盘创建 settings.yaml）之前判定全新安装
             let fresh_install = !settings::settings_path().exists();
             let port = app_port();
@@ -361,7 +377,7 @@ pub fn run() {
                 app.state::<DshState>()
                     .mode
                     .store(MODE_ADVANCED, Ordering::SeqCst);
-                crate::network::remote::navigate_remote(app.handle(), &addr, true);
+                crate::network::remote::navigate_remote(app.handle(), &addr);
             }
             if startup_remote_addr.is_none() {
             // 存量安装 + active_profile 未设 / profile 不完整 → 注入脚本到加载页处理

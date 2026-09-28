@@ -6,13 +6,13 @@ use tauri::{AppHandle, Manager};
 use crate::runtime::state::DshState;
 use crate::settings::{load_desktop_settings, configured_port};
 use crate::network::web_token::{
-    exchange_token_for_cookie, seed_session_cookie, session_cookie_accepts, store_web_token,
+    store_web_token,
 };
 use crate::network::notify::show_notification;
 use crate::ui::tray::{refresh_tray_mode, restart_dsh_in_mode};
 use crate::commands::prompt_input;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+
 use crate::{set_status, INTERNAL_HOSTS};
 use crate::runtime::state::STATUS_READY;
 pub(crate) fn normalize_remote_url(input: &str) -> Option<String> {
@@ -203,111 +203,18 @@ pub(crate) fn open_proxy_settings(app: &AppHandle) {
     }
 }
 
-/// 远程首页是否挂载了本插件的 client（GET / 并从响应里检索挂载串）。
-/// `addr` 可为完整 URL（新版，带 token 时跟随 303 换 cookie；探活页只需要 200 首页）
-/// 或 host:port（旧格式）。
-pub(crate) fn remote_has_plugin(addr: &str) -> bool {
-    use std::io::{Read, Write};
-    let host_port = remote_host_port(addr);
-    // 请求路径取 URL 的 path+query（含 token 时 dsh 会 303 → cookie 首页），
-    // 旧格式 host:port 保持请求根路径。
-    let (target, cookie) = match tauri::Url::parse(addr) {
-        Ok(u) if u.scheme() == "http" || u.scheme() == "https" => {
-            let q = match u.query() {
-                Some(q) => format!("?{q}"),
-                None => String::new(),
-            };
-            let path = if u.path().is_empty() { "/" } else { u.path() };
-            (format!("{path}{q}"), String::new())
-        }
-        _ => ("/".to_string(), String::new()),
-    };
-    // 最多跟一次重定向（token 交换 303 → Set-Cookie → 首页 200）。
-    // 裸 socket 不带 cookie jar，手动接住 Set-Cookie 再发第二跳。
-    let mut current_target = target;
-    let mut current_cookie = cookie;
-    let mut buf = Vec::with_capacity(65536);
-    for _hop in 0..2 {
-        let Ok(mut stream) = std::net::TcpStream::connect(&host_port) else { return false };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-        let mut req = format!(
-            "GET {current_target} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n"
-        );
-        if !current_cookie.is_empty() {
-            req.push_str(&format!("Cookie: {current_cookie}\r\n"));
-        }
-        req.push_str("\r\n");
-        if stream.write_all(req.as_bytes()).is_err() {
-            return false;
-        }
-        buf.clear();
-        let mut tmp = [0u8; 8192];
-        loop {
-            match stream.read(&mut tmp) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                    if buf.len() >= 65536 {
-                        break;
-                    }
-                }
-            }
-        }
-        let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
-        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
-        let status = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|c| c.parse::<u16>().ok())
-            .unwrap_or(0);
-        if (300..400).contains(&status) {
-            // 记下 Set-Cookie，按 Location 起一跳（Location 可能是相对路径 /）
-            let set_cookie = head
-                .lines()
-                .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_string());
-            if let Some(cv) = set_cookie {
-                let pair = cv.split(';').next().unwrap_or("").trim().to_string();
-                if !pair.is_empty() {
-                    current_cookie = pair;
-                }
-            }
-            let loc = head
-                .lines()
-                .find(|l| l.to_ascii_lowercase().starts_with("location:"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_string())
-                .unwrap_or_default();
-            if loc.is_empty() {
-                return false;
-            }
-            current_target = if loc.starts_with("http://") || loc.starts_with("https://") {
-                match tauri::Url::parse(&loc) {
-                    Ok(u) => {
-                        let q = u.query().map(|q| format!("?{q}")).unwrap_or_default();
-                        let path = if u.path().is_empty() { "/" } else { u.path() };
-                        format!("{path}{q}")
-                    }
-                    Err(_) => return false,
-                }
-            } else {
-                loc
-            };
-            continue;
-        }
-        break;
-    }
-    String::from_utf8_lossy(&buf).contains("/plugins/dsh-desktop-tauriapp/client.js")
-}
+
 
 /// 导航到远程 dsh 页面。`addr` 为完整 URL（新版 dsh web 含 process token）
 /// 或旧格式 host:port（自动补 http://）。
 /// 桌面 chrome 由 client 经 IPC 查询壳状态自行激活（不再使用 URL 标记，
-/// 也就不存在 303 剥参数后的二次补跳）。远程缺插件时提示建议切兼容，不阻塞。
-pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
+/// 也就不存在 303 剥参数后的二次补跳）。
+///
+/// **不做「远程是否装了插件」预检**（实机教训）：那个探测要 GET 带 token 的地址，而 lane/dsh
+/// 的配对 token 是**一次性**的——预检一碰就把 token 消费掉了，后面真正换会话只能拿到
+/// 「链接无效或已过期」，界面表现为「配对失败」。版本对不对由构建闸门判定：它取远程首页 HTML
+/// （带壳持会话，不经 token）比入口产物名，比插件探测既准又不消费凭据。
+pub(crate) fn navigate_remote(app: &AppHandle, addr: &str) {
     let host_port = remote_host_port(addr);
     let host = host_port.split(':').next().unwrap_or(addr).to_string();
     // #136 实机反馈：dsh 303 的 Set-Cookie 带 SameSite=Strict，而主窗口是从
@@ -316,83 +223,74 @@ pub(crate) fn navigate_remote(app: &AppHandle, addr: &str, advanced: bool) {
     // 而壳不能）。对齐本地模式既有链路：后台用 URL 里的 token 换会话 cookie，
     // 并以 SameSite=Lax 原生种入 webview（机制见 web_token.rs 注释）。
     // 换取失败（token 失效/远程不可达）时照常导航，由 dsh 自行展示鉴权错误页。
-    let port = tauri::Url::parse(addr)
-        .ok()
-        .and_then(|u| u.port_or_known_default())
-        .or_else(|| host_port.rsplit(':').next()?.parse::<u16>().ok())
-        .unwrap_or(80);
+
     {
         let mut list = INTERNAL_HOSTS.lock().unwrap();
         if !list.contains(&host) {
             list.push(host.clone());
         }
     }
-    if advanced && !remote_has_plugin(addr) {
-        log::warn!("[remote] 远程未检测到 dsh-desktop-tauriapp 插件，建议使用兼容模式");
-         show_notification(app, crate::network::notify_policy::scenario::CONFIG_ERROR, "远程 dsh 未安装桌面插件", "高级模式需要远程安装 dsh-desktop-tauriapp，建议改用兼容模式");
-    }
-    // 完整 URL 原样用（含 token/旧参数）；旧格式补 scheme 与根路径
-    let url = if tauri::Url::parse(addr)
-        .map(|u| u.scheme() == "http" || u.scheme() == "https")
-        .unwrap_or(false)
-    {
-        addr.to_string()
-    } else {
-        format!("http://{addr}/")
-    };
+
+
     // 「访问」与本机同构(web_token.rs 三件套):换 cookie → Lax 种入 → 服务端
     // 验证;轮询间隔兼作 WKHTTPCookieStore 异步落库的等待窗口(种完立即导航、
     // 请求先于 cookie 落库发出仍 401)。远程与本机的唯一差异是 token 来源:
     // 本机等 stdout 打印,远程 URL 自带——「远程只是少了启动 dsh 这一步」。
     let handle = app.clone();
-    let host_port2 = host_port;
-    let host2 = host;
+
     let addr2 = addr.to_string();
     tauri::async_runtime::spawn(async move {
-        let mut session_established = false;
-        if let Some(token) = extract_token_from_url(&addr2) {
-            match exchange_token_for_cookie(&host_port2, &token) {
-                Some((name, value)) => {
-                    if seed_session_cookie(&handle, &host2, port, &name, &value) {
-                        let mut verified = false;
-                        for _ in 0..4 {
-                            tokio::time::sleep(Duration::from_millis(350)).await;
-                            if session_cookie_accepts(&host_port2, &name, &value) {
-                                verified = true;
-                                break;
+        // #154：远程也优先走壳内 origin（本地文档 + 本地资产 + 构建闸门）。放在这里而不是
+        // 只放在 navigation：冷启动的远程短路（lib.rs 的 startup 分支）直接调本函数、
+        // 根本不经过 navigation——两条入口共用 navigation::try_remote_shell_origin，
+        // 闸门与锁产物只有一处，否则必然漂移。
+        match crate::navigation::enter_remote(&handle, &addr2).await {
+            crate::navigation::RemoteEntry::ShellOrigin => {
+                log::info!("[remote] 远程走壳内 origin（会话与产物已就位）");
+                // 与本地模式**同一套收尾**（navigate_main）：原生导航 + 通知桥 + 置就绪 +
+                // 标题栏形态跟随模式。之前这里直接 `w.navigate` 就 return，于是远程模式下
+                // 侧边栏永远显示「启动中」、窗口还挂着系统原生标题栏（实机报告）。
+                let state = handle.state::<DshState>();
+                let nport = state.notify_port.load(Ordering::SeqCst);
+                let ntoken = state.notify_token.lock().unwrap().clone();
+                crate::navigation::navigate_main(
+                    &handle,
+                    crate::network::shell_origin::scheme::PAGE_ORIGIN,
+                    nport,
+                    &ntoken,
+                );
+                return;
+            }
+            crate::navigation::RemoteEntry::UrlWebview(url) => {
+                // 入口是一次性凭据（lane 的 `/pair`）时，**壳内这条路就是它的唯一使用者**：
+                // 不能再让旧路去换一次 token、更不能把已作废的链接交给 webview 导航（那正是
+                // 「配对失败」页的来源）。直接去上游根路径（会话已种进 webview）。
+                let pair_entry = crate::navigation::entry_target(&addr2).starts_with("/pair");
+                let target = if pair_entry {
+                    crate::navigation::remote_root(&addr2)
+                } else {
+                    url
+                };
+                // 入口（一次性链接或带 token 地址）**只由壳内这条路消费**：URL webview
+                // 一律去上游根路径（会话已种进 webview），给不给 webview 看由三选一决定。
+                // 与本地模式同一套 token/cookie 处理：换会话 → 种 cookie → 验服务端接受，
+                // 不再有第二条交换路径（旧路在这里被截断）。
+                log::info!("[remote] 打开上游地址：{target}");
+                if let Some(w) = handle.get_webview_window("main") {
+                    match tauri::Url::parse(&target) {
+                        Ok(parsed) => {
+                            if let Err(e) = w.navigate(parsed) {
+                                log::warn!("[remote] 导航失败：{e}");
                             }
                         }
-                        session_established = verified;
-                        log::info!(
-                            "[remote] 会话 cookie 已种入并{}",
-                            if verified { "通过服务端验证（本机同款链路）" } else { "进入落库等待窗口" }
-                        );
-                    } else {
-                        // 平台不支持种 cookie：回退 token 直开（与本机同款降级路径）
-                        log::warn!("[remote] 原生种 cookie 不可用，回退 token 直开路径");
+                        Err(e) => log::warn!("[remote] 地址不可解析：{e}"),
                     }
+                set_status(&handle, STATUS_READY, &format!("远程 {}", remote_display(&addr2)));
+                handle.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
                 }
-                None => {
-                    log::warn!("[remote] token 换会话 cookie 未成功，照常导航（dsh 将自行展示鉴权页）")
-                }
+                return;
             }
         }
-        // 导航目标（与本机一致）：会话已建立 → 根路径（不带 token，种入的 cookie
-        // 随行；dsh 对带 token 参数的请求优先走 token 校验分支，webview 跨站
-        // 303 链过不了它——浏览器地址栏能进而壳不能的另一半根源）；未建立 →
-        // 原 URL 照常导航（降级，由 dsh 自行展示鉴权页）。
-        let nav_url = if session_established {
-            let scheme = if url.starts_with("https") { "https" } else { "http" };
-            format!("{scheme}://{host_port2}/")
-        } else {
-            url.clone()
-        };
-        if let Some(w) = handle.get_webview_window("main") {
-            let _ = w.eval(&format!("window.location.replace({nav_url:?});"));
-        }
-        log::info!("已导航到远程 dsh：{}（{}）", remote_display(&nav_url), nav_url);
-        set_status(&handle, STATUS_READY, &format!("远程 {}", remote_display(&addr2)));
-        handle.state::<DshState>().ready_once.store(true, Ordering::SeqCst);
     });
 }
 

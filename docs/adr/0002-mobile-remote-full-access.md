@@ -6,6 +6,9 @@
 
 accepted（2026-09-27，issue #145；维护者原话：「所有都开放，我说了远程端所有都要能访问，只要是 dsh 的东西。远程不是轻量，是完整访问」）
 
+**amended by [ADR 0003](./0003-local-origin-loopback-shell-service.md)（2026-09-27）**：本 ADR 的 `ownsHost` 注入降级为「旧路径（浏览器/远程直连 dsh 地址）专用」。新的本地资产路径把页面 origin 换成访问端自建的 loopback 服务，`isLoopback` 天然为真，无需注入。
+
+
 ## Context
 
 dsh 0.1.7 客户端按**页面 hostname** 判定特权面：
