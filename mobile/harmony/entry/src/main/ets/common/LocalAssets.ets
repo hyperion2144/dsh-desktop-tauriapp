@@ -202,7 +202,22 @@ export async function ensureLocalAssets(
   cookie: string,
   onLog?: (line: string) => void,
 ): Promise<LocalAssetBundle> {
-  const html = await fetchRemoteHtml(base, cookie);
+
+  // 取不到远端首页时：若是 401/UNPAIRED，说明**壳里那份会话已失效**（lane 的会话会随配对周期变化；
+  // 用旧链接打开就是「死 token + 死 cookie」）。清掉死会话并把话说清楚，别把人丢到 unpaired 页。
+  let html = '';
+  try {
+    html = await fetchRemoteHtml(base, cookie);
+  } catch (err) {
+    const e = err as BusinessError;
+    const msg = e.message ?? '';
+    if (msg.indexOf('401') >= 0) {
+      // **不**清会话：换到的会话就该存着反复用（上次那条 401 无法归因，不能拿它当理由丢掉有效会话）。
+      // 只把话说清楚，让用户决定是否重扫。
+      throw new Error('这台设备的会话未被接受（HTTP 401）：可重扫一张新码；已存的会话不会被清除');
+    }
+    throw new Error(`取远端首页失败：${msg}`);
+  }
   const entry = entryNameOf(html);
   if (entry === '') throw new Error('远端首页认不出入口产物（老版 dsh？）');
 

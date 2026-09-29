@@ -123,13 +123,33 @@ struct WebPage {
     }
   }
 
+  /**
+   * 读壳里存的会话，并**同步种进 ArkWeb 的持久 cookie jar**——配对一次、长期复用，不必每次重扫。
+   *（对应桌面 network/web_token.rs 的「会话 cookie 已原生种入 webview」。）
+   */
+  private async plantCookie(context: common.UIAbilityContext): Promise<string> {
+    const cookie = await loadCookie(context, this.base);
+    if (cookie !== '') {
+      try {
+        webview.WebCookieManager.configCookieSync(`http://${this.base}/`, cookie);
+        hilog.info(DOMAIN, TAG, '会话已种入 ArkWeb 持久 jar（重启后无需重扫）');
+      } catch (err) {
+        const e = err as BusinessError;
+        hilog.warn(DOMAIN, TAG, '种 cookie 失败：%{public}s', e.message);
+      }
+    }
+    return cookie;
+  }
   /** 起壳内 loopback 服务并把页面切过去（三选一里的「下载」与「用本地」都汇到这里）。 */
   private async startHost(distDir: string, entry: string): Promise<void> {
+
     const context = getContext(this) as common.UIAbilityContext;
     const plugin = readBundledPlugin(context);
     const host = await LocalHost.start({
       remoteBase: this.base,
-      cookie: await loadCookie(context, this.base),
+      // 会话**同时种进 ArkWeb 的持久 cookie jar**（与桌面 web_token 同一步）：配对一次就要能长期复用，
+      // 不开新码也能进——从前只存在 preferences 里，于是页面自己发出的请求不带 cookie（unpaired）。
+      cookie: await this.plantCookie(context),
       distDir: distDir,
       // 随包内置 = 完整运行时：按请求路径直读 rawfile（无清单、无枚举）。distDir 为空时全靠它。
       readBundled: (rel: string) => readBundledAsset(context, rel),
