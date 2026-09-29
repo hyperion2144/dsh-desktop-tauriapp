@@ -37,6 +37,12 @@ export interface LocalHostPorts {
   fetchUpstream: (req: UpstreamRequest) => Promise<UpstreamResponse>;
   /** 随包插件的 rev（写进启动图当缓存失效用）；缺省用 `local`。 */
   pluginRev?: string;
+  /**
+   * 壳持有的会话 cookie（`name=value`）。**WS 升级需要它**：页面 origin 是壳内 loopback，
+   * 浏览器只会带那个 origin 的 cookie，而远端要求升级请求自身带会话（否则 401 UNPAIRED）。
+   * 与鸿蒙 LocalHost.tunnel 的做法一致。
+   */
+  cookie?: string | null;
 }
 
 export interface LocalHostRequest {

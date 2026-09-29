@@ -165,6 +165,8 @@ async function settle(
     bundledPlugins: ports.bundledPluginSource ? { 'dsh-web-mobile': ports.bundledPluginSource } : {},
     pluginRev: ports.pluginRev,
     fetchUpstream: async () => ({ status: 502, headers: {}, body: 'fetchUpstream 端口未注入' }),
+    // 会话一并交给壳内服务：HTTP 面由 fetchUpstream 注入，**WS 面靠这条**（升级请求自身要带会话）。
+    cookie: ports.cookie ?? null,
     onLog: log,
   });
   log(`[host] 壳内服务已起：${host.url}（产物 ${dist.id} / ${dist.entry}）`);

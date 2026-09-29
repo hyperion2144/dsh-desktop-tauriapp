@@ -115,7 +115,7 @@ export async function startLocalHost(opts: LocalHostRuntimeOptions): Promise<Loc
       // WebSocket upgrade：原样透传给上游（mux 走这条；绝不能被当普通响应吃掉）。
       if (isUpgrade(head.headers)) {
         // 库的 Socket 与 RawSocket 结构一致、`on` 是重载泛型，这里显式跨过类型边界。
-        void tunnelUpgrade(socket as unknown as RawSocket, buf, opts.remoteAuthority, log);
+        void tunnelUpgrade(socket as unknown as RawSocket, buf, opts.remoteAuthority, opts.cookie ?? null, log);
         return;
       }
 
@@ -161,22 +161,43 @@ export async function startLocalHost(opts: LocalHostRuntimeOptions): Promise<Loc
 }
 
 /**
- * WS upgrade 透传：把客户端的原始握手字节原样发给上游，之后双向转发。
+ * WS upgrade 透传：改写信封（补壳持有的会话、Host/Origin 指向远端 authority）后转发。
  *
- * 不做任何改写（含 `Host`/`Origin`/`Cookie`）——会话 cookie 由 `fetchUpstream` 那条路负责；
- * 这里保持"字节搬运"语义，与桌面 `stream_proxy` 的 WS 分支同一个原则。
+ * 为什么要改写：页面 origin 是壳内 loopback，浏览器只会带**那个 origin** 的 cookie，而远端要求
+ * 升级请求自身带会话（否则 401 UNPAIRED，鸿蒙实机就是这么断的）。与桌面 `stream_proxy` 的 WS 分支对齐。
  */
+function rewriteHandshake(raw: string, remoteAuthority: string, cookie: string | null): string {
+  const end = raw.indexOf('\r\n\r\n');
+  if (end < 0) return raw;
+  const kept: string[] = [];
+  const lines = raw.slice(0, end).split('\r\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const lower = lines[i].toLowerCase();
+    // 第 0 行是请求行，保留；其余剥掉会话/主机相关头，下面统一补。
+    if (i > 0 && (lower.startsWith('cookie:') || lower.startsWith('host:') || lower.startsWith('origin:'))) continue;
+    kept.push(lines[i]);
+  }
+  if (cookie) kept.push(`Cookie: ${cookie}`);
+  kept.push(`Host: ${remoteAuthority}`);
+  kept.push(`Origin: http://${remoteAuthority}`);
+  return kept.join('\r\n') + raw.slice(end);
+}
+
 function tunnelUpgrade(
   client: RawSocket,
   rawHandshake: Uint8Array,
   remoteAuthority: string,
+  cookie: string | null,
   log: (line: string) => void,
 ): void {
+
   const [host, portRaw] = remoteAuthority.split(':');
   const port = Number.parseInt(portRaw ?? '80', 10) || 80;
   const up = TcpSocket.createConnection({ host, port }, () => {
     try {
-      up.write(rawHandshake);
+      // 改写信封：剥掉原有的 Cookie/Host/Origin，补上壳持有的会话，并把 Host/Origin 改成远端 authority
+      // （远端的信任栅栏按 Host 判）——与鸿蒙 tunnel 同一套改法，都与桌面 stream_proxy 的 WS 分支对齐。
+      up.write(toBytes(rewriteHandshake(new TextDecoder().decode(rawHandshake), remoteAuthority, cookie)));
     } catch (e) {
       log(`[local-host] WS 握手转发失败：${String(e)}`);
       client.end();
