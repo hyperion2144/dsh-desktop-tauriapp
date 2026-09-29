@@ -109,13 +109,27 @@ export async function exchangeSession(
     if (setCookie === '') {
       return { ok: false, cookie: '', reason: `HTTP ${res.responseCode} 且无 set-cookie（入口 ${entryPath}）` };
     }
-    const parts = setCookie.split(';');
-    const first = parts.length > 0 ? parts[0].trim() : '';
-    if (first.indexOf('=') <= 0) {
-      return { ok: false, cookie: '', reason: `set-cookie 形状不符：${setCookie}` };
+    // set-cookie 有两种形态，**两种都要认**：
+    //   ① 标准头：`dsh_mobile_session=abc; Path=/; HttpOnly`
+    //   ② **Netscape 表行**——`@ohos.net.http` 的 `res.cookies` 实际返回的就是这个：
+    //      `#HttpOnly_192.168.3.90\tFALSE\t/\tFALSE\t0\tdsh_mobile_session\tabc`
+    // 只认 ① 会把**有效的设备会话**当“形状不符”丢掉 → 后续首页 401 → 本地资产永远失败、
+    // 三选一必弹（实机 hilog 定位：`set-cookie 形状不符：#HttpOnly_192.168.3.90  FALSE ...`）。
+    let cookie = '';
+    const cols = setCookie.split('\t');
+    if (cols.length >= 2) {
+      const value = cols[cols.length - 1].trim();
+      const name = cols[cols.length - 2].trim();
+      if (name !== '' && value !== '') cookie = `${name}=${value}`;
+    } else {
+      const head = (setCookie.split(';')[0] ?? '').trim();
+      if (head.indexOf('=') > 0) cookie = head;
     }
-    await saveString(context, cookieKey(base), first);
-    return { ok: true, cookie: first, reason: '' };
+    if (cookie === '') {
+      return { ok: false, cookie: '', reason: `set-cookie 形状不认识：${setCookie}` };
+    }
+    await saveString(context, cookieKey(base), cookie);
+    return { ok: true, cookie: cookie, reason: '' };
   } catch (err) {
     const e = err as BusinessError;
     return { ok: false, cookie: '', reason: `换会话失败：${e.message}` };
