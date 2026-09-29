@@ -1,0 +1,260 @@
+/**
+ * 鸿蒙壳的「本地资产」装配（#155）：会话由壳持有 + 拉取前端产物到沙箱 + 版本闸门。
+ *
+ * 三件事，与桌面远程模式/Expo 侧逐条同形（依据 #150 研究 / #151 #152 #153 决策）：
+ *   ① **会话由壳持有**：配对链接是一次性凭据，**绝不能让 ArkWeb 直接加载去消费**（那样壳自己
+ *      换不到 cookie，也无法在转发时注入）。这里由壳发起 `/pair?token=` 请求、从 3xx 的
+ *      `set-cookie` 里取设备会话，存进 preferences（按 authority 分键）；
+ *   ② **拉取前端产物**：取远端首页 → 认出入口产物名（构建标识）+ 被引用的 `assets/*` →
+ *      从远端 `assets/*` 下载到沙箱（只下静态资产，不拉整个运行时——手机不需要 Node 那部分）；
+ *   ③ **版本闸门**：本地已缓存的入口产物名与远端当前入口名一致就直接用缓存（冷启动零下载），
+ *      不一致则重新下载（等价于桌面的「下载对应运行时 → 重比」）。
+ *
+ * ArkTS 约束（编译器实测）：不许索引签名（`Record<string,string>` 用不了，动态头用 Map，
+ * 少量固定字段用已声明接口 + 带引号的属性名）、`catch` 参数要显式转 `BusinessError`。
+ */
+import http from '@ohos.net.http';
+import fs from '@ohos.file.fs';
+import preferences from '@ohos.data.preferences';
+import util from '@ohos.util';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { entryNameOf } from './LocalHost';
+
+/** 本地已就绪的前端产物（注意：接口名不能叫 `LocalAssets`，会与本模块名撞车）。 */
+export interface LocalAssetBundle {
+  /** 本地 dist 的沙箱目录。 */
+  dir: string;
+  /** 远端当前入口产物名（构建标识）。 */
+  entry: string;
+  /** dist 的文件相对路径清单（含 `index.html`）。 */
+  files: string[];
+}
+
+export interface SessionExchange {
+  ok: boolean;
+  cookie: string;
+  reason: string;
+}
+
+/** 取远端时的请求头（只这两样）。 */
+interface RemoteRequestHeaders {
+  accept?: string;
+  cookie?: string;
+}
+
+/** 壳自有状态的 preferences 库名（会话 cookie 与产物版本都存这里）。 */
+const PREF_STORE = 'dsh_mobile_shell';
+
+/** 会话 cookie 的键（按 authority 分开：一台手机可能配多个桌面）。 */
+export function cookieKey(base: string): string {
+  return `session:${base}`;
+}
+
+/** 前端产物缓存的键（记住上次用的入口产物名）。 */
+export function entryKey(base: string): string {
+  return `dist-entry:${base}`;
+}
+
+/** 一次性入口路径判定：只认冻结别名 `/pair`、`/__dsh-mobile/pair` 与带 token 的地址。 */
+export function entryPathOf(url: string): string {
+  const at = url.indexOf('://');
+  const rest = at >= 0 ? url.substring(at + 3) : url;
+  const slash = rest.indexOf('/');
+  if (slash < 0) return '';
+  const pathQuery = rest.substring(slash);
+  const q = pathQuery.indexOf('?');
+  const path = (q >= 0 ? pathQuery.substring(0, q) : pathQuery).replace(/\/+$/, '');
+  const hasToken = pathQuery.indexOf('token=') >= 0;
+  if (path === '/pair' || path === '/__dsh-mobile/pair' || hasToken) return pathQuery;
+  return '';
+}
+
+/** 读壳持有的会话 cookie（没有返回空串）。 */
+export async function loadCookie(context: Context, base: string): Promise<string> {
+  const store = await preferences.getPreferences(context, PREF_STORE);
+  return (await store.get(cookieKey(base), '')) as string;
+}
+
+async function saveString(context: Context, key: string, value: string): Promise<void> {
+  const store = await preferences.getPreferences(context, PREF_STORE);
+  await store.put(key, value);
+  await store.flush();
+}
+
+/**
+ * 用一次性入口换取设备会话 cookie 并**由壳存下**（#151）。
+ *
+ * 判据是**有没有 `set-cookie`**，不是状态码（lane 回 302、dsh 的 `/?token=` 回 303 都正常）；
+ * 失败把状态码与入口带进 reason，不让人猜（与桌面 `shell_origin`、Expo `session.ts` 同款判断）。
+ */
+export async function exchangeSession(
+  context: Context,
+  base: string,
+  entryPath: string,
+): Promise<SessionExchange> {
+  const client = http.createHttp();
+  try {
+    const headers: RemoteRequestHeaders = { accept: 'application/json' };
+    const res = await client.request(`http://${base}${entryPath}`, {
+      method: http.RequestMethod.GET,
+      header: headers,
+      expectDataType: http.HttpDataType.STRING,
+    });
+    // `res.cookies` 是 SDK 给出的响应 cookie 字段（ArkTS 禁止按索引读响应头，`res.header['set-cookie']` 不过编译）。
+    const setCookieRaw = res.cookies;
+    let setCookie = '';
+    if (typeof setCookieRaw === 'string' && setCookieRaw !== '') {
+      setCookie = setCookieRaw;
+    }
+    if (setCookie === '') {
+      return { ok: false, cookie: '', reason: `HTTP ${res.responseCode} 且无 set-cookie（入口 ${entryPath}）` };
+    }
+    const parts = setCookie.split(';');
+    const first = parts.length > 0 ? parts[0].trim() : '';
+    if (first.indexOf('=') <= 0) {
+      return { ok: false, cookie: '', reason: `set-cookie 形状不符：${setCookie}` };
+    }
+    await saveString(context, cookieKey(base), first);
+    return { ok: true, cookie: first, reason: '' };
+  } catch (err) {
+    const e = err as BusinessError;
+    return { ok: false, cookie: '', reason: `换会话失败：${e.message}` };
+  } finally {
+    client.destroy();
+  }
+}
+
+/** 取远端首页（带壳持有的会话）。 */
+export async function fetchRemoteHtml(base: string, cookie: string): Promise<string> {
+  const client = http.createHttp();
+  try {
+    const header: RemoteRequestHeaders = { accept: 'text/html' };
+    if (cookie !== '') header.cookie = cookie;
+    const res = await client.request(`http://${base}/`, {
+      method: http.RequestMethod.GET,
+      header: header,
+      expectDataType: http.HttpDataType.STRING,
+    });
+    const code = res.responseCode as number;
+    if (code < 200 || code >= 300) {
+      throw new Error(`远端首页 HTTP ${code}`);
+    }
+    return res.result as string;
+  } finally {
+    client.destroy();
+  }
+}
+
+/** 页面里被引用的静态资产（`./assets/...`）：script/src 与 link/href 都算。 */
+export function assetPathsOf(html: string): string[] {
+  const out: string[] = [];
+  const re = /(?:src|href)\s*=\s*["']\.?\/?(assets\/[^"']+)["']/g;
+  let m = re.exec(html);
+  while (m !== null) {
+    const rel = m[1].split('?')[0];
+    if (out.indexOf(rel) < 0) out.push(rel);
+    m = re.exec(html);
+  }
+  return out;
+}
+
+function writeFile(dir: string, rel: string, bytes: ArrayBuffer): void {
+  const full = `${dir}/${rel}`;
+  const slash = full.lastIndexOf('/');
+  if (slash > 0) {
+    const parent = full.substring(0, slash);
+    if (!fs.accessSync(parent)) fs.mkdirSync(parent, true);
+  }
+  const file = fs.openSync(full, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+  fs.writeSync(file.fd, bytes);
+  fs.closeSync(file);
+}
+
+/** 缓存目录：`<filesDir>/dsh-frontend/<entry>`（按入口产物名分目录 = 按构建分目录）。 */
+export function distDirFor(context: Context, entry: string): string {
+  return `${context.filesDir}/dsh-frontend/${entry}`;
+}
+
+/**
+ * 确保本地有与远端**同一构建**的前端产物：
+ * 命中缓存（入口名一致 + `index.html` 在）→ 直接返回；否则从远端 `assets/*` 拉齐并落盘。
+ *
+ * 为什么按「被引用的 assets 清单」而不是整包下载：手机只需要前端静态产物（几 MB），
+ * 而 Host 本来就在 `/assets/*` 上提供这些文件（同一个构建）；tar/gzip 解包在 ArkTS 侧还要额外依赖。
+ */
+export async function ensureLocalAssets(
+  context: Context,
+  base: string,
+  cookie: string,
+): Promise<LocalAssetBundle> {
+  const html = await fetchRemoteHtml(base, cookie);
+  const entry = entryNameOf(html);
+  if (entry === '') throw new Error('远端首页认不出入口产物（老版 dsh？）');
+
+  const store = await preferences.getPreferences(context, PREF_STORE);
+  const cachedEntry = (await store.get(entryKey(base), '')) as string;
+  const dir = distDirFor(context, entry);
+  if (cachedEntry === entry && fs.accessSync(`${dir}/index.html`)) {
+    return { dir: dir, entry: entry, files: listFiles(dir) };
+  }
+
+  // 冷启动/版本不符：把被引用的静态资产 + 首页本体拉到沙箱。
+  writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
+  const assets = assetPathsOf(html);
+  for (const rel of assets) {
+    const bytes = await downloadToBuffer(`http://${base}/${rel}`, cookie);
+    if (bytes !== null) writeFile(dir, rel, bytes);
+  }
+  await saveString(context, entryKey(base), entry);
+  return { dir: dir, entry: entry, files: listFiles(dir) };
+}
+
+async function downloadToBuffer(url: string, cookie: string): Promise<ArrayBuffer | null> {
+  const client = http.createHttp();
+  try {
+    const header: RemoteRequestHeaders = {};
+    if (cookie !== '') header.cookie = cookie;
+    const res = await client.request(url, {
+      method: http.RequestMethod.GET,
+      header: header,
+      expectDataType: http.HttpDataType.ARRAY_BUFFER,
+    });
+    if ((res.responseCode as number) !== 200) return null;
+    return res.result as ArrayBuffer;
+  } catch (err) {
+    return null;
+  } finally {
+    client.destroy();
+  }
+}
+
+/** 递归列出目录下的相对路径（供 LocalHost 的 distFiles 用）。 */
+export function listFiles(dir: string, prefix: string = ''): string[] {
+  const out: string[] = [];
+  try {
+    const names = fs.listFileSync(dir);
+    for (const name of names) {
+      const rel = prefix !== '' ? `${prefix}/${name}` : name;
+      const full = `${dir}/${rel}`;
+      if (fs.statSync(full).isDirectory()) {
+        const inner = listFiles(full, rel);
+        for (const p of inner) out.push(p);
+      } else {
+        out.push(rel);
+      }
+    }
+  } catch (err) {
+    // 目录不存在 = 空清单
+  }
+  return out;
+}
+
+/** 读随包布局插件的 client.js（放在 `resources/rawfile` 里随包分发；空 = 不随包）。 */
+export function readBundledPlugin(context: Context, name: string = 'dsh-web-mobile/client.js'): string {
+  try {
+    const data = context.resourceManager.getRawFileContentSync(`plugins/${name}`);
+    return new util.TextDecoder().decodeWithStream(data);
+  } catch (err) {
+    return '';
+  }
+}

@@ -4,6 +4,10 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Theme } from '../common/Theme';
 import { PairLogic } from '../common/PairLogic';
 import { SessionGuard } from '../common/SessionGuard';
+import { ensureLocalAssets, entryPathOf, exchangeSession, loadCookie, readBundledPlugin } from '../common/LocalAssets';
+import { LocalHost } from '../common/LocalHost';
+import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 
 /**
  * dsh 页面容器（ArkWeb）。
@@ -35,11 +39,18 @@ struct WebPage {
   @State base: string = '';
   @State url: string = 'about:blank';
   private controller: webview.WebviewController = new webview.WebviewController();
+  /** 壳内 loopback 服务（#155）；未就绪时为 undefined，页面走远端地址。 */
+  private localHost: LocalHost | undefined = undefined;
 
   aboutToAppear(): void {
     const params = (router.getParams() ?? {}) as Record<string, string>;
     this.base = params['base'] ?? '';
     this.url = params['url'] ?? PairLogic.buildEnterUrl(this.base);
+    // #155：本地资产 + 远程数据（与桌面远程模式同形）。关键点：配对链接是**一次性凭据**，
+    // 绝不能交给 ArkWeb 直接加载去消费——那样壳自己换不到 cookie，也无法在转发时注入。
+    // 于是先把它当占位地址，同时由壳去换会话 → 装配本地产物 → 起壳内 loopback 服务，
+    // 就绪后把 url 换成壳内 origin（失败则保留原地址，走「直接开远程页面」那条保守路径）。
+    void this.startLocalAssets(params['url'] ?? '');
     // 注册控制器：EntryAbility / NetworkWatcher 侧的会话检查靠它找到页面。
     SessionGuard.get().attach(this.controller);
     this.tuneSocketIdleTimeout();
@@ -52,6 +63,51 @@ struct WebPage {
     const guard = SessionGuard.get();
     if (guard !== undefined) {
       guard.attach(undefined);
+    }
+    // #155：同时收掉壳内 loopback 服务（否则退出页面后端口一直占着）。
+    if (this.localHost !== undefined) {
+      void this.localHost.stop();
+      this.localHost = undefined;
+    }
+  }
+
+  /**
+   * 起本地资产会话：换会话（配对链接）→ 拉/命中本地产物 → 起壳内服务 → 换成壳内 origin。
+   *
+   * 任一步失败都回到「直接用远端地址」（最保守、永远可用）；日志进 hilog，真机上可查。
+   */
+  private async startLocalAssets(entryUrl: string): Promise<void> {
+    if (!this.base) return;
+    try {
+      const context = getContext(this) as common.UIAbilityContext;
+      const entryPath = entryPathOf(entryUrl);
+      let cookie = await loadCookie(context, this.base);
+      if (entryPath) {
+        const ex = await exchangeSession(context, this.base, entryPath);
+        if (ex.ok) {
+          cookie = ex.cookie;
+          hilog.info(0x0000, 'dsh-mobile', '已由壳换取会话 cookie');
+        } else {
+          // 换不到不代表不能进：真需要鉴权时页面自己会提示（与桌面「换取失败照常导航」一致）。
+          hilog.warn(0x0000, 'dsh-mobile', '换取会话失败：%{public}s', ex.reason);
+        }
+      }
+      const assets = await ensureLocalAssets(context, this.base, cookie);
+      const plugin = readBundledPlugin(context);
+      const host = await LocalHost.start({
+        remoteBase: this.base,
+        cookie: cookie,
+        distDir: assets.dir,
+        distFiles: assets.files,
+        pluginClientJs: plugin,
+        pluginRev: assets.entry,
+      });
+      this.localHost = host;
+      this.url = host.url;
+      hilog.info(0x0000, 'dsh-mobile', '本地资产就绪：%{public}s（产物 %{public}s）', host.url, assets.entry);
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.error(0x0000, 'dsh-mobile', '本地资产失败，回退远程地址：%{public}s', e.message);
     }
   }
 
