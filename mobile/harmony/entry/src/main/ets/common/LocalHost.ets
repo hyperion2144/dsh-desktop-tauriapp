@@ -87,10 +87,19 @@ export interface LocalHostOptions {
    * 没有清单就不会因为「运行时文件变多了」而要改代码（用户指出的设计缺陷）。
    */
   readBundled?: (rel: string) => ArrayBuffer | null;
-  /** 随包布局插件的 client.js 内容（Host 没装时唯一来源）；空 = 不随包。 */
+  /** 随包布局插件的 client.js 内容（Host 没装它时的唯一来源）。 */
   pluginClientJs: string;
   /** 随包插件 rev（写进启动图当缓存失效用）。 */
   pluginRev: string;
+  /**
+   * 是否注入移动布局插件（`dsh-web-mobile`）。**默认 false**。
+   *
+   * 依据 #147 的审计结论：手机上卡的是**宿主前端的渲染成本**（会话整段挂载 + 逐块 Shiki 高亮），
+   * 不是网络。对策 A 就是「手机不注入移动布局、走 iPad 同款桌面布局」更快；对策 B 是本仓 client 里的
+   * `mobile-render-budget.ts`（content-visibility 视觉窗口化），随 Host 的客户端插件生效。
+   * 需要移动布局时显式打开（`dsh-web-mobile` 随包内容仍在，随时可启用）。
+   */
+  injectMobileLayout?: boolean;
 }
 
 const WITHHELD_HEADERS = ['set-cookie', 'transfer-encoding', 'connection', 'content-length'];
@@ -319,6 +328,8 @@ export class LocalHost {
         };
       }
       let doc = stripLanePatches(html);
+      // 移动布局由 Host 侧的开关（`desktop_layout_on_phones`）决定；壳这里只负责让随包插件可用，
+      // 不替用户做取舍（早先我把它默认关掉是越权）。
       if (this.opts.pluginClientJs !== '') {
         const url = `__local-plugins/dsh-web-mobile/client.js?rev=${this.opts.pluginRev}`;
         doc = augmentBoot(doc, 'dsh-web-mobile', url, this.opts.pluginRev);
@@ -440,18 +451,48 @@ export class LocalHost {
     // 为什么不能 fire-and-forget：`send()` 是异步的，大帧（实测上游会发 63 KB 帧）遇上 socket 背压时
     // 会失败；原来的 `.catch(()=>{})` 直接把失败吞掉 → 丢帧 → 对端按协议错关闭
     // （实机 lane：`mux#42 … 上游帧#4 len=65351` → `上游关闭帧 code=28773`，页面于是不断重连）。
-    let toClient: Promise<void> = Promise.resolve();
-    let toUp: Promise<void> = Promise.resolve();
+    // 双向搬运：每条方向一个**队列泵**（保序、不丢帧），而不是逐帧 promise 链——
+    // 后者每帧都要等上一个 send() 结算，交互密集时排队延迟明显（用户实测：不动它是流畅的，
+    // 一交互就卡）。泵内串行 await，队空即停，不额外分配 promise。
+    const toClient: Array<ArrayBuffer> = [];
+    const toUp: Array<ArrayBuffer> = [];
+    let pumpingClient = false;
+    let pumpingUp = false;
+    const pumpToClient = async (): Promise<void> => {
+      if (pumpingClient) return;
+      pumpingClient = true;
+      while (toClient.length > 0) {
+        const b = toClient.shift();
+        if (b !== undefined) {
+          await client.send({ data: b }).catch((e: Object) => {
+            hilog.warn(0x0000, 'dsh-mobile', 'WS→页面 发送失败：%{public}s', JSON.stringify(e));
+          });
+        }
+      }
+      pumpingClient = false;
+    };
+    const pumpToUp = async (): Promise<void> => {
+      if (pumpingUp) return;
+      pumpingUp = true;
+      while (toUp.length > 0) {
+        const b = toUp.shift();
+        if (b !== undefined) {
+          await up.send({ data: b }).catch((e: Object) => {
+            hilog.warn(0x0000, 'dsh-mobile', 'WS→上游 发送失败：%{public}s', JSON.stringify(e));
+          });
+        }
+      }
+      pumpingUp = false;
+    };
     up.on('message', (v: socket.SocketMessageInfo) => {
-      toClient = toClient.then(() => client.send({ data: v.message }).catch((e: Object) => {
-        hilog.warn(0x0000, 'dsh-mobile', 'WS→页面 发送失败：%{public}s', JSON.stringify(e));
-      }));
+      toClient.push(v.message);
+      void pumpToClient();
     });
     client.on('message', (v: socket.SocketMessageInfo) => {
-      toUp = toUp.then(() => up.send({ data: v.message }).catch((e: Object) => {
-        hilog.warn(0x0000, 'dsh-mobile', 'WS→上游 发送失败：%{public}s', JSON.stringify(e));
-      }));
+      toUp.push(v.message);
+      void pumpToUp();
     });
+
     up.on('close', () => {
       client.close().catch(() => {});
     });
