@@ -24,6 +24,7 @@ import http from '@ohos.net.http';
 import fs from '@ohos.file.fs';
 import util from '@ohos.util';
 import { BusinessError } from '@kit.BasicServicesKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 
 /** 动态头字段（ArkTS 不支持索引签名，所以用 Map；不要改回 Record）。 */
 export type HeaderMap = Map<string, string>;
@@ -435,14 +436,24 @@ export class LocalHost {
     }
     await up.send({ data: str2buf(rewritten) });
     // 双向搬运 + 两端关闭互传（少了这一步，一侧走了另一侧会半开，页面只能靠超时重连）。
+    // 双向搬运：**按序排队发送**（每条方向一条链）+ 两端关闭/出错互传。
+    // 为什么不能 fire-and-forget：`send()` 是异步的，大帧（实测上游会发 63 KB 帧）遇上 socket 背压时
+    // 会失败；原来的 `.catch(()=>{})` 直接把失败吞掉 → 丢帧 → 对端按协议错关闭
+    // （实机 lane：`mux#42 … 上游帧#4 len=65351` → `上游关闭帧 code=28773`，页面于是不断重连）。
+    let toClient: Promise<void> = Promise.resolve();
+    let toUp: Promise<void> = Promise.resolve();
     up.on('message', (v: socket.SocketMessageInfo) => {
-      client.send({ data: v.message }).catch(() => {});
+      toClient = toClient.then(() => client.send({ data: v.message }).catch((e: Object) => {
+        hilog.warn(0x0000, 'dsh-mobile', 'WS→页面 发送失败：%{public}s', JSON.stringify(e));
+      }));
+    });
+    client.on('message', (v: socket.SocketMessageInfo) => {
+      toUp = toUp.then(() => up.send({ data: v.message }).catch((e: Object) => {
+        hilog.warn(0x0000, 'dsh-mobile', 'WS→上游 发送失败：%{public}s', JSON.stringify(e));
+      }));
     });
     up.on('close', () => {
       client.close().catch(() => {});
-    });
-    client.on('message', (v: socket.SocketMessageInfo) => {
-      up.send({ data: v.message }).catch(() => {});
     });
     client.on('close', () => {
       up.close().catch(() => {});
