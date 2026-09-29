@@ -64,7 +64,11 @@ struct WebPage {
     // 必然失败——症状正是手机扫码后「配对失败」。所以：是配对入口就**先停在 about:blank**，
     // 等壳自己换完会话、起好壳内服务再切过去。
     const entryPath = entryPathOf(rawUrl);
-    this.url = entryPath !== '' ? 'about:blank' : rawUrl;
+    // **一律先从 about:blank 开始**：绝不让 WebView 在「壳尚未备好（cookie 未种、本地服务未起）」时
+    // 直接去访问远端——那会以无 cookie 的身份直连 lane，得到一个 401 UNPAIRED 页（实机日志：
+    // `GET / = 401 UNPAIRED` 紧跟 `GET /favicon.ico = 401 UNPAIRED`，就是 WebView 在直连的指纹）。
+    // 导航统一由 startLocalAssets / chooseRemote 走 controller.loadUrl。
+    this.url = 'about:blank';
     void this.startLocalAssets(rawUrl, entryPath);
     // 注册控制器：EntryAbility / NetworkWatcher 侧的会话检查靠它找到页面。
     SessionGuard.get().attach(this.controller);
@@ -118,6 +122,9 @@ struct WebPage {
       const e2 = err as BusinessError;
       this.choiceReason = e2.message;
       this.needChoice = true;
+      // 进三选一前先把已存的会话种进 ArkWeb：用户若选「直接加载远程页面」，页面就不至于无 cookie 直连。
+      const ctx2 = getContext(this) as common.UIAbilityContext;
+      await this.plantCookie(ctx2);
       const e = err as BusinessError;
       hilog.error(0x0000, 'dsh-mobile', '本地资产失败，回退远程地址：%{public}s', e.message);
     }
