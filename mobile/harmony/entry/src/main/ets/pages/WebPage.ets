@@ -237,6 +237,15 @@ struct WebPage {
     hilog.info(DOMAIN, TAG, '导航到（不带 token）：%{public}s', root);
     this.needChoice = false;
     this.url = root;
+    // 同上：改 src 不导航，必须显式 loadUrl。
+    try {
+      this.controller.loadUrl(root);
+      hilog.info(0x0000, 'dsh-mobile', '已导航到远程页面：%{public}s', root);
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.error(0x0000, 'dsh-mobile', 'loadUrl（远程）失败：%{public}s', e.message);
+    }
+
   }
 
   build() {
