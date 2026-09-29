@@ -318,7 +318,14 @@ function seedFromBundle(context: Context, entry: string): string {
 }
 
 function writeBundledDir(context: Context, rawDir: string, diskDir: string, rel: string): void {
-  const names = context.resourceManager.getRawFileListSync(rel === '' ? rawDir : `${rawDir}/${rel}`);
+  // 资源枚举失败（实机报 `Invalid relative path. Please confirm: …`）不能把整条链打断：
+  // 这一层只是「把随包产物铺到沙箱」，铺不了就让它交回空，由上层走三选一里的其它两条路。
+  let names: string[] = [];
+  try {
+    names = context.resourceManager.getRawFileListSync(rel === '' ? rawDir : `${rawDir}/${rel}`);
+  } catch (err) {
+    return;
+  }
   for (const name of names) {
     const childRel = rel === '' ? name : `${rel}/${name}`;
     const children = context.resourceManager.getRawFileListSync(`${rawDir}/${childRel}`);
@@ -340,7 +347,14 @@ function writeBundledDir(context: Context, rawDir: string, diskDir: string, rel:
 export async function bundledAssets(context: Context): Promise<LocalAssetBundle | null> {
   const entry = bundledEntry(context);
   if (entry === '') return null;
-  const dir = seedFromBundle(context, entry);
+  let dir = distDirFor(context, entry);
+  try {
+    dir = seedFromBundle(context, entry);
+  } catch (err) {
+    // 铺沙箱出错也不当致命：只要目录里已经有 index.html（上次铺过），照样能用随包产物。
+    return fs.accessSync(`${dir}/index.html`) ? { dir: dir, entry: entry, files: listFiles(dir) } : null;
+  }
+
   if (!fs.accessSync(`${dir}/index.html`)) return null;
   return { dir: dir, entry: entry, files: listFiles(dir) };
 }
