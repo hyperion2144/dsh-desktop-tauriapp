@@ -4,8 +4,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Theme } from '../common/Theme';
 import { PairLogic } from '../common/PairLogic';
 import { SessionGuard } from '../common/SessionGuard';
-import { cachedAssets, ensureLocalAssets, entryPathOf, exchangeSession, loadCookie, readBundledPlugin } from '../common/LocalAssets';
-import { LocalHost } from '../common/LocalHost';
+import { cachedAssets, downloadFrontend, ensureLocalAssets, entryPathOf, exchangeSession, fetchRemoteHtml, loadCookie, readBundledPlugin } from '../common/LocalAssets';
+import { LocalHost, entryNameOf } from '../common/LocalHost';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 
@@ -45,6 +45,8 @@ struct WebPage {
   @State needChoice: boolean = false;
   /** 进三选一的原因（面板上直接显示，实机不用连 hilog 也能看出哪里错）。 */
   @State choiceReason: string = '';
+  /** 三选一进行中：按钮置灰 + 面板显示进度（不能“闪一下没反应”）。 */
+  @State choiceBusy: boolean = false;
 
   aboutToAppear(): void {
     const params = (router.getParams() ?? {}) as Record<string, string>;
@@ -130,26 +132,73 @@ struct WebPage {
     this.localHost = host;
     this.url = host.url;
     hilog.info(0x0000, 'dsh-mobile', '本地资产就绪：%{public}s（产物 %{public}s）', host.url, entry);
+    this.needChoice = false; // 真起来了才关面板（避免“闪一下没反应”）
   }
 
-  /** 三选一：「下载对应运行时」——重新取远端产物（入口变更时自动重下）+ 重比，成功后进页面。 */
+  /**
+   * 三选一：「下载对应运行时」——与桌面远程模式同形：去**运行时包的分发处**取对应版本的前端产物，
+   * 取完**重比**（远端入口名 vs 刚下的那份）——命中就用，仍不匹配就再问一次（桌面 ask_after_download）。
+   */
   private async chooseDownload(): Promise<void> {
-    this.needChoice = false;
-    this.choiceReason = '';
-    // 一次性 token 已消费：传空字符串表示不换会话，只重新取产物并重比。
-    await this.startLocalAssets(`http://${this.base}/`, '');
+    const context = getContext(this) as common.UIAbilityContext;
+    this.choiceBusy = true;
+    this.choiceReason = '正在从 npm 下载对应运行时…';
+    try {
+      const cookie = await loadCookie(context, this.base);
+      const bundle = await downloadFrontend(context, this.base, cookie);
+      const html = await fetchRemoteHtml(this.base, cookie);
+      const remoteEntry = entryNameOf(html);
+      if (remoteEntry !== bundle.entry) {
+        this.choiceReason = `已下载 ${bundle.entry}，但远端当前是 ${remoteEntry}：请重选（可再下一次）`;
+        this.choiceBusy = false;
+        return;
+      }
+      await this.startHost(bundle.dir, bundle.files, bundle.entry);
+    } catch (err) {
+      const e = err as BusinessError;
+      this.choiceReason = `下载失败：${e.message}`;
+    }
+    this.choiceBusy = false;
   }
 
-  /** 三选一：「用当前本地运行时」——不比对版本，直接用沙箱里已缓存的那份产物起服务。 */
+  /** 三选一：「用当前本地运行时」——先沙箱缓存，其次**随包内置**那份（与桌面内置运行时同理）。 */
   private async chooseLocal(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
+    this.choiceBusy = true;
     const cached = await cachedAssets(context, this.base);
+    this.choiceBusy = false;
     if (cached === null) {
-      this.choiceReason = '本地没有已缓存的产物，请选「下载对应运行时」或「直接加载远程页面」';
+      this.choiceReason = '本机没有任何可用产物（连随包的也没有，说明构建时没跑 sync-builtin.sh）';
       return;
     }
-    this.needChoice = false;
     await this.startHost(cached.dir, cached.files, cached.entry);
+  }
+
+  /**
+   * 三选一：「直接加载远程页面」。
+   *
+   * 关键一步：把壳持有的会话 cookie **种进 ArkWeb 的 cookie jar**（桌面做这件事的是
+   * `web_token`：原生种入 webview）——不种就直接开 `http://<base>/`，服务端不认这个会话，
+   * 页面就是一片空白（用户实测到的「选远程页面直接白屏」）。没有会话时也不装死，把原因说清楚。
+   */
+  private async chooseRemote(): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const cookie = await loadCookie(context, this.base);
+    const root = `http://${this.base}/`;
+    if (cookie === '') {
+      this.choiceReason = '配对未完成（壳里没有会话）：请重新扫一张新的配对码，或选「用当前本地运行时」';
+      return;
+    }
+    try {
+      // API 名按 SDK：`configCookieSync`（`putCookie` 在这个版本的 WebCookieManager 上不存在，编译器直接挡下）。
+      webview.WebCookieManager.configCookieSync(root, cookie);
+      hilog.info(DOMAIN, TAG, '远程页面：会话 cookie 已种入 ArkWeb');
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.warn(DOMAIN, TAG, '种 cookie 失败：%{public}s', e.message);
+    }
+    this.needChoice = false;
+    this.url = root;
   }
 
   build() {
@@ -219,7 +268,7 @@ struct WebPage {
   gatePanel() {
     Column({ space: 10 }) {
       Text('本地页面没跑起来').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.Text)
-      Text(this.choiceReason).fontSize(12).fontColor(Theme.Text2).maxLines(3)
+      Text(this.choiceBusy ? '正在准备…' : this.choiceReason).fontSize(12).fontColor(Theme.Text2).maxLines(3)
       Button('下载对应运行时（装完自动重比）')
         .width('100%')
         .onClick(() => { void this.chooseDownload(); })
@@ -228,9 +277,9 @@ struct WebPage {
         .onClick(() => { void this.chooseLocal(); })
       Button('直接加载远程页面')
         .width('100%')
+        .enabled(!this.choiceBusy)
         .onClick(() => {
-          this.needChoice = false;
-          this.url = `http://${this.base}/`;
+          void this.chooseRemote();
         })
     }
     .width('86%')

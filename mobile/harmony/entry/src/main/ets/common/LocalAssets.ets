@@ -268,8 +268,134 @@ export function readBundledPlugin(context: Context, name: string = 'dsh-web-mobi
 export async function cachedAssets(context: Context, base: string): Promise<LocalAssetBundle | null> {
   const store = await preferences.getPreferences(context, PREF_STORE);
   const cachedEntry = (await store.get(entryKey(base), '')) as string;
-  if (cachedEntry === '') return null;
-  const dir = distDirFor(context, cachedEntry);
+  if (cachedEntry !== '') {
+    const dir = distDirFor(context, cachedEntry);
+    if (fs.accessSync(`${dir}/index.html`)) {
+      return { dir: dir, entry: cachedEntry, files: listFiles(dir) };
+    }
+  }
+  // 沙箱里没有（首次安装必然如此）：退回**随包内置**那份——这正是「用当前本地运行时」应有的默认，
+  // 而不是告诉用户“没有已缓存的产物”（用户实测反馈的原话）。
+  return await bundledAssets(context);
+}
+
+/** 随包内置产物的入口产物名（rawfile/dsh-frontend-manifest.json，由 scripts/sync-builtin.sh 生成）。 */
+export function bundledEntry(context: Context): string {
+  try {
+    const raw = context.resourceManager.getRawFileContentSync('dsh-frontend-manifest.json');
+    const text = new util.TextDecoder().decodeWithStream(raw);
+    const m = /"entry"\s*:\s*"([^"]+)"/.exec(text);
+    return m ? m[1] : '';
+  } catch (err) {
+    return ''; // 没随包（或 manifest 缺）→ 空串，上层走下载路径
+  }
+}
+
+/** 把随包内置产物**铺到沙箱**（LocalHost 用 fs 读文件，得先落到可读目录）。 */
+function seedFromBundle(context: Context, entry: string): string {
+  const dir = distDirFor(context, entry);
+  writeBundledDir(context, 'dsh-frontend', dir, '');
+  return dir;
+}
+
+function writeBundledDir(context: Context, rawDir: string, diskDir: string, rel: string): void {
+  const names = context.resourceManager.getRawFileListSync(rel === '' ? rawDir : `${rawDir}/${rel}`);
+  for (const name of names) {
+    const childRel = rel === '' ? name : `${rel}/${name}`;
+    const children = context.resourceManager.getRawFileListSync(`${rawDir}/${childRel}`);
+    if (children.length > 0) {
+      writeBundledDir(context, rawDir, diskDir, childRel);
+      continue;
+    }
+    const bytes = context.resourceManager.getRawFileContentSync(`${rawDir}/${childRel}`);
+    writeFile(diskDir, childRel, bytes.buffer as ArrayBuffer);
+  }
+}
+
+/**
+ * 随包内置产物的 bundle（#155）：铺到沙箱后当本地产物用。
+ *
+ * 与 `cachedAssets` 的区别：这份**一定存在**（除非构建时没跑 sync-builtin.sh），所以
+ * 首次安装、离线、远端换了构建却没网时，它都是「用当前本地运行时」的兼底。
+ */
+export async function bundledAssets(context: Context): Promise<LocalAssetBundle | null> {
+  const entry = bundledEntry(context);
+  if (entry === '') return null;
+  const dir = seedFromBundle(context, entry);
   if (!fs.accessSync(`${dir}/index.html`)) return null;
-  return { dir: dir, entry: cachedEntry, files: listFiles(dir) };
+  return { dir: dir, entry: entry, files: listFiles(dir) };
+}
+
+/** npm 的按文件 CDN（取的是包里的同一份字节；ArkTS 侧 decompressFile 只支持 zip，没走 tgz）。 */
+const NPM_CDN = 'https://cdn.jsdelivr.net/npm';
+const FRONTEND_PKG = '@deepseek-ai/dsh-web-frontend';
+const NPM_REGISTRY = 'https://registry.npmjs.org';
+
+async function httpText(url: string, cookie: string): Promise<string> {
+  const client = http.createHttp();
+  try {
+    const header: RemoteRequestHeaders = {};
+    if (cookie !== '') header.cookie = cookie;
+    const res = await client.request(url, {
+      method: http.RequestMethod.GET,
+      header: header,
+      expectDataType: http.HttpDataType.STRING,
+    });
+    if ((res.responseCode as number) !== 200) throw new Error(`HTTP ${res.responseCode}：${url}`);
+    return res.result as string;
+  } finally {
+    client.destroy();
+  }
+}
+
+async function httpBytes(url: string): Promise<ArrayBuffer> {
+  const client = http.createHttp();
+  try {
+    const res = await client.request(url, {
+      method: http.RequestMethod.GET,
+      expectDataType: http.HttpDataType.ARRAY_BUFFER,
+    });
+    if ((res.responseCode as number) !== 200) throw new Error(`HTTP ${res.responseCode}：${url}`);
+    return res.result as ArrayBuffer;
+  } finally {
+    client.destroy();
+  }
+}
+
+/** 选要下载的版本：next > latest > alpha > 任意 tag（与 Expo 侧 pickVersion 同一优先级）。 */
+export function pickTag(tagsJson: string): string {
+  const order = ['next', 'latest', 'alpha'];
+  for (const tag of order) {
+    const m = new RegExp(`"${tag}"\\s*:\\s*"([^"]+)"`).exec(tagsJson);
+    if (m) return m[1];
+  }
+  const any = /"[a-zA-Z0-9_-]+"\s*:\s*"(\d[^"]+)"/.exec(tagsJson);
+  return any ? any[1] : '';
+}
+
+/**
+ * 「下载对应运行时」的鸿蒙落点：查 npm dist-tags → 取该版本的前端产物 → 落沙箱 → 当本地产物用。
+ *
+ * 与桌面远程模式同形：不是从自己的 Host 拓文件，而是去**运行时包的分发处**取对应版本的那份产物；
+ * 取完由调用方**重比**（入口产物名）——命中就用，仍不匹配就再问一次（桌面 ask_after_download）。
+ */
+export async function downloadFrontend(context: Context, base: string, cookie: string): Promise<LocalAssetBundle> {
+  const metaUrl = `${NPM_REGISTRY}/${FRONTEND_PKG}`;
+  const version = pickTag(await httpText(metaUrl, ''));
+  if (version === '') throw new Error('npm 元数据里没有可用版本');
+  const cdn = `${NPM_CDN}/${FRONTEND_PKG}@${version}/dist`;
+  const html = await httpText(`${cdn}/index.html`, '');
+  const entry = entryNameOf(html);
+  if (entry === '') throw new Error(`包 ${version} 的 index.html 认不出入口产物`);
+
+  const dir = distDirFor(context, entry);
+  writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
+  const refs = assetPathsOf(html);
+  for (const rel of refs) {
+    writeFile(dir, rel, await httpBytes(`${cdn}/${rel}`));
+  }
+  // 记下这次用的版本与入口：版本给冷启动读缓存用，入口给「与远端重比」用。
+  await saveString(context, entryKey(base), entry);
+  await saveString(context, `${entryKey(base)}:version`, version);
+  return { dir: dir, entry: entry, files: listFiles(dir) };
 }
