@@ -167,8 +167,17 @@ struct WebPage {
       await this.localHost.stop();
     }
     this.localHost = host;
+
     this.url = host.url;
-    hilog.info(0x0000, 'dsh-mobile', '本地资产就绪：%{public}s（产物 %{public}s）', host.url, entry);
+    // **必须显式导航**：ArkWeb 的 `Web({src})` 只在组件创建时生效，之后改 `src` 状态不会触发导航
+    // （实机日志：整轮下来只有一句 `LoadUrl url:about:blank`，页面永远停在 about:blank → 白屏）。
+    try {
+      this.controller.loadUrl(host.url);
+      hilog.info(0x0000, 'dsh-mobile', '已导航到本地页面：%{public}s（产物 %{public}s）', host.url, entry);
+    } catch (err) {
+      const e = err as BusinessError;
+      hilog.error(0x0000, 'dsh-mobile', 'loadUrl 失败：%{public}s', e.message);
+    }
     this.needChoice = false; // 真起来了才关面板（避免“闪一下没反应”）
   }
 
