@@ -13,6 +13,15 @@ export interface PairEntry {
   token: string;
   base: string;
   name?: string;
+  /** 以下均由壳探测对端得到（common/host-info.ts）；探测失败则保持缺省，界面回退到 name/base。 */
+  lanIp?: string;
+  lanePort?: number;
+  tunnelUrl?: string;
+  dshAuth?: boolean;
+  /** 本机在**对端设备表**里的名字（对方看到你是谁）。 */
+  deviceName?: string;
+  /** 最后一次探测成功的时间（毫秒）。 */
+  lastSeen?: number;
 }
 
 export interface PairStorage {
@@ -101,7 +110,11 @@ export function createPairStore(storage?: PairStorage | null) {
     },
     add(pair: PairEntry): PairEntry[] {
       const list = this.list();
-      if (!list.some((p) => p.base === pair.base)) list.push(pair);
+      // 同 base 已存在时**更新**（而不是丢弃）：设备信息（lanIp/隧道/对方看到的名字）是探测出来的，
+      // 新一次探测必须能覆写旧值；只有 base 是身份键。
+      const at = list.findIndex((p) => p.base === pair.base);
+      if (at >= 0) list[at] = { ...list[at], ...pair };
+      else list.push(pair);
       this.save(list);
       return list;
     },
