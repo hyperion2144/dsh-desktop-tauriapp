@@ -28,6 +28,65 @@ const MAX_HEAD: usize = 64 * 1024;
 /// 取 30 分钟 —— 崩溃实测发生在页面存活约 1 小时后，留一半余量。
 const SSE_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
+/// 把上游响应体泵给客户端；SSE 走**寿命上限**（到期返回 `true`，调用方随即断开）。
+///
+/// 单独抽成函数是为了可测：把上限作为参数传入，测试就能用 50ms 证明“到期真的会断”，
+/// 而不必等 30 分钟。返回 `true` = 是被上限掐断的（而非上游自然结束）。
+async fn pump_body<R, W>(up_r: &mut R, client_w: &mut W, is_sse: bool, cap: Duration) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if !is_sse {
+        let _ = tokio::io::copy(up_r, client_w).await;
+        return false;
+    }
+    tokio::time::timeout(cap, tokio::io::copy(up_r, client_w)).await.is_err()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    /// 上游“永不结束”的 SSE 流：受上限控制必须被提前断开。
+    #[tokio::test]
+    async fn sse_stream_is_cut_at_lifetime_cap() {
+        // 一个不会自己结束的读端：把数据推入通道后不放 EOF。
+        let (mut tx, mut rx) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            loop {
+                if tx.write_all(b"data: x\n\n").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut out: Vec<u8> = Vec::new();
+        let cut = pump_body(&mut rx, &mut out, true, Duration::from_millis(50)).await;
+        assert!(cut, "SSE 流应当在寿命上限处被断开（返回 true）");
+        assert!(!out.is_empty(), "断开前应当真的传过数据（证明是在泵、不是没接上）");
+    }
+
+    /// 非 SSE：不加上限（保持长连接语义，mux 之外的流不受影响）。
+    #[tokio::test]
+    async fn non_sse_ignores_cap() {
+        let (mut tx, mut rx) = tokio::io::duplex(64);
+        let body = vec![b'x'; 1024];
+        let body2 = body.clone();
+        tokio::spawn(async move {
+            let _ = tx.write_all(&body2).await;
+            // 写完后立刻关闭：copy 遇到 EOF 自然结束
+            drop(tx);
+        });
+        let mut out: Vec<u8> = Vec::new();
+        let cut = pump_body(&mut rx, &mut out, false, Duration::from_millis(50)).await;
+        assert!(!cut, "非 SSE 不应被寿命上限掐断");
+        assert_eq!(out.len(), 1024, "字节应当完整搬运");
+    }
+}
+
 /// 启动代理，返回其 origin（`http://127.0.0.1:<port>/`，带尾斜杠）。
 pub(crate) fn start(app: AppHandle) -> Option<String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
@@ -204,18 +263,11 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
         .get("content-type")
         .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
         .unwrap_or(false);
-    if is_sse {
-        if tokio::time::timeout(SSE_MAX_LIFETIME, tokio::io::copy(&mut up_r, &mut client_w))
-            .await
-            .is_err()
-        {
-            log::info!(
-                "[stream-proxy] SSE 达到寿命上限（{}s）→ 主动断开让页面重连（避免异步迭代器累积到崩引擎）",
-                SSE_MAX_LIFETIME.as_secs()
-            );
-        }
-    } else {
-        let _ = tokio::io::copy(&mut up_r, &mut client_w).await;
+    if pump_body(&mut up_r, &mut client_w, is_sse, SSE_MAX_LIFETIME).await {
+        log::info!(
+            "[stream-proxy] SSE 达到寿命上限（{}s）→ 主动断开让页面重连（避免异步迭代器累积到崩引擎）",
+            SSE_MAX_LIFETIME.as_secs()
+        );
     }
     let _ = client_w.shutdown().await;
     pump.abort();
