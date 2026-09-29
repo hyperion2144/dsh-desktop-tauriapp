@@ -4,7 +4,7 @@ import { applyAdvancedShell } from './advanced-shell.ts'
 import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
 import { installDesktopBrowserBridge } from './desktop-browser-bridge.ts'
-import { installMobileRenderBudget } from './mobile-render-budget.ts'
+import { installMobileRenderBudget, setRenderBudgetForDesktop } from './mobile-render-budget.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
 import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
@@ -113,7 +113,12 @@ export function apply(ctx: ClientContext): void {
   installNoRubberBand()
   // 移动端渲染预算（#147 路线 B）：窄屏 + 触摸时给会话滚动容器做视觉窗口化；
   // 只在本仓做，不动 dsh-mobile-nav 子模块；命中不了容器则整体 no-op。
-  installMobileRenderBudget()
+  const renderBudgetEnv = requestDesktopClientEnvironment()
+  // 壳下发开关优先；未下发（纯浏览器/查询失败）时保持缺省开。
+  void renderBudgetEnv.then((environment) => {
+    if (environment?.renderBudget === false) setRenderBudgetForDesktop(false)
+    installMobileRenderBudget()
+  })
   // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
   registerDownloadsTab(ctx)
   // blob:/data: 下载拦截转 IPC（纯浏览器不装）

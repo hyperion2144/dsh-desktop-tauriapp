@@ -102,6 +102,11 @@ pub struct DesktopSettings {
     /// 手机得到与 iPad 相同的桌面布局（不卡但 UI 拥挤）；缺省/false = 现行移动布局。
     /// 改动重启 dsh 生效（补丁文件在 spawn 前重写）。
     pub desktop_layout_on_phones: Option<bool>,
+    /// 桌面渲染预算（#147 路线 B 的视觉窗口化，`content-visibility`）：`false` = 关掉窗口化。
+    /// 缺省 **true**：它修的是实机“白屏 + 自动刷新”（页面 WebContent 常驻 1.2 GB → 被系统回收 →
+    /// 新进程启动时 JSC 在 async-iterator 上 SIGSEGV，证据见 `~/Library/Logs/DiagnosticReports/`）。
+    /// 与布局开关不同，这一个**不重启 dsh** 即生效（客户端每次启动读环境载荷）。
+    pub desktop_render_budget: Option<bool>,
     /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
     /// 其余 profile 首次 spawn 时按公式分配并持久化到这里，保证后续启动稳定。
     pub profile_ports: Option<std::collections::BTreeMap<String, u16>>,
@@ -446,6 +451,11 @@ pub fn configured_mux_heartbeat_ms() -> Option<u32> {
     normalize_mux_heartbeat_ms(load_desktop_settings().mux_heartbeat_ms)
 }
 
+/// 桌面是否启用视觉窗口化（#147 路线 B）：缺省 **true**（关掉才返回 false）。
+pub fn configured_desktop_render_budget() -> bool {
+    load_desktop_settings().desktop_render_budget.unwrap_or(true)
+}
+
 /// 手机端是否改用桌面布局（#147 路线 A）：缺省 false（保持移动布局，行为不变）。
 pub fn configured_desktop_layout_on_phones() -> bool {
     load_desktop_settings().desktop_layout_on_phones.unwrap_or(false)
@@ -500,6 +510,9 @@ mod tests {
       download_concurrency: Some(5),
       mux_heartbeat_ms: Some(30000),
       desktop_layout_on_phones: Some(true),
+      // 新增字段必须补进测试初始化（否则编译失败——E0063 就是这么被抓出来的）。
+      // 这里给 Some(false) 以**同时覆盖“显式关”的分支**（缺省 true 的断言在下面单独加）。
+      desktop_render_budget: Some(false),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
       profile_lane_ports: Some([("web".into(), 3091)].into_iter().collect()),
        dsh_mode: Some("builtin".into()),
