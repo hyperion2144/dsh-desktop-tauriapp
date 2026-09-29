@@ -298,57 +298,31 @@ export async function cachedAssets(context: Context, base: string): Promise<Loca
   return await bundledAssets(context);
 }
 
-/** 随包内置产物的入口产物名（rawfile/dsh-frontend-manifest.json，由 scripts/sync-builtin.sh 生成）。 */
+/**
+ * 随包内置产物的入口产物名（**直接读随包 index.html 认**——不用 manifest、不用清单，
+ * 这样将来运行时加减文件都不需要改代码）。
+ */
 export function bundledEntry(context: Context): string {
   try {
-    const raw = context.resourceManager.getRawFileContentSync('dsh-frontend-manifest.json');
-    const text = new util.TextDecoder().decodeWithStream(raw);
-    const m = /"entry"\s*:\s*"([^"]+)"/.exec(text);
-    return m ? m[1] : '';
+    const raw = context.resourceManager.getRawFileContentSync('dsh-frontend/index.html');
+    return entryNameOf(new util.TextDecoder().decodeWithStream(raw));
   } catch (err) {
-    return ''; // 没随包（或 manifest 缺）→ 空串，上层走下载路径
+    return ''; // 没随包 → 空串，上层走下载/远程两条路
   }
 }
 
 /**
- * 把随包内置产物**铺到沙箱**（LocalHost 用 fs 读文件，得先落到可读目录）。
+ * 按相对路径读**随包内置**产物（= HAP 里的 rawfile）。
  *
- * 按 manifest 里的 `files` 清单逐个读（`getRawFileContentSync` 单一 API）——**不用**
- * `getRawFileListSync` 递归枚举：那个用法实机报 `9001005 Invalid relative path`（它的返回语义与
- * 拼接方式对不上），而按清单读既无此问题，也与 Expo 侧的解包清单同一形状。
+ * 内置的就是**完整运行时**：该请求什么读什么，没有清单、不铺沙箱、不枚举目录——
+ * 运行时以后多出文件也无需改代码（用户指出的设计缺陷）。
  */
-function seedFromBundle(context: Context, entry: string): string {
-  const dir = distDirFor(context, entry);
-  for (const rel of bundledFiles(context)) {
-    try {
-      const bytes = context.resourceManager.getRawFileContentSync(`dsh-frontend/${rel}`);
-      writeFile(dir, rel, bytes.buffer as ArrayBuffer);
-    } catch (err) {
-      // 单个文件读不到（不该发生）：跳过，不把整条链打断。
-    }
-  }
-  return dir;
-}
-
-/** 随包产物在 rawfile 里的文件清单（由 scripts/sync-builtin.sh 写进 manifest 的 files）。 */
-function bundledFiles(context: Context): string[] {
+export function readBundledAsset(context: Context, rel: string): ArrayBuffer | null {
   try {
-    const raw = context.resourceManager.getRawFileContentSync('dsh-frontend-manifest.json');
-    const text = new util.TextDecoder().decodeWithStream(raw);
-    const at = text.indexOf('"files"');
-    if (at < 0) return [];
-    const open = text.indexOf('[', at);
-    const close = text.indexOf(']', open);
-    if (open < 0 || close < 0) return [];
-    const body = text.substring(open + 1, close);
-    const out: string[] = [];
-    for (const p of body.split(',')) {
-      const v = p.trim().replace(/"/g, '');
-      if (v !== '') out.push(v);
-    }
-    return out;
+    const bytes = context.resourceManager.getRawFileContentSync(`dsh-frontend/${rel}`);
+    return bytes.buffer as ArrayBuffer;
   } catch (err) {
-    return [];
+    return null; // 这份内置里没有这个文件（例如远端是另一个构建）→ 交给上层转发
   }
 }
 
@@ -361,16 +335,8 @@ function bundledFiles(context: Context): string[] {
 export async function bundledAssets(context: Context): Promise<LocalAssetBundle | null> {
   const entry = bundledEntry(context);
   if (entry === '') return null;
-  let dir = distDirFor(context, entry);
-  try {
-    dir = seedFromBundle(context, entry);
-  } catch (err) {
-    // 铺沙箱出错也不当致命：只要目录里已经有 index.html（上次铺过），照样能用随包产物。
-    return fs.accessSync(`${dir}/index.html`) ? { dir: dir, entry: entry, files: listFiles(dir) } : null;
-  }
-
-  if (!fs.accessSync(`${dir}/index.html`)) return null;
-  return { dir: dir, entry: entry, files: listFiles(dir) };
+  // 内置产物**不铺沙箱**：`dir` 留空，由 LocalHost 按请求路径直读 rawfile。
+  return { dir: '', entry: entry, files: [] };
 }
 
 /** npm 的按文件 CDN（取的是包里的同一份字节；ArkTS 侧 decompressFile 只支持 zip，没走 tgz）。 */

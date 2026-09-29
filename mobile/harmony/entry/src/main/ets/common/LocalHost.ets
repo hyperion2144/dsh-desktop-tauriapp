@@ -76,10 +76,16 @@ export interface LocalHostOptions {
   remoteBase: string;
   /** 壳持有的会话 cookie（`name=value`）；空则不注入。 */
   cookie: string;
-  /** 本地 dist 的沙箱目录（解包后的 `dist/`）。 */
+
+  /** 下载下来的那份产物的沙箱目录；**空串 = 直接用随包内置**（rawfile）。 */
   distDir: string;
-  /** dist 的文件相对路径清单（`assets/index-xxx.js` 等）。 */
-  distFiles: string[];
+  /**
+   * 按相对路径读**随包内置**产物（= HAP 里的 rawfile）。
+   *
+   * 为什么用端口而不是先枚举清单再铺到沙箱：内置的就是**完整运行时**，该请求什么读什么——
+   * 没有清单就不会因为「运行时文件变多了」而要改代码（用户指出的设计缺陷）。
+   */
+  readBundled?: (rel: string) => ArrayBuffer | null;
   /** 随包布局插件的 client.js 内容（Host 没装时唯一来源）；空 = 不随包。 */
   pluginClientJs: string;
   /** 随包插件 rev（写进启动图当缓存失效用）。 */
@@ -317,8 +323,16 @@ export class LocalHost {
       return { status: 404, headers: headersOf('text/plain; charset=utf-8'), body: '随包插件不存在' };
     }
     const rel = bare.replace(/^\/+/, '');
-    if (rel !== '' && this.opts.distFiles.indexOf(rel) >= 0) {
-      const bytes = readFileOrNull(`${this.opts.distDir}/${rel}`);
+    if (rel !== '') {
+      // 本地优先：先看下载到沙箱的那份，再退回**随包内置**（rawfile）——两者都是「本地资产」，
+      // 命中即出；都没有才转发远端（不是 404：转发才是桌面的行为）。
+      let bytes: ArrayBuffer | null = null;
+      if (this.opts.distDir !== '') {
+        bytes = readFileOrNull(`${this.opts.distDir}/${rel}`);
+      }
+      if (bytes === null && this.opts.readBundled !== undefined) {
+        bytes = this.opts.readBundled(rel);
+      }
       if (bytes !== null) {
         return {
           status: 200,
@@ -326,8 +340,9 @@ export class LocalHost {
           body: bytes,
         };
       }
-      return { status: 404, headers: headersOf('text/plain; charset=utf-8'), body: `本地资产缺失：${rel}` };
     }
+
+
     return await this.forward({ method: method, path: path, headers: headers });
   }
 

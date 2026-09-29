@@ -4,7 +4,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Theme } from '../common/Theme';
 import { PairLogic } from '../common/PairLogic';
 import { SessionGuard } from '../common/SessionGuard';
-import { cachedAssets, downloadFrontend, ensureLocalAssets, entryPathOf, exchangeSession, fetchRemoteHtml, loadCookie, readBundledPlugin } from '../common/LocalAssets';
+import { bundledEntry, cachedAssets, downloadFrontend, ensureLocalAssets, entryPathOf, exchangeSession, fetchRemoteHtml, loadCookie, readBundledAsset, readBundledPlugin } from '../common/LocalAssets';
 import { LocalHost, entryNameOf } from '../common/LocalHost';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -112,7 +112,7 @@ struct WebPage {
         }
       }
       const assets = await ensureLocalAssets(context, this.base, cookie);
-      await this.startHost(assets.dir, assets.files, assets.entry);
+      await this.startHost(assets.dir, assets.entry);
     } catch (err) {
       // #155：失败**不静默回退**——进三选一，由用户决定（下载/用本地/开远程）。
       const e2 = err as BusinessError;
@@ -124,14 +124,15 @@ struct WebPage {
   }
 
   /** 起壳内 loopback 服务并把页面切过去（三选一里的「下载」与「用本地」都汇到这里）。 */
-  private async startHost(dir: string, files: string[], entry: string): Promise<void> {
+  private async startHost(distDir: string, entry: string): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     const plugin = readBundledPlugin(context);
     const host = await LocalHost.start({
       remoteBase: this.base,
       cookie: await loadCookie(context, this.base),
-      distDir: dir,
-      distFiles: files,
+      distDir: distDir,
+      // 随包内置 = 完整运行时：按请求路径直读 rawfile（无清单、无枚举）。distDir 为空时全靠它。
+      readBundled: (rel: string) => readBundledAsset(context, rel),
       pluginClientJs: plugin,
       pluginRev: entry,
     });
@@ -164,7 +165,7 @@ struct WebPage {
         this.choiceBusy = false;
         return;
       }
-      await this.startHost(bundle.dir, bundle.files, bundle.entry);
+      await this.startHost(bundle.dir, bundle.entry);
     } catch (err) {
       const e = err as BusinessError;
       // BusinessError.message 常为空，真正定位要看 code（否则用户只看到“下载失败”四个字）。
@@ -184,7 +185,8 @@ struct WebPage {
       this.choiceReason = '本机没有任何可用产物（连随包的也没有，说明构建时没跑 sync-builtin.sh）';
       return;
     }
-    await this.startHost(cached.dir, cached.files, cached.entry);
+    // 「用当前本地运行时」= **随包内置那份**（distDir 空串 → 全程直读 rawfile）。
+    await this.startHost('', bundledEntry(context));
   }
 
   /**
