@@ -263,7 +263,12 @@ export class LocalHost {
   /** 一次连接：收字节 → 头收齐 → upgrade 透传 / 交路由处理 → 写回应答。 */
   private async serve(client: socket.TCPSocketConnection): Promise<void> {
     let buf = new ArrayBuffer(0);
+    // `upgraded` 一旦为真：这个连接已交给 WS 通路，**原 HTTP 处理器必须停手**——
+    // 否则它会拿 WS 帧当 HTTP 解析、甚至往 WS 流里写响应，网关看到脏数据就按协议错断开
+    // （实机 lane：`mux#23 0.0s 上游关闭帧 code=8816` → 不断重连）。
+    let upgraded = false;
     client.on('message', (value: socket.SocketMessageInfo) => {
+      if (upgraded) return;
       buf = concat(buf, value.message);
       const text = buf2str(buf);
       const headEnd = text.indexOf('\r\n\r\n');
@@ -280,9 +285,9 @@ export class LocalHost {
         }
       }
       const conn = headers.get('connection');
-      // WebSocket：原样透传给上游，但**必须补上壳持有的会话 cookie**（页面 origin 是 127.0.0.1，
-      // 浏览器不会带 lane 的 cookie —— 实机 lane 日志：`WS GET 127.0.0.1:41850 -> /api/remote.mux = 401 UNPAIRED`）。
+      // WebSocket：交给 WS 通路（tunnel 会补会话 cookie + 改写 Host/Origin）。
       if (conn !== undefined && conn.toLowerCase().indexOf('upgrade') >= 0) {
+        upgraded = true;
         void this.tunnel(client, buf, headers);
         return;
       }
@@ -429,11 +434,24 @@ export class LocalHost {
       rewritten = kept.join('\r\n') + text.substring(headEnd2);
     }
     await up.send({ data: str2buf(rewritten) });
+    // 双向搬运 + 两端关闭互传（少了这一步，一侧走了另一侧会半开，页面只能靠超时重连）。
     up.on('message', (v: socket.SocketMessageInfo) => {
       client.send({ data: v.message }).catch(() => {});
     });
+    up.on('close', () => {
+      client.close().catch(() => {});
+    });
     client.on('message', (v: socket.SocketMessageInfo) => {
       up.send({ data: v.message }).catch(() => {});
+    });
+    client.on('close', () => {
+      up.close().catch(() => {});
+    });
+    up.on('error', () => {
+      client.close().catch(() => {});
+    });
+    client.on('error', () => {
+      up.close().catch(() => {});
     });
     void headers; // 头部已解析进 rewritten（保留参数以表明调用方视角：升级请求也由壳改写）
   }
