@@ -4,6 +4,8 @@
 
 ## 未发布
 
+- **修复：页面侧 `plugin:dialog|confirm` 被 ACL 拒（实机白屏刷新的诱因之一）**：capability 一直没放 dialog 权限，而页面（`dshapp://localhost`）确实会调它——实机日志里表现为 `Unhandled rejection: Command plugin:dialog|confirm not allowed by ACL`，调用方只拿到一个未处理拒绝。补 `dialog:allow-confirm` / `dialog:allow-message`（`cargo check` 通过：Tauri 已在构建期校验权限名）。
+  同批取证（白屏刷新）：壳日志里**没有**任何“已导航”记录，但白屏时刻出现**新的 `GET dshapp://localhost/`**——即**页面自己重载了文档**（不是壳导航、也不是 dsh 进程重启：重启会挂断在场会话）；每次重载后紧跟 `IPC custom protocol failed … Load failed` 与新的 `WS /api/remote.mux -> 101`，说明重载后 IPC 需重新握手。间歇不固定，间歇前可见的页面侧异常包括 deck 插件的 `client loadSnapshot timeout 30s`（走 `/api/dsws`）与上面那条 ACL 拒绝。
 - **内置运行时升级到 0.2.0-rc.2**：`desktop/scripts/prepare-builtin-runtime.mjs` 的 pin（`BUILTIN_DSH_VERSION`）从 `0.1.7-rc.1` 升到 `0.2.0-rc.2`（npm `next` 渠道；`latest` 仍为 0.1.7-rc.2），重打 `resources/dsh` + `desktop-runtime.json`；前端产物随之落在 `@deepseek-ai/dsh-web-frontend@0.2.0-rc.2`（入口 `index-5SrrfWpU.js`）。
   **实测（隔离实例，debug 壳）**：运行时 `0.2.0-rc.2`；页面自报 `dom / loader=object / kids=1 / carrier=object / ipc_ok`、`sse3 rs=1`；本地资产命中**新产物** `LOCAL /assets/index-5SrrfWpU.js`、`index-BPHePDI_.css`；`WS /api/remote.mux -> 101`；`文档生成失败` 与 `未命中本地资产` 各 **0**。
   **遗留（已知待查，不阻塞本升级）**：①页面控制台有裸 `Script error.`——跨源脚本的报错详情被浏览器隐去（文档 origin 是 `dshapp://`、资产在 loopback 代理上，属 #154 架构的既有形态，非本次引入；页面功能指标全正常）；②`dsh-web-mobile`（布局插件 v3.0.3）与 0.2.0-rc.2 的**实机**兼容性未验。
