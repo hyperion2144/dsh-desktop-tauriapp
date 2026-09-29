@@ -39,6 +39,12 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
   });
   const { controller, state } = useRemoteSession({ ports, fallbackUrl: target.url });
   const pageUrl = state?.url ?? placeholderUrl;
+  // 会话**种进 WebView 的 cookie jar**（对应桌面 `web_token`、鸿蒙 `plantCookie`）：
+  // 页面靠自己发的请求就会带会话，不必每次都经壳代理；没有会话时保持 undefined。
+  const sessionCookie = ports?.cookie ?? null;
+  const cookieBootstrap = sessionCookie
+    ? `try{document.cookie=${JSON.stringify(`${sessionCookie}; path=/`)};}catch(e){}`
+    : undefined;
   const overlay = (
     <SessionOverlay
       state={portsError ? { ...emptyState, phase: 'error', reason: portsError } : state}
@@ -74,6 +80,7 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
           setSupportMultipleWindows={false}
           allowsBackForwardNavigationGestures
           originWhitelist={['*']}
+          injectedJavaScriptBeforeContentLoaded={cookieBootstrap}
           onMessage={guard.onMessage}
           onRenderProcessGone={guard.onRenderProcessGone}
           onNavigationStateChange={(nav) => {
@@ -113,6 +120,7 @@ export function WebScreen({ target, onBack, androidBackRefs }: {
         setSupportMultipleWindows={false}
         allowsBackForwardNavigationGestures
         originWhitelist={['*']}
+        injectedJavaScriptBeforeContentLoaded={cookieBootstrap}
         onMessage={guard.onMessage}
         onContentProcessDidTerminate={guard.onRenderProcessGone}
       />
