@@ -24,6 +24,10 @@ use super::{head, upstream};
 /// 报文头上限，与 relay 同口径。
 const MAX_HEAD: usize = 64 * 1024;
 
+/// SSE 单条连接寿命上限（见响应泵处的证据注释）：到期主动断开让页面重连、重建异步迭代器。
+/// 取 30 分钟 —— 崩溃实测发生在页面存活约 1 小时后，留一半余量。
+const SSE_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
 /// 启动代理，返回其 origin（`http://127.0.0.1:<port>/`，带尾斜杠）。
 pub(crate) fn start(app: AppHandle) -> Option<String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
@@ -189,7 +193,30 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
     let _ = client_w.flush().await;
 
     // 响应体（含 SSE/WS 长流）：读到 EOF 或对端关闭为止；反方向由 pump 维持。
-    let _ = tokio::io::copy(&mut up_r, &mut client_w).await;
+    //
+    // **SSE 加寿命上限**：实机崩溃报告（~/Library/Logs/DiagnosticReports/com.apple.WebKit.WebContent-*.ips）
+    // 显示页面在 `JSC::asyncIteratorNextWithDriver` / `asyncGeneratorUnwrapYieldResumption` 上
+    // SIGSEGV（EXC_BAD_ACCESS，KERN_INVALID_ADDRESS at 0x48），崩溃前 WebContent 常驻 1.2 GB，
+    // 且三次崩溃间隔约 55–65 分钟；同时已经实测排除传输层（同一资产直连 vs 过代理 sha256 一致、
+    // SSE 4 秒字节数一致、带体 POST 200）。⇒ 长命异步迭代器越活越久越危险，到期主动断开，
+    // 让页面重连并**重建**迭代器（EventSource 语义本来就重连；mux 那条是 WS，不受此影响）。
+    let is_sse = response
+        .get("content-type")
+        .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false);
+    if is_sse {
+        if tokio::time::timeout(SSE_MAX_LIFETIME, tokio::io::copy(&mut up_r, &mut client_w))
+            .await
+            .is_err()
+        {
+            log::info!(
+                "[stream-proxy] SSE 达到寿命上限（{}s）→ 主动断开让页面重连（避免异步迭代器累积到崩引擎）",
+                SSE_MAX_LIFETIME.as_secs()
+            );
+        }
+    } else {
+        let _ = tokio::io::copy(&mut up_r, &mut client_w).await;
+    }
     let _ = client_w.shutdown().await;
     pump.abort();
 }
