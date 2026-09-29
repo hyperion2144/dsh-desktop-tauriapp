@@ -71,7 +71,7 @@ describe('openRemoteSession', () => {
     const out = await openRemoteSession(p);
     expect(out.kind).toBe('gate-required');
     if (out.kind !== 'gate-required') return;
-    expect(out.gate.kind).toBe('missing');
+    expect(out.gate?.kind).toBe('missing');
     expect(hosts).toHaveLength(0); // 没起服务
   });
 
@@ -80,7 +80,7 @@ describe('openRemoteSession', () => {
     const out = await openRemoteSession(p);
     expect(out.kind).toBe('gate-required');
     if (out.kind !== 'gate-required') return;
-    expect(out.gate.kind).toBe('unavailable');
+    expect(out.gate?.kind).toBe('unavailable');
   });
 });
 
@@ -107,14 +107,14 @@ describe('continueRemoteSession', () => {
     expect(out.kind).toBe('gate-required');
   });
 
-  it('download 失败 → 回退直接开远端页面，并带明确原因', async () => {
+  it('download 失败 → 也是三选一（不静默回退），原因写清楚', async () => {
     const { ports: p } = ports({ download: async () => ({ ok: false, reason: 'HTTP 404' }) });
     const out = await continueRemoteSession(p, 'download');
-    expect(out.kind).toBe('fallback');
-    if (out.kind === 'fallback') {
-      expect(out.url).toBe('http://192.168.3.90:3092/');
-      expect(out.reason).toContain('HTTP 404');
-    }
+    expect(out.kind).toBe('gate-required');
+    if (out.kind !== 'gate-required') return;
+    expect(out.gate).toBeNull();
+    expect(out.reason).toContain('HTTP 404');
+
   });
 
   it('remoteWebview：直接回退（最保守那条路永远可用）', async () => {
@@ -132,10 +132,12 @@ describe('continueRemoteSession', () => {
     expect(hosts).toHaveLength(1);
   });
 
-  it('useLocal 但本地一份都没有 → 回退（不假装能本地出）', async () => {
+  it('useLocal 但本地一份都没有 → 仍是三选一（不假装能本地出，也不静默开远程）', async () => {
     const { ports: p } = ports({ localDists: [] });
     const out = await continueRemoteSession(p, 'useLocal');
-    expect(out.kind).toBe('fallback');
-    if (out.kind === 'fallback') expect(out.reason).toContain('没有任何可用产物');
+    expect(out.kind).toBe('gate-required');
+    if (out.kind !== 'gate-required') return;
+    expect(out.reason).toContain('没有任何可用产物');
+
   });
 });

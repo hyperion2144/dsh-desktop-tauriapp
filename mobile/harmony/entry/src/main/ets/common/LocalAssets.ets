@@ -258,3 +258,18 @@ export function readBundledPlugin(context: Context, name: string = 'dsh-web-mobi
     return '';
   }
 }
+
+/**
+ * 读沙箱里已缓存的那份产物（三选一的「用当前本地运行时」）。
+ *
+ * 与 `ensureLocalAssets` 的区别：**不比对远端版本**、也不联网——用户明确选择「就用本地这份」时，
+ * 版本可能不符（面板上已写明），但至少能进去；返回 null 表示本地一份都没有。
+ */
+export async function cachedAssets(context: Context, base: string): Promise<LocalAssetBundle | null> {
+  const store = await preferences.getPreferences(context, PREF_STORE);
+  const cachedEntry = (await store.get(entryKey(base), '')) as string;
+  if (cachedEntry === '') return null;
+  const dir = distDirFor(context, cachedEntry);
+  if (!fs.accessSync(`${dir}/index.html`)) return null;
+  return { dir: dir, entry: cachedEntry, files: listFiles(dir) };
+}

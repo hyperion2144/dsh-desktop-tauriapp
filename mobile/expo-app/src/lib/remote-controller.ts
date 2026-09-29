@@ -100,7 +100,8 @@ export function createSessionController(deps: {
       });
     }
     if (out.kind === 'gate-required') {
-      return emit({ phase: 'gate', url: null, gate: out.gate, reason: out.gate.reason });
+      // gate 可能为 null（下载失败/本地一份都没有）：三选一照样弹，原因看 reason。
+      return emit({ phase: 'gate', url: null, gate: out.gate, reason: out.reason });
     }
     return emit({ phase: 'fallback', url: out.url, gate: null, reason: out.reason });
   };

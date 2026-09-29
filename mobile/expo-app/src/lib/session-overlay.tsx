@@ -8,6 +8,12 @@ import { GATE_CHOICES } from '../../../shell-web/local-assets.mjs';
 import { palette } from '../theme';
 import type { SessionState } from './remote-controller';
 
+/** 三选一的标题：闸门有结论就按结论说，没结论（下载失败等）就说清是哪种失败。 */
+function gateTitle(state: SessionState): string {
+  if (state.gate === null) return '本地页面没跑起来';
+  return state.gate.kind === 'unavailable' ? '读不到远程版本' : '本地没有对应的前端产物';
+}
+
 export interface SessionOverlayProps {
   state: SessionState | null;
   /** 三选一的选择回传（remote-controller 的 choose）。 */
@@ -32,7 +38,7 @@ export function SessionOverlay({ state, onChoose, onRetry }: SessionOverlayProps
 
         {state.phase === 'gate' ? (
           <>
-            <Text style={styles.title}>{state.gate?.kind === 'unavailable' ? '读不到远程版本' : '本地没有对应的前端产物'}</Text>
+            <Text style={styles.title}>{gateTitle(state)}</Text>
             <Text style={styles.desc}>{state.reason ?? ''}</Text>
             {GATE_CHOICES.map((c) => (
               <Pressable

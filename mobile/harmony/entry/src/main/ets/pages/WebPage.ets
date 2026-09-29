@@ -4,7 +4,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { Theme } from '../common/Theme';
 import { PairLogic } from '../common/PairLogic';
 import { SessionGuard } from '../common/SessionGuard';
-import { ensureLocalAssets, entryPathOf, exchangeSession, loadCookie, readBundledPlugin } from '../common/LocalAssets';
+import { cachedAssets, ensureLocalAssets, entryPathOf, exchangeSession, loadCookie, readBundledPlugin } from '../common/LocalAssets';
 import { LocalHost } from '../common/LocalHost';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -41,16 +41,22 @@ struct WebPage {
   private controller: webview.WebviewController = new webview.WebviewController();
   /** 壳内 loopback 服务（#155）；未就绪时为 undefined，页面走远端地址。 */
   private localHost: LocalHost | undefined = undefined;
+  /** 三选一状态：为 true 时页面被面板盖住（#155：不静默回退到远程页）。 */
+  @State needChoice: boolean = false;
+  /** 进三选一的原因（面板上直接显示，实机不用连 hilog 也能看出哪里错）。 */
+  @State choiceReason: string = '';
 
   aboutToAppear(): void {
     const params = (router.getParams() ?? {}) as Record<string, string>;
     this.base = params['base'] ?? '';
-    this.url = params['url'] ?? PairLogic.buildEnterUrl(this.base);
-    // #155：本地资产 + 远程数据（与桌面远程模式同形）。关键点：配对链接是**一次性凭据**，
-    // 绝不能交给 ArkWeb 直接加载去消费——那样壳自己换不到 cookie，也无法在转发时注入。
-    // 于是先把它当占位地址，同时由壳去换会话 → 装配本地产物 → 起壳内 loopback 服务，
-    // 就绪后把 url 换成壳内 origin（失败则保留原地址，走「直接开远程页面」那条保守路径）。
-    void this.startLocalAssets(params['url'] ?? '');
+    const rawUrl = params['url'] ?? PairLogic.buildEnterUrl(this.base);
+    // #155 实机修复：配对链接是**一次性凭据**，而 token 只能被用掉一次。
+    // 若先让 ArkWeb 去加载这个带 token 的地址，token 就被页面用掉了，壳随后的 /pair 换会话
+    // 必然失败——症状正是手机扫码后「配对失败」。所以：是配对入口就**先停在 about:blank**，
+    // 等壳自己换完会话、起好壳内服务再切过去。
+    const entryPath = entryPathOf(rawUrl);
+    this.url = entryPath !== '' ? 'about:blank' : rawUrl;
+    void this.startLocalAssets(rawUrl, entryPath);
     // 注册控制器：EntryAbility / NetworkWatcher 侧的会话检查靠它找到页面。
     SessionGuard.get().attach(this.controller);
     this.tuneSocketIdleTimeout();
@@ -76,11 +82,13 @@ struct WebPage {
    *
    * 任一步失败都回到「直接用远端地址」（最保守、永远可用）；日志进 hilog，真机上可查。
    */
-  private async startLocalAssets(entryUrl: string): Promise<void> {
-    if (!this.base) return;
+  private async startLocalAssets(rawUrl: string, entryPath: string): Promise<void> {
+    if (!this.base) {
+      this.url = rawUrl;
+      return;
+    }
     try {
       const context = getContext(this) as common.UIAbilityContext;
-      const entryPath = entryPathOf(entryUrl);
       let cookie = await loadCookie(context, this.base);
       if (entryPath) {
         const ex = await exchangeSession(context, this.base, entryPath);
@@ -93,25 +101,72 @@ struct WebPage {
         }
       }
       const assets = await ensureLocalAssets(context, this.base, cookie);
-      const plugin = readBundledPlugin(context);
-      const host = await LocalHost.start({
-        remoteBase: this.base,
-        cookie: cookie,
-        distDir: assets.dir,
-        distFiles: assets.files,
-        pluginClientJs: plugin,
-        pluginRev: assets.entry,
-      });
-      this.localHost = host;
-      this.url = host.url;
-      hilog.info(0x0000, 'dsh-mobile', '本地资产就绪：%{public}s（产物 %{public}s）', host.url, assets.entry);
+      await this.startHost(assets.dir, assets.files, assets.entry);
     } catch (err) {
+      // #155：失败**不静默回退**——进三选一，由用户决定（下载/用本地/开远程）。
+      const e2 = err as BusinessError;
+      this.choiceReason = e2.message;
+      this.needChoice = true;
       const e = err as BusinessError;
       hilog.error(0x0000, 'dsh-mobile', '本地资产失败，回退远程地址：%{public}s', e.message);
     }
   }
 
+  /** 起壳内 loopback 服务并把页面切过去（三选一里的「下载」与「用本地」都汇到这里）。 */
+  private async startHost(dir: string, files: string[], entry: string): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const plugin = readBundledPlugin(context);
+    const host = await LocalHost.start({
+      remoteBase: this.base,
+      cookie: await loadCookie(context, this.base),
+      distDir: dir,
+      distFiles: files,
+      pluginClientJs: plugin,
+      pluginRev: entry,
+    });
+    if (this.localHost !== undefined) {
+      await this.localHost.stop();
+    }
+    this.localHost = host;
+    this.url = host.url;
+    hilog.info(0x0000, 'dsh-mobile', '本地资产就绪：%{public}s（产物 %{public}s）', host.url, entry);
+  }
+
+  /** 三选一：「下载对应运行时」——重新取远端产物（入口变更时自动重下）+ 重比，成功后进页面。 */
+  private async chooseDownload(): Promise<void> {
+    this.needChoice = false;
+    this.choiceReason = '';
+    // 一次性 token 已消费：传空字符串表示不换会话，只重新取产物并重比。
+    await this.startLocalAssets(`http://${this.base}/`, '');
+  }
+
+  /** 三选一：「用当前本地运行时」——不比对版本，直接用沙箱里已缓存的那份产物起服务。 */
+  private async chooseLocal(): Promise<void> {
+    const context = getContext(this) as common.UIAbilityContext;
+    const cached = await cachedAssets(context, this.base);
+    if (cached === null) {
+      this.choiceReason = '本地没有已缓存的产物，请选「下载对应运行时」或「直接加载远程页面」';
+      return;
+    }
+    this.needChoice = false;
+    await this.startHost(cached.dir, cached.files, cached.entry);
+  }
+
   build() {
+    // #155：三选一用 Stack 盖在页面上——**绝不静默回退**到直接加载远端页面。
+    Stack() {
+      this.webView()
+      if (this.needChoice) {
+        this.gatePanel()
+      }
+    }
+    .width('100%')
+    .height('100%')
+  }
+
+  /** 页面本体（原 build 的内容原样搬进来，只包一层名字）。 */
+  @Builder
+  webView() {
     Column() {
       // 无顶部栏：系统左缘右滑返回手势直接回上一页（router 栈默认支持）。
       // renderMode 属于 WebOptions（不是链式属性）：ASYNC_RENDER 走自渲染管线，
@@ -154,6 +209,34 @@ struct WebPage {
     .width('100%')
     .height('100%')
     .backgroundColor(Theme.Bg)
+  }
+
+  /**
+   * 三选一面板（与桌面远程模式、Expo 侧同构）：本地页面没跑起来时由用户决定，
+   * 而不是壳自己默默开远程页。三个选项与桌面的 GATE_CHOICES 语义一一对应。
+   */
+  @Builder
+  gatePanel() {
+    Column({ space: 10 }) {
+      Text('本地页面没跑起来').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.Text)
+      Text(this.choiceReason).fontSize(12).fontColor(Theme.Text2).maxLines(3)
+      Button('下载对应运行时（装完自动重比）')
+        .width('100%')
+        .onClick(() => { void this.chooseDownload(); })
+      Button('用当前本地运行时（版本可能不符）')
+        .width('100%')
+        .onClick(() => { void this.chooseLocal(); })
+      Button('直接加载远程页面')
+        .width('100%')
+        .onClick(() => {
+          this.needChoice = false;
+          this.url = `http://${this.base}/`;
+        })
+    }
+    .width('86%')
+    .padding(18)
+    .backgroundColor(Theme.Panel)
+    .borderRadius(14)
   }
 
   /**

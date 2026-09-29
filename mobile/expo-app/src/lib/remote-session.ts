@@ -45,8 +45,11 @@ export type GateChoice = 'download' | 'useLocal' | 'remoteWebview';
 export type RemoteSessionOutcome =
   /** 已就绪：WebView 该加载 `url`（壳内 origin）。 */
   | { kind: 'settled'; url: string; cookie: string | null; version: string; entry: string }
-  /** 需要用户三选一（本地没有匹配产物）。 */
-  | { kind: 'gate-required'; gate: Extract<GateResult, { kind: 'missing' } | { kind: 'unavailable' }> }
+  /**
+   * 需要用户三选一（#155：**任何没能在本地产物上跑起来的情形都进这里**，不许静默回退）。
+   * `gate` 为 null 时看 `reason`（下载失败、本地一份都没有、闸门没结论……）。
+   */
+  | { kind: 'gate-required'; gate: Extract<GateResult, { kind: 'missing' } | { kind: 'unavailable' }> | null; reason: string }
   /** 回退：直接以 URL 打开远端页面（最保守、永远可用）。 */
   | { kind: 'fallback'; url: string; reason: string };
 
@@ -89,10 +92,10 @@ export async function openRemoteSession(ports: RemoteSessionPorts): Promise<Remo
     return settle(ports, gate.dist, html.ok ? html.html : '', cookie, log);
   }
   if (gate.kind === 'missing' || gate.kind === 'unavailable') {
-    return { kind: 'gate-required', gate };
+    return { kind: 'gate-required', gate, reason: gate.reason };
   }
-  // buildGate 只有上面三种形态；兜底成回退，避免"静默什么都不做"。
-  return { kind: 'fallback', url: `http://${ports.base}/`, reason: '版本闸门未给出可用结论' };
+  // 闸门没给出可用结论：同样**交回用户三选一**（而不是静默开远程页）。
+  return { kind: 'gate-required', gate: null, reason: '版本闸门未给出可用结论' };
 }
 
 /**
@@ -116,7 +119,8 @@ export async function continueRemoteSession(
     const dl = await ports.download();
     if (!dl.ok) {
       log(`[assets] 下载失败：${dl.reason}`);
-      return { kind: 'fallback', url: `http://${ports.base}/`, reason: `下载运行时失败：${dl.reason}` };
+      // 下载失败也不静默回退：把三选一重新交给用户（可以再试一次下载，或改用本地/远程）。
+      return { kind: 'gate-required', gate: null, reason: `下载运行时失败：${dl.reason}` };
     }
     const html = await ports.fetchRemoteHtml();
     const remoteEntry = html.ok ? entryName(html.html) : null;
@@ -126,7 +130,7 @@ export async function continueRemoteSession(
     });
     if (gate.kind === 'matched') return settle(ports, gate.dist, html.ok ? html.html : '', ports.cookie ?? null, log);
     // 下载完还是不匹配：把新的现状交回 UI 再问一次（桌面同款行为）。
-    return { kind: 'gate-required', gate };
+    return { kind: 'gate-required', gate, reason: gate.reason };
   }
 
   // useLocal：用调用方给的那份（没有就退到已缓存的任意一份；再没有就回退）。
@@ -134,7 +138,7 @@ export async function continueRemoteSession(
   if (!dist) {
     const first = ports.localDists[0];
     if (!first) {
-      return { kind: 'fallback', url: `http://${ports.base}/`, reason: '本地没有任何可用产物' };
+      return { kind: 'gate-required', gate: null, reason: '本地没有任何可用产物' };
     }
     const html = await ports.fetchRemoteHtml();
     return settle(ports, first, html.ok ? html.html : '', ports.cookie ?? null, log);
