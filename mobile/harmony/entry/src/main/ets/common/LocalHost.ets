@@ -280,18 +280,25 @@ export class LocalHost {
         }
       }
       const conn = headers.get('connection');
+      // WebSocket：原样透传给上游，但**必须补上壳持有的会话 cookie**（页面 origin 是 127.0.0.1，
+      // 浏览器不会带 lane 的 cookie —— 实机 lane 日志：`WS GET 127.0.0.1:41850 -> /api/remote.mux = 401 UNPAIRED`）。
       if (conn !== undefined && conn.toLowerCase().indexOf('upgrade') >= 0) {
-        void this.tunnel(client, buf); // WebSocket：原样透传，别当普通响应吃掉
+        void this.tunnel(client, buf, headers);
         return;
       }
-      void this.route(method, path, headers).then((res: UpstreamResponse) => {
+      // 请求体：POST 必须把 body 一并转给上游（不管这一层，Host 收到空体直接回 400——
+      // 实机日志：`POST /api/dsws -> 400`，于是会话列表永远查不出来）。
+      const len = Number.parseInt(headers.get('content-length') ?? '0', 10);
+      const bodyStart = headEnd + 4;
+      const body = len > 0 && buf.byteLength >= bodyStart + len ? buf.slice(bodyStart, bodyStart + len) : null;
+      void this.route(method, path, headers, body).then((res: UpstreamResponse) => {
         client.send({ data: serializeResponse(res.status, res.headers, res.body) }).catch(() => {});
       });
     });
   }
 
   /** 路由：本地资产命中才本地出；`__local-plugins/` 未知 id 终态 404；其余转发远端。 */
-  private async route(method: string, path: string, headers: HeaderMap): Promise<UpstreamResponse> {
+  private async route(method: string, path: string, headers: HeaderMap, body: ArrayBuffer | null): Promise<UpstreamResponse> {
     const bare = path.split('?')[0];
     if (bare === '/' || bare === '/index.html') {
       const reqHeaders: HeaderMap = new Map<string, string>();
@@ -343,7 +350,8 @@ export class LocalHost {
     }
 
 
-    return await this.forward({ method: method, path: path, headers: headers });
+    // 方法和请求体一并转给上游（POST 的 body 不能丢：丢了 Host 回 400，会话列表就查不出来）。
+    return await this.forward({ method: method, path: path, headers: headers, body: body ?? undefined });
   }
 
   /** 转发到远端（注入壳持有的 cookie；剥掉响应里的会话头）。 */
@@ -384,21 +392,50 @@ export class LocalHost {
     }
   }
 
-  /** WebSocket upgrade：把握手字节原样发到远端，之后双向搬运。 */
-  private async tunnel(client: socket.TCPSocketConnection, handshake: ArrayBuffer): Promise<void> {
+  /**
+   * WebSocket upgrade：把握手字节转给远端，并把**壳持有的会话 cookie 补进握手**。
+   *
+   * 为什么要改握手：页面 origin 是 `127.0.0.1:41850`（壳内服务），浏览器只会带那个 origin 的 cookie；
+   * lane 要求升级请求自身带设备会话，否则直接 401（实机 lane 日志：`WS … /api/remote.mux = 401 UNPAIRED`）。
+   * 桌面同样由代理侧注入 cookie（stream_proxy 的 WS 分支），这里对齐。
+   */
+  private async tunnel(
+    client: socket.TCPSocketConnection,
+    handshake: ArrayBuffer,
+    headers: HeaderMap,
+  ): Promise<void> {
     const parts = this.opts.remoteBase.split(':');
     const host = parts.length > 0 ? parts[0] : '127.0.0.1';
     const portRaw = parts.length > 1 ? parts[1] : '80';
     const port = Number.parseInt(portRaw, 10);
     const up = socket.constructTCPSocketInstance();
     await up.connect({ address: { address: host, port: port, family: 1 } });
-    await up.send({ data: handshake });
+    // 补 cookie + 把 Host 改成远端 authority（lane 的信任栅栏按 Host 判）。
+    const cookie = this.opts.cookie;
+    const text = buf2str(handshake);
+    const headEnd2 = text.indexOf('\r\n\r\n');
+    let rewritten = text;
+    if (headEnd2 >= 0) {
+      const headLines = text.substring(0, headEnd2).split('\r\n');
+      const kept: string[] = [];
+      for (let i = 0; i < headLines.length; i++) {
+        const lower = headLines[i].toLowerCase();
+        if (i > 0 && (lower.startsWith('cookie:') || lower.startsWith('host:') || lower.startsWith('origin:'))) continue;
+        kept.push(headLines[i]);
+      }
+      if (cookie !== '') kept.push(`Cookie: ${cookie}`);
+      kept.push(`Host: ${this.opts.remoteBase}`);
+      kept.push(`Origin: http://${this.opts.remoteBase}`);
+      rewritten = kept.join('\r\n') + text.substring(headEnd2);
+    }
+    await up.send({ data: str2buf(rewritten) });
     up.on('message', (v: socket.SocketMessageInfo) => {
       client.send({ data: v.message }).catch(() => {});
     });
     client.on('message', (v: socket.SocketMessageInfo) => {
       up.send({ data: v.message }).catch(() => {});
     });
+    void headers; // 头部已解析进 rewritten（保留参数以表明调用方视角：升级请求也由壳改写）
   }
 
   async stop(): Promise<void> {
