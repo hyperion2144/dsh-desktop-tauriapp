@@ -47,9 +47,16 @@ struct WebPage {
   @State choiceReason: string = '';
   /** 三选一进行中：按钮置灰 + 面板显示进度（不能“闪一下没反应”）。 */
   @State choiceBusy: boolean = false;
+  /** 下载进度（面板上显示“下载中 N/M：文件”，不能只有“正在准备…”）。 */
+  @State choiceProgress: string = '';
+  /** 扫码进来的原始入口地址（带 token）；只有**没被壳消费过**时才能回放给 ArkWeb。 */
+  private rawEntryUrl: string = '';
+  /** 壳是否已经拿这个 token 去换过会话（一次性凭据，换过就不能再给页面用）。 */
+  private exchangeAttempted: boolean = false;
 
   aboutToAppear(): void {
     const params = (router.getParams() ?? {}) as Record<string, string>;
+    this.rawEntryUrl = params['url'] ?? '';
     this.base = params['base'] ?? '';
     const rawUrl = params['url'] ?? PairLogic.buildEnterUrl(this.base);
     // #155 实机修复：配对链接是**一次性凭据**，而 token 只能被用掉一次。
@@ -92,7 +99,9 @@ struct WebPage {
     try {
       const context = getContext(this) as common.UIAbilityContext;
       let cookie = await loadCookie(context, this.base);
-      if (entryPath) {
+      if (entryPath !== '') {
+        // 一次性凭据：记下壳消费过它，这样「直接加载远程页面」时不会再回放一个已失效的 token。
+        this.exchangeAttempted = true;
         const ex = await exchangeSession(context, this.base, entryPath);
         if (ex.ok) {
           cookie = ex.cookie;
@@ -145,7 +154,9 @@ struct WebPage {
     this.choiceReason = '正在从 npm 下载对应运行时…';
     try {
       const cookie = await loadCookie(context, this.base);
-      const bundle = await downloadFrontend(context, this.base, cookie);
+      const bundle = await downloadFrontend(context, this.base, cookie, (done: number, total: number, label: string) => {
+        this.choiceProgress = `下载中 ${done}/${total}：${label}`;
+      });
       const html = await fetchRemoteHtml(this.base, cookie);
       const remoteEntry = entryNameOf(html);
       if (remoteEntry !== bundle.entry) {
@@ -156,7 +167,9 @@ struct WebPage {
       await this.startHost(bundle.dir, bundle.files, bundle.entry);
     } catch (err) {
       const e = err as BusinessError;
-      this.choiceReason = `下载失败：${e.message}`;
+      // BusinessError.message 常为空，真正定位要看 code（否则用户只看到“下载失败”四个字）。
+      this.choiceReason = `下载失败[code=${e.code ?? '?'}] ${e.message ?? ''}`;
+      hilog.error(DOMAIN, TAG, '下载运行时失败：%{public}s', this.choiceReason);
     }
     this.choiceBusy = false;
   }
@@ -181,24 +194,34 @@ struct WebPage {
    * `web_token`：原生种入 webview）——不种就直接开 `http://<base>/`，服务端不认这个会话，
    * 页面就是一片空白（用户实测到的「选远程页面直接白屏」）。没有会话时也不装死，把原因说清楚。
    */
+  /**
+   * 三选一：「直接加载远程页面」——**只导航，不拦**。
+   *
+   * 为什么不需要壳里先有会话：远端那个地址（`host:3092`）是 lane 反代，扫码链接本身就是配对入口
+   * `/pair?token=…`；让 ArkWeb 直接加载它，反代的 302 `set-cookie` 会把设备会话种进**页面自己的**
+   * cookie jar，后续请求自然带上。（先前我拿“壳里没有会话”当门禁，把一条本来能走通的路堵死了。）
+   *
+   * 唯一要小心的是一次性 token：壳若已拿它换过会话（`exchangeAttempted`），就不能再回放，
+   * 这时退到不带凭据的根地址（页面会自己提示需要配对，用户重扫一张即可）。
+   */
   private async chooseRemote(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
-    const cookie = await loadCookie(context, this.base);
     const root = `http://${this.base}/`;
-    if (cookie === '') {
-      this.choiceReason = '配对未完成（壳里没有会话）：请重新扫一张新的配对码，或选「用当前本地运行时」';
-      return;
+    const target = this.exchangeAttempted || this.rawEntryUrl === '' ? root : this.rawEntryUrl;
+    // 壳里若恰好有会话，顺手种进去（少一跳）；种不上也不拦。
+    const cookie = await loadCookie(context, this.base);
+    if (cookie !== '') {
+      try {
+        webview.WebCookieManager.configCookieSync(root, cookie);
+        hilog.info(DOMAIN, TAG, '远程页面：壳持有的会话已顺手中入 ArkWeb');
+      } catch (err) {
+        const e = err as BusinessError;
+        hilog.warn(DOMAIN, TAG, '顺手种 cookie 失败（不影响导航）：%{public}s', e.message);
+      }
     }
-    try {
-      // API 名按 SDK：`configCookieSync`（`putCookie` 在这个版本的 WebCookieManager 上不存在，编译器直接挡下）。
-      webview.WebCookieManager.configCookieSync(root, cookie);
-      hilog.info(DOMAIN, TAG, '远程页面：会话 cookie 已种入 ArkWeb');
-    } catch (err) {
-      const e = err as BusinessError;
-      hilog.warn(DOMAIN, TAG, '种 cookie 失败：%{public}s', e.message);
-    }
+    hilog.info(DOMAIN, TAG, '直接加载远程页面：%{public}s', target);
     this.needChoice = false;
-    this.url = root;
+    this.url = target;
   }
 
   build() {
@@ -268,7 +291,7 @@ struct WebPage {
   gatePanel() {
     Column({ space: 10 }) {
       Text('本地页面没跑起来').fontSize(16).fontWeight(FontWeight.Bold).fontColor(Theme.Text)
-      Text(this.choiceBusy ? '正在准备…' : this.choiceReason).fontSize(12).fontColor(Theme.Text2).maxLines(3)
+      Text(this.choiceBusy ? (this.choiceProgress !== '' ? this.choiceProgress : '正在准备…') : this.choiceReason).fontSize(12).fontColor(Theme.Text2).maxLines(3)
       Button('下载对应运行时（装完自动重比）')
         .width('100%')
         .onClick(() => { void this.chooseDownload(); })

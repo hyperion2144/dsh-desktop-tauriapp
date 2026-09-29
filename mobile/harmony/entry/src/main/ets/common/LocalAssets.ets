@@ -186,10 +186,20 @@ export async function ensureLocalAssets(
   context: Context,
   base: string,
   cookie: string,
+  onLog?: (line: string) => void,
 ): Promise<LocalAssetBundle> {
   const html = await fetchRemoteHtml(base, cookie);
   const entry = entryNameOf(html);
   if (entry === '') throw new Error('远端首页认不出入口产物（老版 dsh？）');
+
+  // ① **先跟随包内置那份比**（与桌面「内置运行时命中就不下载」同一逻辑）：命中 = 远端与内置同
+  //    一构建 → 直接用内置产物，零下载、**不弹三选一**。这一步曾经缺失，导致内置与远端都是
+  //    0.2.0-rc.2 却仍然走下载并失败（用户实测到的现象）。
+  const bundle0 = await bundledAssets(context);
+  if (bundle0 !== null && bundle0.entry === entry) {
+    onLog?.(`[assets] 命中随包内置产物：${entry}`);
+    return bundle0;
+  }
 
   const store = await preferences.getPreferences(context, PREF_STORE);
   const cachedEntry = (await store.get(entryKey(base), '')) as string;
@@ -198,15 +208,10 @@ export async function ensureLocalAssets(
     return { dir: dir, entry: entry, files: listFiles(dir) };
   }
 
-  // 冷启动/版本不符：把被引用的静态资产 + 首页本体拉到沙箱。
-  writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
-  const assets = assetPathsOf(html);
-  for (const rel of assets) {
-    const bytes = await downloadToBuffer(`http://${base}/${rel}`, cookie);
-    if (bytes !== null) writeFile(dir, rel, bytes);
-  }
-  await saveString(context, entryKey(base), entry);
-  return { dir: dir, entry: entry, files: listFiles(dir) };
+  // ③ 都没有：**不自己从 Host 拓文件**（那不是桌面的形态）——把「远端是哪个构建、内置是哪个」
+  //    说清楚，交回三选一（下载对应运行时 / 用当前本地 / 直接开远程页）。
+  const builtin = bundledEntry(context);
+  throw new Error(`远端构建 ${entry} 与内置 ${builtin === '' ? '（无）' : builtin} 不同：请选「下载对应运行时」或「直接加载远程页面」`);
 }
 
 async function downloadToBuffer(url: string, cookie: string): Promise<ArrayBuffer | null> {
@@ -379,7 +384,12 @@ export function pickTag(tagsJson: string): string {
  * 与桌面远程模式同形：不是从自己的 Host 拓文件，而是去**运行时包的分发处**取对应版本的那份产物；
  * 取完由调用方**重比**（入口产物名）——命中就用，仍不匹配就再问一次（桌面 ask_after_download）。
  */
-export async function downloadFrontend(context: Context, base: string, cookie: string): Promise<LocalAssetBundle> {
+export async function downloadFrontend(
+  context: Context,
+  base: string,
+  cookie: string,
+  onProgress?: (done: number, total: number, label: string) => void,
+): Promise<LocalAssetBundle> {
   const metaUrl = `${NPM_REGISTRY}/${FRONTEND_PKG}`;
   const version = pickTag(await httpText(metaUrl, ''));
   if (version === '') throw new Error('npm 元数据里没有可用版本');
@@ -390,9 +400,16 @@ export async function downloadFrontend(context: Context, base: string, cookie: s
 
   const dir = distDirFor(context, entry);
   writeFile(dir, 'index.html', new util.TextEncoder().encodeInto(html).buffer as ArrayBuffer);
+
   const refs = assetPathsOf(html);
+  const total = refs.length + 2; // index.html + 各资产 + 收尾写 manifest
+  let done = 1;
+  onProgress?.(done, total, 'index.html');
   for (const rel of refs) {
     writeFile(dir, rel, await httpBytes(`${cdn}/${rel}`));
+    done++;
+    onProgress?.(done, total, rel);
+
   }
   // 记下这次用的版本与入口：版本给冷启动读缓存用，入口给「与远端重比」用。
   await saveString(context, entryKey(base), entry);
