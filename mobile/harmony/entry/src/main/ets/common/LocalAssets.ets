@@ -310,31 +310,45 @@ export function bundledEntry(context: Context): string {
   }
 }
 
-/** 把随包内置产物**铺到沙箱**（LocalHost 用 fs 读文件，得先落到可读目录）。 */
+/**
+ * 把随包内置产物**铺到沙箱**（LocalHost 用 fs 读文件，得先落到可读目录）。
+ *
+ * 按 manifest 里的 `files` 清单逐个读（`getRawFileContentSync` 单一 API）——**不用**
+ * `getRawFileListSync` 递归枚举：那个用法实机报 `9001005 Invalid relative path`（它的返回语义与
+ * 拼接方式对不上），而按清单读既无此问题，也与 Expo 侧的解包清单同一形状。
+ */
 function seedFromBundle(context: Context, entry: string): string {
   const dir = distDirFor(context, entry);
-  writeBundledDir(context, 'dsh-frontend', dir, '');
+  for (const rel of bundledFiles(context)) {
+    try {
+      const bytes = context.resourceManager.getRawFileContentSync(`dsh-frontend/${rel}`);
+      writeFile(dir, rel, bytes.buffer as ArrayBuffer);
+    } catch (err) {
+      // 单个文件读不到（不该发生）：跳过，不把整条链打断。
+    }
+  }
   return dir;
 }
 
-function writeBundledDir(context: Context, rawDir: string, diskDir: string, rel: string): void {
-  // 资源枚举失败（实机报 `Invalid relative path. Please confirm: …`）不能把整条链打断：
-  // 这一层只是「把随包产物铺到沙箱」，铺不了就让它交回空，由上层走三选一里的其它两条路。
-  let names: string[] = [];
+/** 随包产物在 rawfile 里的文件清单（由 scripts/sync-builtin.sh 写进 manifest 的 files）。 */
+function bundledFiles(context: Context): string[] {
   try {
-    names = context.resourceManager.getRawFileListSync(rel === '' ? rawDir : `${rawDir}/${rel}`);
-  } catch (err) {
-    return;
-  }
-  for (const name of names) {
-    const childRel = rel === '' ? name : `${rel}/${name}`;
-    const children = context.resourceManager.getRawFileListSync(`${rawDir}/${childRel}`);
-    if (children.length > 0) {
-      writeBundledDir(context, rawDir, diskDir, childRel);
-      continue;
+    const raw = context.resourceManager.getRawFileContentSync('dsh-frontend-manifest.json');
+    const text = new util.TextDecoder().decodeWithStream(raw);
+    const at = text.indexOf('"files"');
+    if (at < 0) return [];
+    const open = text.indexOf('[', at);
+    const close = text.indexOf(']', open);
+    if (open < 0 || close < 0) return [];
+    const body = text.substring(open + 1, close);
+    const out: string[] = [];
+    for (const p of body.split(',')) {
+      const v = p.trim().replace(/"/g, '');
+      if (v !== '') out.push(v);
     }
-    const bytes = context.resourceManager.getRawFileContentSync(`${rawDir}/${childRel}`);
-    writeFile(diskDir, childRel, bytes.buffer as ArrayBuffer);
+    return out;
+  } catch (err) {
+    return [];
   }
 }
 

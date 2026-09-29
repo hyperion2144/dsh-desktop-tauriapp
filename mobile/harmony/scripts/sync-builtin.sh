@@ -28,7 +28,11 @@ cp -R "$DIST/." "$OUT/dsh-frontend/"
 # 入口产物名（构建标识）：与 LocalHost.entryNameOf 同一规则 —— module script 的 basename。
 ENTRY=$(grep -oE 'assets/index-[A-Za-z0-9_-]+\.js' "$OUT/dsh-frontend/index.html" | head -1 | sed 's|assets/||')
 [ -n "$ENTRY" ] || { echo "ERROR: 从 index.html 认不出入口产物（形状变了？）" >&2; exit 1; }
-printf '{"entry":"%s"}\n' "$ENTRY" > "$OUT/dsh-frontend-manifest.json"
+# 清单里**逐个列出所有文件**：运行时靠它铺沙箱（不再用 getRawFileListSync 递归枚举——
+# 实机报 9001005 Invalid relative path，那个 API 的返回语义与拼接方式对不上）。
+FILES=$(cd "$OUT/dsh-frontend" && find . -type f | sed 's|^\./||' | sort)
+LIST=$(printf '"%s",' $FILES | sed 's/,$//')
+printf '{"entry":"%s","files":[%s]}\n' "$ENTRY" "$LIST" > "$OUT/dsh-frontend-manifest.json"
 
 if [ -f "$PLUGIN" ]; then
   cp "$PLUGIN" "$OUT/plugins/dsh-web-mobile/client.js"
