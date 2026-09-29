@@ -191,9 +191,7 @@ struct WebPage {
    * 三选一：「直接加载远程页面」。
    *
    * 关键一步：把壳持有的会话 cookie **种进 ArkWeb 的 cookie jar**（桌面做这件事的是
-   * `web_token`：原生种入 webview）——不种就直接开 `http://<base>/`，服务端不认这个会话，
-   * 页面就是一片空白（用户实测到的「选远程页面直接白屏」）。没有会话时也不装死，把原因说清楚。
-   */
+
   /**
    * 三选一：「直接加载远程页面」——**只导航，不拦**。
    *
@@ -207,21 +205,36 @@ struct WebPage {
   private async chooseRemote(): Promise<void> {
     const context = getContext(this) as common.UIAbilityContext;
     const root = `http://${this.base}/`;
-    const target = this.exchangeAttempted || this.rawEntryUrl === '' ? root : this.rawEntryUrl;
-    // 壳里若恰好有会话，顺手种进去（少一跳）；种不上也不拦。
-    const cookie = await loadCookie(context, this.base);
+    let cookie = await loadCookie(context, this.base);
+    // ① 与桌面同一步：壳自己拿 token 去换会话（/pair?token=… → set-cookie）。
+    if (cookie === '' && !this.exchangeAttempted && this.rawEntryUrl !== '') {
+      const entryPath = entryPathOf(this.rawEntryUrl);
+      if (entryPath !== '') {
+        this.exchangeAttempted = true;
+        const ex = await exchangeSession(context, this.base, entryPath);
+        if (ex.ok) {
+          cookie = ex.cookie;
+        } else {
+          this.choiceReason = `换会话失败：${ex.reason}`;
+        }
+      }
+    }
+    // ② 与桌面同一步：**原生把 cookie 种进 webview 的 cookie jar**（桌面是 web_token）。
     if (cookie !== '') {
       try {
         webview.WebCookieManager.configCookieSync(root, cookie);
-        hilog.info(DOMAIN, TAG, '远程页面：壳持有的会话已顺手中入 ArkWeb');
+        hilog.info(DOMAIN, TAG, '会话 cookie 已原生种入 ArkWeb（与桌面 web_token 同一步）');
       } catch (err) {
         const e = err as BusinessError;
-        hilog.warn(DOMAIN, TAG, '顺手种 cookie 失败（不影响导航）：%{public}s', e.message);
+        hilog.warn(DOMAIN, TAG, '种 cookie 失败：%{public}s', e.message);
       }
     }
-    hilog.info(DOMAIN, TAG, '直接加载远程页面：%{public}s', target);
+    // ③ 与桌面同一步：导航**不带 token 的根路径**。带 token 的 URL 会让 webview 走 token 校验
+    //    分支，而它跨站过不去（桌面 #136 的终局：cookie 已种好仍然 401）——所以绝不把 token URL
+    //    交给 ArkWeb（这也是之前「直接加载远程页面」白屏的真因）。
+    hilog.info(DOMAIN, TAG, '导航到（不带 token）：%{public}s', root);
     this.needChoice = false;
-    this.url = target;
+    this.url = root;
   }
 
   build() {
