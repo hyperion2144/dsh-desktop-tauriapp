@@ -77,7 +77,11 @@ pub(crate) fn local_now_hm() -> (u32, u32) {
     }
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::SystemInformation::{GetLocalTime, SYSTEMTIME};
+        // windows-sys 0.61：SYSTEMTIME 在 Foundation（不是 SystemInformation）；
+        // GetLocalTime 在 SystemInformation。feature 各自需要 Time / SystemInformation。
+        use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+        use windows_sys::Win32::Foundation::SYSTEMTIME;
+
         let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
         unsafe { GetLocalTime(&mut st) };
         (st.wHour as u32, st.wMinute as u32)

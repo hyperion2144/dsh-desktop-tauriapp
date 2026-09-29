@@ -77,7 +77,7 @@ fn dsh_lib_from_root(root: &std::path::Path) -> Option<PathBuf> {
 /// 内置 dsh 包 lib 目录：resources/dsh 是 npm 安装根，dsh 本体在
 /// node_modules/@deepseek-ai/dsh（package.json 在包根，#90 实测教训）；
 /// launcher 依赖向上查找正好落在同根。
-fn builtin_dsh_lib(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub(crate) fn builtin_dsh_lib(app: &tauri::AppHandle) -> Option<PathBuf> {
     // #123：resource_dir 在 Windows 可能带 \\?\ verbatim 前缀，传给 Node 的
     // pathToFileURL 会生成无效 URL（import 静默失败）——统一走归一入口。
     let root = crate::runtime::paths::resources_dsh_root(app)?;

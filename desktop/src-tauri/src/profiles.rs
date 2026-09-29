@@ -573,6 +573,43 @@ pub(crate) fn ensure_pnpm_shim_dir(app: &tauri::AppHandle) -> Option<std::path::
     Some(dir)
 }
 
+/// 当前生效运行时的 `dsh` CLI shim 目录（#160）。
+///
+/// dsh 插件子进程与内嵌终端里裸调 `dsh` 必须命中**当前运行时**那一份（插件加载失败的
+/// 提示就是 `run 'dsh plugin --profile web install'`——PATH 里没有这个命令就只能干瞪眼）。
+/// 与 pnpm shim 同一套路：每没 spawn 重写一次，切运行时版本后自然指向新版本；
+/// node 用当前运行时生效的解释器（内置 sidecar 或已下载运行时随包的那一份）。
+///
+/// 外部 CLI 模式**不写** shim：那一份 `dsh` 本来就在用户 PATH 上，shim 只会遮住它。
+pub(crate) fn ensure_dsh_shim_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    let (node, cli) = match crate::runtime::builtin::resolve_source(app).ok()? {
+        crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, .. } => {
+            // dsh 包的 bin 字段：`dsh` → `lib/bin.js`（已核对 package.json）
+            (node, dsh_lib.join("bin.js"))
+        }
+        crate::runtime::builtin::DshSource::External { .. } => return None,
+    };
+    if !cli.is_file() {
+        return None;
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .ok()?
+        .join("runtime")
+        .join("bin-dsh");
+    std::fs::create_dir_all(&dir).ok()?;
+    let node_s = node.to_string_lossy().to_string();
+    let cli_s = cli.to_string_lossy().to_string();
+    write_shim(
+        &dir,
+        "dsh",
+        &format!("exec \"{node_s}\" \"{cli_s}\" \"$@\""),
+        &format!("\"{node_s}\" \"{cli_s}\" %*"),
+    )?;
+    Some(dir)
+}
+
 /// pnpm 的包内入口（resources/dsh/node_modules/pnpm/bin/pnpm.cjs）。
 fn pnpm_cjs_path(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     // #123：归一后的资源根（去 Windows verbatim 前缀，后续作为 spawn 参数/写进 shim）

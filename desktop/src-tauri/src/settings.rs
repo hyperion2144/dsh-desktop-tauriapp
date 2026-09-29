@@ -75,6 +75,9 @@ pub struct DesktopSettings {
     pub remote_addr: Option<String>,
     /// 已保存的远程地址列表（host[:port]）。
     pub remote_list: Vec<String>,
+    /// 上次成功配对/换会话存下的远程设备会话（`authority=cookie`）：手机访问的配对链接
+    /// 是一次性凭据，壳存下会话后重启就不再消费链接（#154 桌面远程）。
+    pub remote_session: Option<String>,
     /// 手机访问 lane（改写反代）端口（默认 3091；DSH_MOBILE_LANE_PORT 环境变量优先级更高）。
     pub lane_port: Option<u16>,
     /// cloudflared 可执行文件路径（设置后手机访问自动启动公网隧道；空=不启用）。
@@ -486,6 +489,7 @@ mod tests {
       active_profile: Some("web".into()),
       remote_addr: None,
       remote_list: vec!["x.cn:3091".into()],
+      remote_session: None,
       lane_port: Some(3092),
       cloudflared_bin: Some("/opt/bin/cloudflared".into()),
       proxy_mode: Some("off".into()),

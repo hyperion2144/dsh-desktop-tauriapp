@@ -352,10 +352,16 @@ test('浏览器配对：GET /pair?token= 自动接受 + 302 + cookie', async () 
     assert.equal(res.headers.get('location'), '/');
     const sc = String(res.headers.get('set-cookie') ?? '');
     assert.ok(sc.includes('dsh_mobile_session='));
-    // 设备已入列表（UA 推断名称）
+    // 设备已入列表：名字/平台/浏览器/入口全部由请求侧推断（#145 延伸）。
     const devs = svc.store.snapshotDevices();
     assert.equal(devs.length, 1);
-    assert.equal(devs[0].name, 'iPhone');
+    assert.equal(devs[0].name, '苹果手机', 'UA 含 iPhone → ios，没有机型段就用平台名');
+    assert.equal(devs[0].platform, 'ios');
+    assert.equal(devs[0].platformLabel, '苹果手机');
+    assert.equal(devs[0].ua, 'iPhone Safari', '原始 UA 也要存下来（排查用）');
+    assert.equal(devs[0].ip, '127.0.0.1', '本机测试走回环');
+    assert.equal(devs[0].entry, 'local');
+    assert.equal(devs[0].entryLabel, '本机');
     // 令牌一次性：再用 302 → 无效
     const again = await fetch('http://127.0.0.1:' + lp + '/pair?token=' + token, {
       headers: { ...HQ, Accept: 'text/html' },

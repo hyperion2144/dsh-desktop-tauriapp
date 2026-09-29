@@ -245,6 +245,9 @@ pub fn apply_titlebar_for(window: &tauri::WebviewWindow, advanced: bool) {
         } else {
             tauri::TitleBarStyle::Visible
         };
+
+        // 证据日志：远程模式下窗口挂着原生标题栏时，第一眼看这里下发的是哪种形态。
+        log::info!("[titlebar] advanced={advanced}（macOS Overlay/Visible）");
         if let Err(e) = window.set_title_bar_style(style) {
             log::warn!("切换窗口标题栏样式失败：{e}");
         }
@@ -270,14 +273,10 @@ pub fn navigate_to_loading(app: &AppHandle) {
         .clone()
         .filter(|u| u != "about:blank")
         .unwrap_or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                "http://tauri.localhost/index.html".to_string()
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                "tauri://localhost/index.html".to_string()
-            }
+
+            // 壳自己 origin 下的内嵌启动页（PR 评论方案 1d）：不再依赖 Tauri asset 协议——
+            // 开发运行（tauri dev）下 `tauri://localhost/index.html` 会 `asset not found` 白屏。
+            crate::network::shell_origin::scheme::PAGE_ORIGIN_STARTUP.to_string()
         });
     log::info!("[restart] navigate_to_loading: url = {url}");
     if let Ok(u) = url.parse::<tauri::Url>() {
@@ -306,12 +305,16 @@ pub fn restart_dsh_in_mode(app: &AppHandle, target_mode: u8, profile_override: O
         let state = app.state::<DshState>();
         set_status(app, STATUS_STARTING, "启动中（远程）");
         state.ready_once.store(false, Ordering::SeqCst);
+        // 远程也要把**目标模式**落库：下面是早退分支，不存的话 `state.mode` 会沿用旧值，
+        // `get_desktop_client_environment` 就可能下发 compatibility —— 页面不装桌面 chrome，
+        // 窗口挂着系统原生标题栏（实机报告）。
+        state.mode.store(target_mode, Ordering::SeqCst);
         state.main_worker.stop();
         navigate_to_loading(app);
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            crate::network::remote::navigate_remote(&handle, &addr, target_mode == MODE_ADVANCED);
+            crate::network::remote::navigate_remote(&handle, &addr);
             refresh_tray_mode(&handle);
         });
         return;

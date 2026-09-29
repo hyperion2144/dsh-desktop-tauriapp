@@ -370,6 +370,11 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         if let Some(shim) = crate::profiles::ensure_pnpm_shim_dir(app) {
             parts.push(shim);
         }
+        // #160：再把 `dsh` CLI shim 也前置（pnpm shim 之后）：插件子进程/内嵌终端裸调 `dsh`
+        // 命中当前运行时那一份；外部 CLI 模式下该函数返回 None（用户 PATH 里本来就有）。
+        if let Some(shim) = crate::profiles::ensure_dsh_shim_dir(app) {
+            parts.push(shim);
+        }
         let login = recover_login_path();
         match &login {
             Some(p) => parts.extend(std::env::split_paths(p)),

@@ -1,0 +1,64 @@
+name: CI
+
+# #154：本机无法编译 Windows（tauri-winres 需 llvm-rc、externalBin 缺 dsh-node-*.exe，
+# 见 AGENTS.md 血泪坑 6），而此前**唯一**会编译 Windows 的地方是发版 tag——
+# v0.10.0 正是这样在 CI 才爆的。本工作流把双平台 cargo check 前移到 PR：
+# Windows 的编译错误在开 PR 时就暴露，而不是等到发版。
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            test: true
+          - platform: windows-latest
+            test: false
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # build.rs 会读取 mobile/dsh-mobile-nav 子模块内的 package.json /
+          # cordis.patch.yml / lib（打包场景），不递归 checkout 会失败。
+          submodules: recursive
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # 本仓**没有** pnpm-lock.yaml（未被跟踪，本地也不存在）——不能用 --frozen-lockfile，
+      # 否则直接 ERR_PNPM_NO_LOCKFILE 挂死（本 workflow 首次跑就是这么挂的）。
+      - name: Install frontend dependencies
+        run: pnpm install --no-frozen-lockfile
+      # 与 release.yml 同一套准备：cargo 构建期需要 externalBin 的 dsh-node sidecar，
+      # 而 desktop/src-tauri/binaries/ 是 gitignore 的产物目录。
+      - name: Prepare builtin runtime
+        run: node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
+      - name: Rust setup
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      # --locked：Cargo.lock 与 Cargo.toml 不一致时直接失败（升版本只改三处版本号
+      # 而漏了 lock 的情况，v0.10.1 就发生过一次）。
+      - name: cargo check
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+      - name: cargo test
+        if: matrix.test
+        working-directory: desktop/src-tauri
+        run: cargo test --locked

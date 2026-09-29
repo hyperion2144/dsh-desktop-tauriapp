@@ -68,6 +68,37 @@ export function desktopEnvPatchScript(platform) {
 const INJECT_MARK = 'data-dsh-mobile-polyfill';
 
 /**
+ * #154：**回环端口映射**。远程页面里出现的 `http(s)://127.0.0.1:<port>/…` 与对应的 ws 地址，
+ * 由注入的改写层换成 lane 上的映射路径 `/_loopback/<port>/<rest>`，再由本代理转发到那个回环端口
+ * ——于是「其它插件访问本机其它端口」在远程/手机侧也能工作。前缀刻意**不在** lane 保留命名空间内：
+ * `LANE_PREFIX/*` 属于 lane 自有控制面（先于代发路由被接走），映射是**代理**能力，住在命名空间外。
+ *
+ * 安全边界：只允许 127.0.0.1、只接受 1..65535、**且请求必须已过配对门禁**（映射请求走同一条
+ * auth 门禁，未配对设备拿不到）；lane 不做任意主机的开放代理。
+ */
+export const LOOPBACK_PATH_PREFIX = '/_loopback/';
+
+/** 解析映射路径 → `{ host, port, path }`；非映射路径返回 null。 */
+export function loopbackTarget(rawUrl) {
+  const url = String(rawUrl ?? '');
+  if (!url.startsWith(LOOPBACK_PATH_PREFIX)) return null;
+  const rest = url.slice(LOOPBACK_PATH_PREFIX.length);
+  const slash = rest.indexOf('/');
+  const portStr = slash === -1 ? rest : rest.slice(0, slash);
+  if (!/^\d{1,5}$/.test(portStr)) return null;
+  const port = Number(portStr);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host: '127.0.0.1', port, path: slash === -1 ? '/' : rest.slice(slash) };
+}
+
+/**
+ * 注入到经 lane 的页面的 URL 改写层：把指向本机回环端口的绝对地址改成映射路径。
+ * 覆盖 WebSocket / fetch / XHR / EventSource / window.open（与壳侧 page_shim.js 同构，
+ * 但基准是 lane 自己的 origin）。相对路径不碰（同源直过）。
+ */
+export const LOOPBACK_URL_PATCH = '<script data-dsh-mobile-loopback="1">!function(){var P="/_loopback/";function H(u){try{var s=String(u);var m=/^(https?):\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(?::(\\d+))?([\\s\\S]*)$/i.exec(s);if(m)return location.origin+P+(m[3]||"80")+(m[4]||"/");return s;}catch(e){return u;}}function W(u){try{var s=String(u);var m=/^wss?:\\/\\/(127\\.0\\.0\\.1|localhost|\\[::1\\])(?::(\\d+))?([\\s\\S]*)$/i.exec(s);if(m)return (location.protocol==="https:"?"wss://":"ws://")+location.host+P+(m[2]||"80")+(m[3]||"/");return s;}catch(e){return u;}}var NW=globalThis.WebSocket;function PW(u,p){var f=W(u);return p===undefined?new NW(f):new NW(f,p);}PW.prototype=NW.prototype;["CONNECTING","OPEN","CLOSING","CLOSED"].forEach(function(k){try{PW[k]=NW[k];}catch(e){}});globalThis.WebSocket=PW;var NF=globalThis.fetch;globalThis.fetch=function(i,x){try{if(typeof i==="string")i=H(i);else if(i&&i.url)i=H(i.url);}catch(e){}return NF.call(globalThis,i,x);};var NX=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{u=H(u);}catch(e){}return arguments.length>2?NX.call(this,m,u,arguments[2]):NX.call(this,m,u);};var NE=globalThis.EventSource;globalThis.EventSource=function(u,c){try{u=H(u);}catch(e){}return new NE(u,c);};var NO=globalThis.open;globalThis.open=function(u,n,f){try{if(u!=null)u=H(u);}catch(e){}return NO.call(globalThis,u,n,f);};}();<\/script>';
+
+/**
  * 把浏览器可见的权威改写成 loopback 权威（Host 和 Origin 都改）。
  * dsh 0.1.6+ 的 API 守卫（核心 isTrustedApiRequest 与 task-board/beauticode 等
  * 插件守卫）要求「浏览器同源信号」：sec-fetch-site: same-origin 头，或
@@ -297,6 +328,10 @@ export function createRewriteProxy(opts) {
     upstreamPort = 3080,
     inject = [],
     auth = null,
+    // lane 自有路由分发器（配对入口 / 设备 / 隧道…）：**先于**配对门禁调用。
+    // lane 就是一个 dsh 带 token 地址，配对入口不能被门禁截胡（实机：裸 TCP 请求
+    // 拿到的是门禁的 {"error":"unpaired"}）。
+    laneRoutes = null,
     onInjectSkip = null,
     // dsh web 会话凭证持有者（dsh 0.1.2-rc.1+ 鉴权）：提供 applyTo/refresh/hasCredential；
     // null = 无凭证模式（老版 dsh 无鉴权，行为同旧版）。
@@ -312,6 +347,11 @@ export function createRewriteProxy(opts) {
   const upstream = upstreamHost + ':' + upstreamPort;
 
   const server = http.createServer((req, res) => {
+    // lane 自有路由**先于**配对门禁：命中就交给 lane（命名空间与冻结别名都算），
+    // 否则才走门禁 → 透传。判定结果进访问日志，谁被谁接走一眼可判。
+    if (typeof laneRoutes === 'function' && laneRoutes(req, res) === true) {
+      return;
+    }
     // 配对门禁（dsh-mobile-access 自用）
     if (auth) {
       const r = auth(req);
@@ -330,20 +370,25 @@ export function createRewriteProxy(opts) {
      * null = 流式管道（不可重放，原始 req.pipe 路径）。
      */
     const forward = (bodyBuf, allowRetry) => {
+      // #154：远程页面对**本机其它回环端口**的引用走映射路径 `/__dsh-mobile/loopback/<port>/<rest>`。
+      // 只有已配对设备能走到这里（同一门禁），目标固定 127.0.0.1——lane 不做任意主机的开放代理。
+      const lb = loopbackTarget(req.url);
+      const upHost = lb ? lb.host : upstreamHost;
+      const upPort = lb ? lb.port : upstreamPort;
       const buildHeaders = () => {
-        const h = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+        const h = loopbackAuthority({ ...req.headers }, upHost, upPort);
         upstreamAuth?.applyTo(h);
         stripHopByHop(h); // 连接语义由本代理与上游之间重新协商
         return h;
       };
-      const targetPath = normalizeRemotePath(req.url);
+      const targetPath = lb ? lb.path : normalizeRemotePath(req.url);
       const stripped = targetPath !== req.url ? ` (from ${req.url})` : '';
       accessLog(['HTTP', req.method, req.headers.host ?? '-', '->', targetPath + stripped]);
 
       const handleUpstreamResponse = (proxyRes) => {
         const contentType = String(proxyRes.headers['content-type'] ?? '');
         const htmlDoc = contentType.includes('text/html');
-        const shouldInject = htmlDoc && !isCompressed(proxyRes.headers) && inject.length > 0;
+        const shouldInject = !lb && htmlDoc && !isCompressed(proxyRes.headers) && inject.length > 0;
         accessLog(['  <-', proxyRes.statusCode, contentType.split(';')[0] || '-', (shouldInject ? 'INJECT' : 'PASSTHROUGH')]);
 
         if (shouldInject) {
@@ -411,7 +456,7 @@ export function createRewriteProxy(opts) {
 
       const send = (isRetry) => {
         const proxyReq = http.request(
-          { host: upstreamHost, port: upstreamPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: upstreamAgent },
+          { host: upHost, port: upPort, method: req.method, path: targetPath, headers: buildHeaders(), agent: upstreamAgent },
           (proxyRes) => {
             // dsh 401：凭证失效 → 单次重换（重新自取 token + 换新 cookie）并原样重放；仍 401 透传
             if (!isRetry && allowRetry && upstreamAuth && proxyRes.statusCode === 401) {
@@ -476,13 +521,15 @@ export function createRewriteProxy(opts) {
         return;
       }
     }
-    const headers = loopbackAuthority({ ...req.headers }, upstreamHost, upstreamPort);
+    // #154：ws 同样支持回环端口映射（映射请求已过上面的配对门禁）。
+    const lbWs = loopbackTarget(req.url);
+    const headers = loopbackAuthority({ ...req.headers }, lbWs ? lbWs.host : upstreamHost, lbWs ? lbWs.port : upstreamPort);
     // WS upgrade 保留 connection/upgrade（握手必需），只清掉无关的逐跳头
     delete headers['keep-alive'];
     delete headers['proxy-connection'];
     // dsh 会话凭证：upgrade 请求同样附带（401 不重放——客户端重连即拿新凭证）
     upstreamAuth?.applyTo(headers);
-    const wsPath = normalizeRemotePath(req.url);
+    const wsPath = lbWs ? lbWs.path : normalizeRemotePath(req.url);
     accessLog(['WS', req.method, req.headers.host ?? '-', '->', wsPath]);
     // 诊断（#35）：壳内 WS 异常仅在 App WebView 出现、浏览器环境无——记录 upgrade 请求的
     // 凭证/来源头特征与上游应答码，定位 ArkWeb 握手与浏览器差异。
@@ -490,7 +537,7 @@ export function createRewriteProxy(opts) {
       accessLog(['  ..', 'diag', `cookie=${req.headers.cookie ? 'yes' : 'none'}`, `origin=${req.headers.origin ?? 'none'}`, `sfs=${req.headers['sec-fetch-site'] ?? 'none'}`, `ua=${req.headers['user-agent'] ? String(req.headers['user-agent']).slice(0, 20) : 'none'}`]);
     }
     const proxyReq = http.request({
-      host: upstreamHost, port: upstreamPort, method: req.method, path: normalizeRemotePath(req.url), headers, agent: false,
+      host: lbWs ? lbWs.host : upstreamHost, port: lbWs ? lbWs.port : upstreamPort, method: req.method, path: wsPath, headers, agent: false,
     });
     proxyReq.on('socket', noDelay); // 握手与后续帧都不受 Nagle 影响
     noDelay(socket); // 客户端→lane 方向同样关 Nagle

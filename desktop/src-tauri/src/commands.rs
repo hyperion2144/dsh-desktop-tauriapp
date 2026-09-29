@@ -98,7 +98,7 @@ pub(crate) fn get_desktop_client_environment(
     let label = window.label().to_string();
     // #122 排查：ACL 按窗口 label 授权（capability 的 windows 匹配），被拒不报具体原因；
     // 把实际 label 写进壳日志，便于定位“not allowed by ACL”。
-    log::info!("[env] get_desktop_client_environment label={label}");
+
     let profile = match state.profile_of_window(&label) {
         Some(bound) => bound,
         None => match label.strip_prefix("profile-") {
@@ -112,6 +112,11 @@ pub(crate) fn get_desktop_client_environment(
         },
     };
     let advanced = state.mode.load(Ordering::SeqCst) == MODE_ADVANCED;
+    // 证据日志：远程/本地都要能一眼看出下发的是哪种渲染环境（实机排查「原生标题栏」时全靠它）。
+    log::info!(
+        "[env] label={label} profile={profile} mode={}",
+        if advanced { "advanced" } else { "compatibility" }
+    );
     serde_json::json!({
         "mode": if advanced { "advanced" } else { "compatibility" },
         "platform": desktop_platform_tag(),
@@ -945,11 +950,13 @@ pub(crate) async fn remove_runtime(app: tauri::AppHandle, version: String) -> Re
 #[tauri::command]
 pub(crate) fn get_notifications_state() -> Result<serde_json::Value, String> {
     let cfg = load_desktop_settings().notifications;
-    let permission = if cfg!(target_os = "macos") {
-        crate::network::notify_un::permission_state().to_string()
-    } else {
-        "granted".to_string()
-    };
+    // macOS 的权限判定在 notify_un（仅 macOS 编译）；其它平台固定 granted。
+    // 注意不能用 `if cfg!(...)`——那是运行时宏，两个分支都会编译，Windows 上会去引
+    // 不存在的 notify_un 模块（Windows CI 实测 E0433）。
+    #[cfg(target_os = "macos")]
+    let permission = crate::network::notify_un::permission_state().to_string();
+    #[cfg(not(target_os = "macos"))]
+    let permission = "granted".to_string();
     let scenarios: Vec<serde_json::Value> = crate::network::notify_policy::SCENARIOS
         .iter()
         .map(|m| {

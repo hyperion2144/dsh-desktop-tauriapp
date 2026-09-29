@@ -3,10 +3,11 @@
 import http from 'node:http';
 import os from 'node:os';
 import { spawn } from 'node:child_process';
-import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH } from './proxy.mjs';
+import { createRewriteProxy, POLYFILL, OWNS_HOST_PATCH, THEME_SYNC_PATCH, LOOPBACK_URL_PATCH } from './proxy.mjs';
+import { clientIp, entryKind } from './client-info.mjs';
 import { LANE_PREFIX, laneRoutePath } from './lane-routes.mjs';
 import { createDshUpstreamAuth } from './dshauth.mjs';
-import { PairingStore, createFileStorage, deviceNameFromUA } from './pairing.mjs';
+import { PairingStore, createFileStorage } from './pairing.mjs';
 import { selectLanIPv4, buildPairLink, buildHttpPairLink, normalizeRemote } from './links.mjs';
 import { readSettingsString, writeSettingsKey, readTopLevelBlockKey, readShellSetting, writeShellSetting } from './settings.mjs';
 import { resolveCloudflared } from './cloudflared.mjs';
@@ -85,6 +86,10 @@ export function createMobileAccessService(opts = {}) {
     } catch { /* noop */ }
   }
   const proxy = createRewriteProxy({
+    // lane 自有路由**接进反代本体**（不只靠 listen 后重接 request 监听器）：
+    // 配对入口在任何请求形态下都先于配对门禁被 lane 接走（实机：裸 TCP 换会话请求
+    // 曾拿到门禁的 {"error":"unpaired"}）。
+    laneRoutes: routePairing,
     upstreamHost,
     upstreamPort,
     upstreamAuth: dshAuth,
@@ -99,14 +104,27 @@ export function createMobileAccessService(opts = {}) {
     // 给远程浏览器强制补 dsh-desktop-mode=compatibility 会让 dsh-plugin-desktop 等
     // 走「桌面分支」假设 Tauri IPC、皮肤 mount 时序，远程浏览器没 __TAURI__ 也没准备好
     // 的 DOM → classList null / 皮肤不加载（§2.2）。POLYFILL 单独无害。
-    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL],
+
+    // LOOPBACK_URL_PATCH（#154）：远程页面上指向本机其它回环端口的绝对地址改写成映射路径
+    // `/__dsh-mobile/loopback/<port>/…`（http/ws 同构），由反代转发到那个端口——于是「其它
+    // 插件访问本机其它端口」在远程/手机侧也能工作（映射请求同样先过配对门禁）。
+    inject: [OWNS_HOST_PATCH, THEME_SYNC_PATCH, POLYFILL, LOOPBACK_URL_PATCH],
     auth: (req) => {
       // 配对门禁：所有到达反代本体的路径都必须是已配对设备（携带会话 cookie）。
       // lane 自有控制面住在保留命名空间（LANE_PREFIX/*，含冻结别名 /pair、/api/pair/*），
       // 由 routePairing 先于转发处理；打到这里的一律要求 cookie，杜绝「前缀豁免 +
       // 上游路径归一化」绕过。命名空间外的一切路径（含 dsh 自有路由）原样透传，不做白名单。
       const cookie = parseCookie(req.headers.cookie, 'dsh_mobile_session');
-      return { ok: store.isDevice(cookie) };
+      // 顺手把该设备的最新 UA/IP/接入路径刷新下来（#145 延伸）：
+      // ①已配对的老设备（早先只存了名字）不用重新配对就能被富化；
+      // ②同一台设备换入口（局域网↔隧道）时面板能跟上。
+      return {
+        ok: store.isDevice(cookie, {
+          ua: req.headers['user-agent'] ?? '',
+          ip: clientIp(req),
+          entry: entryKind(req),
+        }),
+      };
     },
     onInjectSkip: opts.warn
       ? (p) => opts.warn('[dsh-mobile-access] 上游压缩 HTML，跳过注入（该页无 polyfill/桌面补丁）: ' + p)
@@ -307,7 +325,11 @@ export function createMobileAccessService(opts = {}) {
       // API 探活 / 属主状态（无 token）→ 保持 JSON 状态。
       const wantsHtml = String(req.headers.accept ?? '').includes('text/html');
       if (token) {
-        const session = store.accept(token, { name: deviceNameFromUA(req.headers['user-agent'] ?? '') });
+        const session = store.accept(token, {
+          ua: req.headers['user-agent'] ?? '',
+          ip: clientIp(req),
+          entry: entryKind(req),
+        });
         if (session) {
           res.writeHead(302, {
             'location': '/',
@@ -393,7 +415,12 @@ export function createMobileAccessService(opts = {}) {
       req.on('end', () => {
         try {
           const { token, name } = JSON.parse(body || '{}');
-          const session = store.accept(token, { name: name || deviceNameFromUA(req.headers['user-agent'] ?? '') });
+          const session = store.accept(token, {
+            name,
+            ua: req.headers['user-agent'] ?? '',
+            ip: clientIp(req),
+            entry: entryKind(req),
+          });
           if (!session) {
             json(403, { error: 'invalid-token' });
             return;
@@ -579,11 +606,15 @@ export function parseCookie(header, name) {
   return '';
 }
 
-// CORS 源白名单：仅放行来自回环（本机 dsh 设置页）的跨域读取；其它 Origin 一律不回显。
+// CORS 源白名单：仅放行来自回环（本机 dsh 设置页）与壳协议页（#154）的跨域读取；其它 Origin 一律不回显。
+// #154：桌面壳页面 origin 是壳自己的协议（dshapp://localhost / http://dshapp.localhost），
+// 设置面板的 lane 请求从那个页面上发出，白名单同步放行（仍是本机，非远程源）。
 export function allowCorsOrigin(origin, hostHeader) {
   if (!origin) return null;
   const o = String(origin);
   if (/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(o)) return o;
+  if (/^dshapp:\/\/localhost$/.test(o)) return o;
+  if (/^https?:\/\/dshapp\.localhost$/.test(o)) return o;
   return null;
 }
 

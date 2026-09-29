@@ -22,7 +22,7 @@ fn has_embedded_credentials(url: &tauri::Url) -> bool {
 /// IPv6 字面量的 host_str() 带方括号（如 `[::1]`），先剥离再比对。
 fn is_app_host(host: &str) -> bool {
     let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    if matches!(host, "127.0.0.1" | "::1" | "localhost" | "tauri.localhost") {
+    if matches!(host, "127.0.0.1" | "::1" | "localhost" | "tauri.localhost" | "dshapp.localhost") {
         return true;
     }
     INTERNAL_HOSTS

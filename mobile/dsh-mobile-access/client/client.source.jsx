@@ -11,10 +11,21 @@ import React, {
 } from "react";
 import qrcodeFactory from "qrcode-generator";
 
-/** 硬依赖：slots（注册 settings.section 槽位）。Cordis Guard 拒绝未声明 ctx.slots 访问。 */
-export const inject = ["slots"];
+/** 硬依赖：slots（注册 settings.section 槽位）与 connection（client→host RPC）。
+ *  Cordis Guard 拒绝未声明 ctx.<service> 访问；两者缺一，面板就不能工作。 */
+export const inject = ["slots", "connection"];
 
 export function apply(ctx) {
+
+  // 控制面通道：面板所有读写都走它（lane 只做反代，不再承载控制面）。
+  const rpc = ctx?.connection?.rpc;
+  if (rpc && typeof rpc.call === "function") {
+    hostRpc = (channel, endpoint, payload) => rpc.call(channel, endpoint, payload);
+  } else {
+    ctx?.logger?.warn?.(
+      "dsh-mobile-access: connection.rpc 不可用，远程访问面板无法与 host 通信",
+    );
+  }
   const slots = ctx?.slots;
   if (
     !slots ||
@@ -38,34 +49,21 @@ export function apply(ctx) {
 }
 
 const lanePort = Number(globalThis.__DSH_MOBILE_LANE_PORT__) || 3091;
-/** lane 控制面的保留命名空间（与 lib/lane-routes.mjs 的 LANE_PREFIX 同值）。 */
-const LANE_PREFIX = "/__dsh-mobile";
-/** 页面自身是否就在回环源上（桌面壳内的设置页）；远程/手机端一律走同源。 */
-const LANE_LOOPBACK =
-  typeof location !== "undefined" &&
-  /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname);
-/** 回环页直连属主 lane 端口；远程页走同源（页面本身就由 lane 提供）。
- *  旧实现无条件打 127.0.0.1:lanePort——在手机上那是手机自己，必然失败（#145）。 */
-const LANE = LANE_LOOPBACK ? "http://127.0.0.1:" + lanePort : "";
 
-/** lane 控制面直 fetch（保留命名空间）。回环页 CORS 由 lane 按 Origin 反射放行；远程页同源无 CORS。 */
-async function lane(path, opts = {}) {
-  const res = await fetch(LANE + LANE_PREFIX + path, {
-    method: opts.method ?? "GET",
-    headers: { "content-type": "application/json" },
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      detail = (await res.json())?.error || "";
-    } catch {
-      /* ignore */
-    }
-    throw new Error("HTTP " + res.status + (detail ? " " + detail : ""));
-  }
-  if (res.status === 204) return null;
-  return res.json();
+/**
+ * 设置面板与 host 的**唯一**通道：dsh 同源 connection RPC（通道 `/dsh-mobile-access`）。
+ *
+ * #154 定稿：lane（反代端口）**只做反代**，不再承载控制面——面板上所有操作（铸造令牌 /
+ * 设备列表 / 隧道地址 / cloudflared）都走 client→host，与其它设置面同构。`apply(ctx)` 里
+ * 把 rpc caller 注入进来；缺失就明确报错，**不回退 HTTP 直连 lane**。
+ */
+let hostRpc = null;
+
+async function hostCall(endpoint, payload = {}) {
+  if (!hostRpc) throw new Error("host 通道不可用（connection.rpc 缺失）");
+  const r = await hostRpc("/dsh-mobile-access", endpoint, payload);
+  if (!r || !r.ok) throw new Error(r?.error?.message ?? "rpc-error");
+  return r.value;
 }
 
 /** 读 CSS 变量（mount 时取一次），避免每次 render 走 getComputedStyle。 */
@@ -315,7 +313,7 @@ function MobileAccessPanel() {
 
   const refreshDevices = useCallback(async () => {
     try {
-      const st = await lane("/api/pair/devices");
+      const st = await hostCall("devices.list");
       setDevices(st.devices ?? []);
       setDevicesError(null);
       setDeviceErrors({}); // 刷新成功清掉行内错误（与原版 refresh() 重建 DOM 一致）
@@ -327,7 +325,7 @@ function MobileAccessPanel() {
 
   const refreshCf = useCallback(async () => {
     try {
-      const st = await lane("/api/pair/cloudflared");
+      const st = await hostCall("cloudflared.get");
       setCfState({
         bin: st.bin ?? "",
         url: st.url ?? null,
@@ -345,7 +343,7 @@ function MobileAccessPanel() {
 
   const refreshLanBase = useCallback(async () => {
     try {
-      const info = await lane("/api/pair/info");
+      const info = await hostCall("info");
       if (info.lanIp) {
         lanBaseRef.current = {
           base: info.lanIp + ":" + (info.lanePort ?? lanePort),
@@ -432,7 +430,7 @@ function MobileAccessPanel() {
   /** 铸造一次性配对链接：mint → 写 link/hint；失败写 hint。 */
   const mintFor = async (base, scheme, setLink, setHint) => {
     try {
-      const r = await lane("/api/pair/mint", { method: "POST", body: {} });
+      const r = await hostCall("token.mint");
       const link = pairLink(base, scheme, r.token);
       setLink(link);
       setHint({
@@ -555,14 +553,9 @@ function MobileAccessPanel() {
                   return;
                 }
                 try {
-                  const r = await lane(
-                    "/api/pair/probe?url=" + encodeURIComponent(url),
-                  );
+                  const r = await hostCall("tunnel.probe", { url });
                   if (r.ok) {
-                    await lane("/api/pair/tunnel", {
-                      method: "POST",
-                      body: { url },
-                    });
+                    await hostCall("tunnel.save", { url });
                     setTunSavedUrl(url);
                     setTunResult({
                       text: "✓ 可达已保存（HTTP " + (r.status ?? "") + "）",
@@ -664,10 +657,7 @@ function MobileAccessPanel() {
                 });
                 setCfStatusError(null);
                 try {
-                  const r = await lane("/api/pair/cloudflared", {
-                    method: "POST",
-                    body: { bin: "", action: "apply" },
-                  });
+                  const r = await hostCall("cloudflared.apply", { bin: "" });
                   setCfState({
                     bin: r.bin ?? "",
                     url: r.url ?? null,
@@ -691,10 +681,7 @@ function MobileAccessPanel() {
               cssVars={cssVars}
               onClick={async () => {
                 try {
-                  await lane("/api/pair/cloudflared", {
-                    method: "POST",
-                    body: { action: "stop" },
-                  });
+                  await hostCall("cloudflared.stop");
                   // 立即清空所有"运行中"相关字段，避免下一次 2s 轮询前 UI 还显示旧 url/phase
                   setCfState((prev) => ({
                     bin: prev.bin,
@@ -718,9 +705,8 @@ function MobileAccessPanel() {
                 setCfInFlight({ text: "应用中…", color: cssVars.text2 });
                 setCfStatusError(null);
                 try {
-                  const r = await lane("/api/pair/cloudflared", {
-                    method: "POST",
-                    body: { bin: cfInputValue.trim(), action: "apply" },
+                  const r = await hostCall("cloudflared.apply", {
+                    bin: cfInputValue.trim(),
                   });
                   setCfState({
                     bin: r.bin ?? "",
@@ -806,9 +792,31 @@ function MobileAccessPanel() {
                   gap: 8,
                 }}
               >
-                <span style={{ color: cssVars.text, fontSize: 13 }}>
-                  {d.name} · {d.online ? "在线" : "离线"}
+                <span
+                  style={{
+                    color: cssVars.text,
+                    fontSize: 13,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 2,
+                    minWidth: 0,
+                  }}
+                >
+                  <span>
+                    {d.name} · {d.online ? "在线" : "离线"}
+                  </span>
+                  {/* #145 延伸：尽可能给出「什么设备・从哪连进来的」——平台/浏览器/机型 + IP/入口。 */}
+                  <span style={{ color: cssVars.text2, fontSize: 11 }}>
+                    {[
+                      d.model || d.platformLabel,
+                      d.browserLabel,
+                      d.ip ? d.ip + (d.entryLabel ? " · " + d.entryLabel : "") : d.entryLabel,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || "设备信息待补全（该设备下次访问时刷新）"}
+                  </span>
                 </span>
+
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <PanelButton
                     text="移除"
@@ -816,10 +824,7 @@ function MobileAccessPanel() {
                     cssVars={cssVars}
                     onClick={async () => {
                       try {
-                        await lane("/api/pair/remove", {
-                          method: "POST",
-                          body: { deviceId: d.deviceId },
-                        });
+                        await hostCall("devices.remove", { deviceId: d.deviceId });
                         await refreshDevices();
                       } catch (e) {
                         // 失败信息行末追加（与原版行为一致：append 到 row DOM）

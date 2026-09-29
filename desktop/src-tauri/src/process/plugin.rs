@@ -21,13 +21,23 @@ pub(crate) fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         if p.join("package.json").exists() {
             return Some(p);
         }
+    // 开发构建（debug）：**仓库活代码优先**。`target/<profile>/plugins/` 里的资源拷贝是
+    // **构建期**快照（`tauri build` 才刷新），改了 `mobile/` 下的插件不重新打包就不会更新
+    // ——隔离实例实测：壳一直加载到 8 月的旧副本，源码改动全部白改。
+    #[cfg(debug_assertions)]
+    if let Some(root) = repo_checkout_root() {
+        log::info!("开发构建：用仓库插件目录 {}", root.display());
+        return Some(root);
+    }
     }
     // 打包内嵌副本（#123：归一去 Windows verbatim 前缀，路径后续进 Node 解析）
+    // **安装路径**（打包运行）：插件随包发布到 `Contents/Resources/plugins/<name>`，
+    // 壳只从那里解析并挂进运行 profile 的 `node_modules`（不在壳里另存一份运行期拷贝）。
     if let Some(res_dir) = crate::runtime::paths::resources_dir(app) {
-        let embedded = res_dir.join("plugins/dsh-desktop-tauriapp");
-        if embedded.join("package.json").exists() {
-            log::info!("使用内嵌插件包：{}", embedded.display());
-            return Some(embedded);
+        let installed = res_dir.join("plugins/dsh-desktop-tauriapp");
+        if installed.join("package.json").exists() {
+            log::info!("使用安装路径插件包：{}", installed.display());
+            return Some(installed);
         }
     }
     let exe = std::env::current_exe().ok()?;
@@ -35,19 +45,24 @@ pub(crate) fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     if sibling.join("package.json").exists() {
         return Some(sibling);
     }
-    let mut dir = exe.parent()?;
-    // 向上找 package.json.name == dsh-desktop-tauriapp 的目录（开发仓库根）。
-    // 跳过中间非同名 package.json（如 desktop/、src-tauri/ 的脚手架清单）。
+    repo_checkout_root()
+}
+
+/// 从可执行文件向上找仓库根（`package.json.name == dsh-desktop-tauriapp`）。
+/// 跳过中间非同名 package.json（如 desktop/、src-tauri/ 的脚手架清单）。
+fn repo_checkout_root() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent()?.to_path_buf();
     for _ in 0..10 {
         let pkg = dir.join("package.json");
         if pkg.exists() {
             if let Ok(text) = std::fs::read_to_string(&pkg) {
                 if text.contains("\"name\": \"dsh-desktop-tauriapp\"") || text.contains("\"name\":\"dsh-desktop-tauriapp\"") {
-                    return Some(dir.to_path_buf());
+                    return Some(dir);
                 }
             }
         }
-        dir = dir.parent()?;
+        dir = dir.parent()?.to_path_buf();
     }
     None
 }
@@ -111,10 +126,22 @@ pub(crate) fn mobile_layout_insert_block(desktop_layout_on_phones: bool) -> Stri
 /// 定位手机访问插件包目录（dsh-mobile-access / dsh-mobile-nav）：
 /// 优先打包内嵌副本 resource_dir/plugins/<name>，回退开发仓库 mobile/<rel>。
 pub(crate) fn mobile_package_dir(app: &tauri::AppHandle, name: &str, rel: &str) -> Option<PathBuf> {
+    // 安装路径（安装树 node_modules/@deepseek-ai/<name>）优先，开发运行回退仓库 mobile/<rel>。
+    // **安装路径**（打包运行）：`Contents/Resources/plugins/<name>`；开发运行回退仓库 mobile/<rel>。
+    // 开发构建（debug）：仓库 `mobile/<rel>` 优先（同上：target 里的资源拷贝是构建期快照）。
+    #[cfg(debug_assertions)]
+    if let Some(root) = repo_checkout_root() {
+        let repo = root.join("mobile").join(rel);
+        if repo.join("package.json").exists() {
+            log::info!("开发构建：用仓库手机访问包 {}", repo.display());
+            return Some(repo);
+        }
+    }
     if let Some(res_dir) = crate::runtime::paths::resources_dir(app) {
-        let embedded = res_dir.join("plugins").join(name);
-        if embedded.join("package.json").exists() {
-            return Some(embedded);
+        let installed = res_dir.join("plugins").join(name);
+        if installed.join("package.json").exists() {
+            log::info!("使用安装路径插件包：{}", installed.display());
+            return Some(installed);
         }
     }
     let exe = std::env::current_exe().ok()?;
