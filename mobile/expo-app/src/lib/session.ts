@@ -33,6 +33,22 @@ const COOKIE_ATTRIBUTES = ['path', 'domain', 'expires', 'max-age', 'samesite', '
 /** 从一条 `set-cookie` 头里取 `name=value`（剥掉 Path/HttpOnly/SameSite 等属性）。 */
 export function parseSetCookie(header: string | null | undefined): { name: string; value: string } | null {
   if (!header) return null;
+  // 两种形态都要认（与鸿蒙侧那处修复同因）：
+  //   ① 标准头：`dsh_mobile_session=abc; Path=/; HttpOnly`
+  //   ② **Netscape 表行**：部分平台/网络栈返回的是 cookie 存储表的一行，制表符分列：
+  //      `#HttpOnly_192.168.3.90\tFALSE\t/\tFALSE\t0\tdsh_mobile_session\tabc`
+  // 只认 ① 会把**有效的**设备会话当成形状不符丢掉（鸿蒙实机就是这么丢的）。
+  if (header.indexOf('\t') >= 0) {
+    const cols = header.split('\t');
+    // 合法表行是 7 列（domain、includeSubdomains、path、secure、expiry、name、value）；
+    // 列数不够就不能拿末两列充数——截断行会解析出 `FALSE=/` 这种垃圾名（测试推出来的）。
+    if (cols.length >= 7) {
+      const tabValue = cols[cols.length - 1].trim();
+      const tabName = cols[cols.length - 2].trim();
+      if (tabName && tabValue) return { name: tabName, value: tabValue };
+    }
+    return null;
+  }
   const first = header.split(';')[0]?.trim() ?? '';
   const at = first.indexOf('=');
   if (at <= 0) return null;

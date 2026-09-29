@@ -32,6 +32,14 @@ describe('parseSetCookie', () => {
     });
   });
 
+  it('Netscape 表行（制表符分列）也认——鸿蒙实机就是这种形态，只认标准头会把有效会话丢掉', () => {
+    const row = '#HttpOnly_192.168.3.90\tFALSE\t/\tFALSE\t0\tdsh_mobile_session\tb75a84b1ddc51fb1';
+    expect(parseSetCookie(row)).toEqual({ name: 'dsh_mobile_session', value: 'b75a84b1ddc51fb1' });
+    // 表行但列不够 → null（不胡猜）
+    expect(parseSetCookie('only\tone')).toBeNull();
+    expect(parseSetCookie('#HttpOnly_host\tFALSE\t/')).toBeNull();
+  });
+
   it('空/畸形/无值 → null', () => {
     expect(parseSetCookie(null)).toBeNull();
     expect(parseSetCookie('')).toBeNull();
