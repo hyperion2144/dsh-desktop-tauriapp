@@ -9,6 +9,7 @@
 
 import { createUpstreamPort, exchangeForSession, type FetchLike } from './session';
 import { downloadFrontendDist, type FetchBytes, type FrontendDist } from './frontend-assets';
+
 import type { DistCache } from './dist-cache';
 // 类型导入：`local-host-runtime` 会引原生模块 react-native-tcp-socket，node（vitest）里加载不了，
 // 所以真实的 startLocalHost 走下面的惰性动态 import；本模块必须能在无原生环境下被导入与测试。
@@ -66,6 +67,25 @@ export async function createRemotePorts(opts: RemotePortsOptions): Promise<Remot
   const fetchImpl = opts.fetchImpl ?? (globalThis.fetch as unknown as FetchLike & FetchBytes);
   const cachedCookie = await opts.store.getItem(cookieKey(opts.base));
   let dist = opts.cachedDist ?? null;
+  // ① **随包内置运行时优先**（与鸿蒙 rawfile 按需直读、桌面内置运行时同形）：配好对就能进，
+  //    既不先联网、也不先下几 MB；命中即当「本地产物」，版本闸门拿它的入口产物名去比。
+  let pluginSource = opts.bundledPluginSource ?? null;
+  if (!dist) {
+    // 惰性 + 容错：`builtin-assets` 引原生模块（expo-asset / expo-file-system），
+    // node（vitest）里加载不了；测试与无随包环境都应当安静地退回下载路径。
+    let builtin: Awaited<ReturnType<typeof import('./builtin-assets').loadBuiltinAssets>> = null;
+    try {
+      const mod = await import('./builtin-assets');
+      builtin = await mod.loadBuiltinAssets();
+    } catch {
+      builtin = null;
+    }
+    if (builtin !== null) {
+      dist = builtin.dist;
+      if (pluginSource === null) pluginSource = builtin.pluginClientJs;
+      opts.onLog?.(`[assets] 命中随包内置运行时：${builtin.dist.entry}`);
+    }
+  }
   // 冷启动优先复用**磁盘缓存**（版本号记在同一个存储里）：省掉重下几 MB，也少等一轮网络。
   // 读不出来（首次启动 / 缓存残缺）就当没有 → 走下面的检测与下载。
   if (!dist && opts.cache) {
@@ -120,7 +140,7 @@ export async function createRemotePorts(opts: RemotePortsOptions): Promise<Remot
       return out;
     },
     readDistFile: async (rel: string) => dist?.files.get(rel) ?? null,
-    bundledPluginSource: opts.bundledPluginSource ?? null,
+    bundledPluginSource: pluginSource,
     pluginRev: opts.pluginRev,
     onLog: opts.onLog,
     // 默认真实实现：按需加载原生 socket 模块（见文件头注释）。

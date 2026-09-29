@@ -4,7 +4,12 @@ const { getDefaultConfig } = require('expo/metro-config');
 
 const config = getDefaultConfig(__dirname);
 const exts = new Set(config.resolver.sourceExts);
+
 exts.add('mjs');
+// `.tgz` 是随包的内置运行时整包（#155）：不加入 assetExts，Metro 会当成源码去解析而报错。
+const assets = new Set(config.resolver.assetExts);
+assets.add('tgz');
+config.resolver.assetExts = [...assets];
 config.resolver.sourceExts = [...exts];
 
 module.exports = config;
