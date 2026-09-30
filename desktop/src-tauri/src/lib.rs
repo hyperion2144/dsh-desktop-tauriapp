@@ -120,6 +120,9 @@ pub fn run() {
                         file_name: Some("dsh-desktop-tauriapp".into()),
                     }),
                 ])
+                // 时间用**本地时区**（+8）：日志里的时刻要能直接和崩溃报告/用户感受对齐，
+                // 不再需要脑内换算（此前是 UTC，实机排查时要 +8 才知道是几点）。
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 .level(log::LevelFilter::Info)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepAll)
                 .max_file_size(10_000_000)
@@ -128,11 +131,23 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(nav_guard_plugin())
+        // 日志实时可 tail：文件 target 带缓冲（实测：mtime 已更新但内容落后数小时——
+        // 正在发生的卡顿看不到）。每秒 flush 一次，代价可忽略。
+        .setup(|_app| {
+            tauri::async_runtime::spawn(async {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    log::logger().flush();
+                }
+            });
+            Ok(())
+        })
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_denylist(&["pet"])
                 .build(),
         );
+
     // 测试钩子：DSH_DESKTOP_NO_SINGLETON=1 时跳过单实例互斥（隔离 E2E 用，
     // 允许测试实例与正在运行的正式实例并行，互不干扰）
     let builder = if std::env::var("DSH_DESKTOP_NO_SINGLETON").as_deref() == Ok("1") {
