@@ -18,6 +18,13 @@
 - cd desktop && npm run build       （等价 tauri build，产 release .app/.dmg）
 - cd desktop/src-tauri && cargo check  （快速编译检查）
 - desktop/scripts/acceptance.sh       （macOS 三条路径验收：复用/拉起回收/受限 PATH）
+- node desktop/scripts/dsh-desktop.mjs <plugin|boot|runtime>
+                                     （在 **desktop profile** 上跑 dsh：官方 CLI 硬拦 `--profile desktop`
+                                     「managed exclusively by the Electron application」，本封装绕过——
+                                     plugin 走官方开关 runCli({manageDesktopProfile:true})，boot 走内部
+                                     runProfile（壳同款路径）；实测：同一 HOME 下官方 CLI 报错、本封装
+                                     能跑到 pnpm（输出 11.16.0））
+- desktop/scripts/reload-regression.sh [小时数]  （“白屏+自动刷新”回归判定：崩溃报告数/文档重取数/内存采样）
 - desktop/scripts/acceptance.ps1      （Windows 对应）
 - 发布链：提交 → 三处升版本 → git tag vX.Y.Z && push → CI（.github/workflows/release.yml）
   → CI 出 draft release 后：gh release edit vX.Y.Z --draft=false --latest

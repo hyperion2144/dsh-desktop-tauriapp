@@ -3,7 +3,9 @@ import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { http } from '@kit.NetworkKit';
 import { Theme } from '../common/Theme';
-import { createPairStore, PairLogic, PairEntry, PairInput, PairStorage } from '../common/PairLogic';
+ import { createPairStore, PairLogic, PairEntry, PairInput, PairStorage } from '../common/PairLogic';
+ import { probeHostInfo, HostInfo } from '../common/HostInfo';
+ import { loadCookie } from '../common/LocalAssets';
 
 // 简化存储适配器：内存态 + preferences 落盘。
 class PairStorageAdapter implements PairStorage {
@@ -49,10 +51,30 @@ class PairStorageAdapter implements PairStorage {
 struct PairCard {
   @Prop @Watch('onBaseChange') base: string = '';
   @Prop name: string = '';
-  @Prop entryUrl: string = '';
+   @Prop entryUrl: string = '';
+   /** 对端设备信息（探测所得；未探测到时为空串/0，渲染时跳过）。 */
+   @Prop lanIp: string = '';
+   @Prop lanePort: number = 0;
+   @Prop tunnelUrl: string = '';
+   @Prop dshAuth: boolean = false;
+   @Prop deviceName: string = '';
   @State online: boolean = false;
   // 删除回调（由 Index 传入，ArkTS 组件可用普通属性传函数）
   onRemove: (base: string) => void = () => {};
+
+  /**
+   * 副标题的一行：对端是谁 + 怎么连 + 要不要鉴权 + 对方把我叫什么。
+   * 逐项都是「有才显示」，探测不到就不写空话（列表信息层级与桌面端对齐）。
+   */
+  private infoLine(): string {
+    const parts: string[] = [];
+    if (this.tunnelUrl !== '') parts.push('隧道');
+    else if (this.lanIp !== '') parts.push('局域网直连');
+    if (this.lanePort > 0) parts.push(`:${this.lanePort}`);
+    parts.push(this.dshAuth ? '需会话' : '免会话');
+    if (this.deviceName !== '') parts.push(`对方看到：${this.deviceName}`);
+    return parts.join(' · ');
+  }
   private timer: number = -1;
 
   aboutToAppear(): void {
@@ -110,12 +132,17 @@ struct PairCard {
           }
           .width('100%')
 
-          Text(this.base)
-            .fontSize(11)
-            .fontColor(Theme.Text2)
-            .maxLines(1)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .margin({ top: 2 })
+           Text(this.base)
+             .fontSize(11)
+           // 对端设备信息（有就显示）：隧道/直连 + 是否要会话鉴权 + 对方把我叫什么。
+           if (this.lanIp !== '' || this.tunnelUrl !== '' || this.deviceName !== '') {
+             Text(this.infoLine())
+               .fontSize(10)
+               .fontColor(Theme.Text2)
+               .maxLines(2)
+               .maxLines(2)
+           }
+
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
@@ -209,6 +236,40 @@ struct Index {
     this.loaded = true;
   }
 
+  /**
+   * 探测对端设备信息并回填到配对记录（列表标题/副标题用它）。
+   *
+   * 数据源是 lane 的 `pair/info` + `pair/devices`（详见 common/HostInfo.ets）：显示对端是谁、
+   * 走直连还是隧道、要不要会话鉴权、以及本机在对方设备表里的名字——就是桌面端列表的信息层级。
+   * 探测失败保持原样（不清空已有信息）。
+   */
+  private refreshHostInfo(base: string): void {
+    const ctx = getContext(this) as common.UIAbilityContext;
+    void loadCookie(ctx, base)
+      .then((cookie: string) => probeHostInfo(base, cookie))
+      .then((info: HostInfo | null) => {
+        if (info === null) return;
+        const st = createPairStore(this.store);
+        const list = st.list();
+        for (const e of list) {
+          if (e.base !== base) continue;
+          st.add({
+            token: e.token,
+            base: e.base,
+            name: info.lanIp !== '' ? `${info.lanIp}:${info.lanePort}` : e.name,
+            entryUrl: e.entryUrl,
+            lanIp: info.lanIp,
+            lanePort: info.lanePort,
+            tunnelUrl: info.tunnelUrl,
+            dshAuth: info.dshAuth,
+            deviceName: info.deviceName,
+            lastSeen: Date.now(),
+          });
+        }
+        this.reload();
+      });
+  }
+
   // 每次回到本页强制重新读 preferences——AddPair 是独立页面，它写入的配对
   // 在 Index 自己的 PairStorageAdapter.mem 里没有缓存，必须从磁盘重读。
   async reloadFromDisk(): Promise<void> {
@@ -236,7 +297,9 @@ struct Index {
 
   addAndEnter(p: PairInput, name: string): void {
     const st = createPairStore(this.store);
-    st.add({ token: p.token, base: p.base, name: name, entryUrl: p.entryUrl });
+    // 标题不再写死「扫码配对」：先落一条带 base 的记录，再用对端的设备信息回填（见 refreshHostInfo）。
+    st.add({ token: p.token, base: p.base, name: name !== '' ? name : p.base, entryUrl: p.entryUrl });
+    this.refreshHostInfo(p.base);
     st.active(p.base);
     this.reload();
     this.enter(p.base);
@@ -284,7 +347,7 @@ struct Index {
           ForEach(this.pairs, (p: PairEntry) => {
             ListItem() {
               // onRemove 回调：删除走 PairCard 内的确认框，不在列表层直接删
-              PairCard({ base: p.base, name: p.name ?? '', entryUrl: p.entryUrl ?? '', onRemove: (base: string) => this.remove(base) })
+              PairCard({ base: p.base, name: p.name ?? '', entryUrl: p.entryUrl ?? '', lanIp: p.lanIp ?? '', lanePort: p.lanePort ?? 0, tunnelUrl: p.tunnelUrl ?? '', dshAuth: p.dshAuth ?? false, deviceName: p.deviceName ?? '', onRemove: (base: string) => this.remove(base) })
             }
           }, (p: PairEntry) => p.base)
         }

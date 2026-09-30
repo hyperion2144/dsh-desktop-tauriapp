@@ -9,6 +9,10 @@ import {
 } from 'react-native';
 import { shellStyles, palette } from '../theme';
 import { parsePairInput, buildEnterUrl, type PairEntry } from '../lib/pair';
+import { addPair } from '../store';
+import { probeHostInfo, type HostInfo } from '../lib/host-info';
+import { appStore } from '../lib/use-remote-ports';
+import { cookieKey } from '../lib/remote-ports';
 import {
   loadPairs,
   pairs,
@@ -47,6 +51,30 @@ function PairCard({ item, onEnter, onRemove }: {
   item: PairEntry; onEnter: (p: PairEntry) => void; onRemove: (base: string) => void;
 }) {
   const online = useOnline(item.base);
+  // 对端设备信息（探测所得）：本地状态，探测到就覆写显示，并可回写配对记录供下次直接用。
+  const [info, setInfo] = useState<HostInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const cookie = await appStore.getItem(cookieKey(item.base));
+      const got = await probeHostInfo(item.base, cookie ?? '', globalThis.fetch as never);
+      if (!alive || got === null) return;
+      setInfo(got);
+      addPair({ ...item, ...got, lastSeen: Date.now() });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [item]);
+  /** 副标题一行：对端是谁 + 怎么连 + 要不要鉴权 + 对方把我叫什么（逐项「有才显示」）。 */
+  const infoLine = (() => {
+    const parts: string[] = [];
+    if (info === null) return '';
+    parts.push(info.tunnelUrl !== '' ? '隧道' : '局域网直连');
+    parts.push(info.dshAuth ? '需会话' : '免会话');
+    if (info.deviceName !== '') parts.push(`对方看到：${info.deviceName}`);
+    return parts.join(' · ');
+  })();
   const initial = (item.name ?? item.base).trim().charAt(0).toUpperCase() || '?';
   return (
     <View style={shellStyles.card}>
@@ -56,13 +84,18 @@ function PairCard({ item, onEnter, onRemove }: {
         </View>
         <View style={shellStyles.cardMeta}>
           <View style={shellStyles.cardNameRow}>
-            <Text style={shellStyles.cardName} numberOfLines={1}>{item.name ?? item.base}</Text>
+            <Text style={shellStyles.cardName} numberOfLines={1}>
+              {info?.lanIp ? `${info.lanIp}:${info.lanePort}` : (item.name ?? item.base)}
+            </Text>
             <View style={[shellStyles.dot, online ? shellStyles.dotOn : shellStyles.dotOff]} />
           </View>
           <Text style={shellStyles.cardAddr} numberOfLines={1}>
             {item.base}
             {getActiveBase() === item.base ? ' · 最近使用' : ''}
           </Text>
+          {infoLine !== '' ? (
+            <Text style={shellStyles.cardMeta} numberOfLines={2}>{infoLine}</Text>
+          ) : null}
         </View>
         <Pressable style={shellStyles.enterBtn} onPress={() => onEnter(item)}>
           <Text style={shellStyles.enterBtnText}>进入</Text>

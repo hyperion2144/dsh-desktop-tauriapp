@@ -27,3 +27,4 @@ viz/
 .dsh_hashline_edittool/
 desktop/.mnemon/
 desktop/package-lock.json
+mobile/expo-app/assets/dsh-frontend.tgz

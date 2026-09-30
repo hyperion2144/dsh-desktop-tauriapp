@@ -62,16 +62,37 @@ function findScroller(): Element | null {
   return candidates[0] ?? null
 }
 
-/** 当前是否处于移动断点（窄屏 + 触摸指针）。 */
-function isMobile(): boolean {
-  return typeof window.matchMedia === 'function' && window.matchMedia(MOBILE_QUERY).matches
+/**
+ * 当前是否应该做视觉窗口化。
+ *
+ * 移动断点（窄屏 + 触摸）恒开；**桌面也开**——依据 2026-09-29 的实机证据：页面 WebContent
+ * 常驻 1.2 GB，被系统回收后新进程启动时 JSC 在 async-iterator 上 SIGSEGV（详见 CHANGELOG 与
+ * `~/Library/Logs/DiagnosticReports/com.apple.WebKit.WebContent-*.ips`），表现为“白屏 + 自动刷新”。
+ * 桌面开关由壳下发（设置项 `desktop_render_budget`，缺省开；关掉则退回只对移动断点生效）。
+ */
+// 缺省**开**：这个 client 只随桌面壳加载（移动端有自己的包），而它修的是实机崩溃——
+// 页面 WebContent 常驻 1.2 GB → 被系统回收 → 新进程启动时 JSC 在 async-iterator 上 SIGSEGV
+// （表现为“白屏 + 自动刷新”）。关掉可用 setRenderBudgetForDesktop(false)（设置项接线在后续批次）。
+let desktopAllowed = true
+
+
+/** 壳下发开关后重新判定，并触发一次已安装实例的重算。 */
+export function setRenderBudgetForDesktop(allowed: boolean): boolean {
+  desktopAllowed = allowed
+
+  return allowed
 }
 
+
+function isMobile(): boolean {
+  return desktopAllowed || (typeof window.matchMedia === 'function' && window.matchMedia(MOBILE_QUERY).matches)
+}
 /**
- * 安装移动端渲染预算。幂等；在窗口尺寸/输入方式变化时自动装卸。
+ * 安装视觉窗口化。幂等；在窗口尺寸/输入方式变化时自动装卸。
  *
  * @returns 卸载函数（移除标记、样式与监听器）
  */
+
 export function installMobileRenderBudget(): () => void {
   let applied: Element | null = null
   const timers: number[] = []

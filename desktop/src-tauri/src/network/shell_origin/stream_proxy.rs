@@ -24,6 +24,69 @@ use super::{head, upstream};
 /// 报文头上限，与 relay 同口径。
 const MAX_HEAD: usize = 64 * 1024;
 
+/// SSE 单条连接寿命上限（见响应泵处的证据注释）：到期主动断开让页面重连、重建异步迭代器。
+/// 取 30 分钟 —— 崩溃实测发生在页面存活约 1 小时后，留一半余量。
+const SSE_MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+/// 把上游响应体泵给客户端；SSE 走**寿命上限**（到期返回 `true`，调用方随即断开）。
+///
+/// 单独抽成函数是为了可测：把上限作为参数传入，测试就能用 50ms 证明“到期真的会断”，
+/// 而不必等 30 分钟。返回 `true` = 是被上限掐断的（而非上游自然结束）。
+async fn pump_body<R, W>(up_r: &mut R, client_w: &mut W, is_sse: bool, cap: Duration) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    if !is_sse {
+        let _ = tokio::io::copy(up_r, client_w).await;
+        return false;
+    }
+    tokio::time::timeout(cap, tokio::io::copy(up_r, client_w)).await.is_err()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+
+    /// 上游“永不结束”的 SSE 流：受上限控制必须被提前断开。
+    #[tokio::test]
+    async fn sse_stream_is_cut_at_lifetime_cap() {
+        // 一个不会自己结束的读端：把数据推入通道后不放 EOF。
+        let (mut tx, mut rx) = tokio::io::duplex(64);
+        tokio::spawn(async move {
+            loop {
+                if tx.write_all(b"data: x\n\n").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let mut out: Vec<u8> = Vec::new();
+        let cut = pump_body(&mut rx, &mut out, true, Duration::from_millis(50)).await;
+        assert!(cut, "SSE 流应当在寿命上限处被断开（返回 true）");
+        assert!(!out.is_empty(), "断开前应当真的传过数据（证明是在泵、不是没接上）");
+    }
+
+    /// 非 SSE：不加上限（保持长连接语义，mux 之外的流不受影响）。
+    #[tokio::test]
+    async fn non_sse_ignores_cap() {
+        let (mut tx, mut rx) = tokio::io::duplex(64);
+        let body = vec![b'x'; 1024];
+        let body2 = body.clone();
+        tokio::spawn(async move {
+            let _ = tx.write_all(&body2).await;
+            // 写完后立刻关闭：copy 遇到 EOF 自然结束
+            drop(tx);
+        });
+        let mut out: Vec<u8> = Vec::new();
+        let cut = pump_body(&mut rx, &mut out, false, Duration::from_millis(50)).await;
+        assert!(!cut, "非 SSE 不应被寿命上限掐断");
+        assert_eq!(out.len(), 1024, "字节应当完整搬运");
+    }
+}
+
 /// 启动代理，返回其 origin（`http://127.0.0.1:<port>/`，带尾斜杠）。
 pub(crate) fn start(app: AppHandle) -> Option<String> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
@@ -119,10 +182,15 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
         up.cookie.as_deref(),
     );
 
+    // 耗时仪表（用户实报“有时候读内容很慢”：文件列表/模型列表/终端）：把上游连接与首字节分别计时，
+    // 这样“慢”会变成一条带数字的日志（谁慢、慢在哪一段），而不是凭感觉。
+    let t0 = std::time::Instant::now();
     let Ok(out) = upstream::connect(&up).await else {
+
         let _ = write_status(&mut inbound, 502).await;
         return;
     };
+    let connect_ms = t0.elapsed().as_millis();
     // **先开泵、再等响应头**（#154 死锁修复）：若按「写请求头 → 等响应头 → 才开始搬运」的
     // 顺序，带 body 的请求会与上游互等——上游在等剩余 body，我们在等响应头，双方永久挂住。
     // 实测：settings/describe、llm/listProviders 这类 POST 一直不返回，而 GET 全正常。
@@ -182,6 +250,18 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
         pump.abort();
         return;
     }
+    // 首字节（TTFB）：页面“转圈”多久就卡在这一段：连接 + 上游处理 + 回写头。
+    let ttfb_ms = t0.elapsed().as_millis();
+    if ttfb_ms >= 200 || std::env::var("DSH_DESKTOP_LOG_SHELL_ORIGIN").as_deref() == Ok("1") {
+        log::info!(
+            "[stream-proxy] SLOW {} {} status={} connect={}ms ttfb={}ms",
+            request.method(),
+            request.target(),
+            response.status().unwrap_or(0),
+            connect_ms,
+            ttfb_ms
+        );
+    }
     if resp_raw.len() > resp_end && client_w.write_all(&resp_raw[resp_end..]).await.is_err() {
         pump.abort();
         return;
@@ -189,7 +269,23 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
     let _ = client_w.flush().await;
 
     // 响应体（含 SSE/WS 长流）：读到 EOF 或对端关闭为止；反方向由 pump 维持。
-    let _ = tokio::io::copy(&mut up_r, &mut client_w).await;
+    //
+    // **SSE 加寿命上限**：实机崩溃报告（~/Library/Logs/DiagnosticReports/com.apple.WebKit.WebContent-*.ips）
+    // 显示页面在 `JSC::asyncIteratorNextWithDriver` / `asyncGeneratorUnwrapYieldResumption` 上
+    // SIGSEGV（EXC_BAD_ACCESS，KERN_INVALID_ADDRESS at 0x48），崩溃前 WebContent 常驻 1.2 GB，
+    // 且三次崩溃间隔约 55–65 分钟；同时已经实测排除传输层（同一资产直连 vs 过代理 sha256 一致、
+    // SSE 4 秒字节数一致、带体 POST 200）。⇒ 长命异步迭代器越活越久越危险，到期主动断开，
+    // 让页面重连并**重建**迭代器（EventSource 语义本来就重连；mux 那条是 WS，不受此影响）。
+    let is_sse = response
+        .get("content-type")
+        .map(|v| v.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false);
+    if pump_body(&mut up_r, &mut client_w, is_sse, SSE_MAX_LIFETIME).await {
+        log::info!(
+            "[stream-proxy] SSE 达到寿命上限（{}s）→ 主动断开让页面重连（避免异步迭代器累积到崩引擎）",
+            SSE_MAX_LIFETIME.as_secs()
+        );
+    }
     let _ = client_w.shutdown().await;
     pump.abort();
 }

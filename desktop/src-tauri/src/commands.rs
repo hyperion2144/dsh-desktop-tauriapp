@@ -767,6 +767,7 @@ fn get_dsh_source_blocking(app: tauri::AppHandle) -> serde_json::Value {
     };
     serde_json::json!({
         "mode": mode_str,
+        "renderBudget": crate::settings::configured_desktop_render_budget(),
         "builtin": builtin,
         "external": external,
         "running": running,

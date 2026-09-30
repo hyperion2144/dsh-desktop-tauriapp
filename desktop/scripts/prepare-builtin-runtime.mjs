@@ -25,7 +25,7 @@ const opt = (name, fallback) => {
 };
 // 内置 dsh 的版本（**pin，不浮动**）：内置运行时随安装包分发，本地与 CI 必须一致且可复现。
 // 升级内置 dsh 版本 = 改这一行（也可用 --dsh-version <ver> 临时覆盖）。
-const BUILTIN_DSH_VERSION = "0.1.7-rc.1";
+const BUILTIN_DSH_VERSION = "0.2.0-rc.2";
 const dshVersion = opt("--dsh-version", BUILTIN_DSH_VERSION);
 const variant = opt("--variant");
 const nodeVersionTag = opt("--node-version", "latest-v24.x");

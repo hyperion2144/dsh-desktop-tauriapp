@@ -15,7 +15,20 @@ export interface PairEntry {
   base: string;
   name?: string;
   entryUrl?: string;
+  /** 远端设备的局域网地址（对方 `pair/info` 的 lanIp），列表标题用它。 */
+  lanIp?: string;
+  /** 对方的 lane 端口。 */
+  lanePort?: number;
+  /** 对方开的隧道地址（有就优先走它）。 */
+  tunnelUrl?: string;
+  /** 对方是否需要会话鉴权。 */
+  dshAuth?: boolean;
+  /** 本机在**对方设备表**里的名字（对方看到你是谁）。 */
+  deviceName?: string;
+  /** 最后一次成功联通的时间（毫秒）。 */
+  lastSeen?: number;
 }
+
 
 export interface PairStorage {
   getItem(key: string): string | null;
