@@ -2,7 +2,7 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
-## 未发布
+## 0.11.0 — 2026-09-30
 
 - **撤回上一轮的独立命令入口**：用户明确“不要单独的命令，要注入的 dsh 绕过”——`package.json` 的 `bin` 入口与全局 link 已撤（`desktop/scripts/dsh-desktop.mjs` 保留为脚本形式的应急手段，不再是安装到 PATH 的命令）；正解是上面那条：**幂等补丁打在运行时 `lib/bin.js`**，让注入的 `dsh` 自己放行。
 - **“我们注入的 dsh”自己放行 desktop profile（不加新命令）**。用户明确不要另一条命令，要注入的那份 dsh 绕过拦截。做法：新增 `runtime/cli_patch.rs`，在 `profiles::ensure_dsh_shim_dir` 写完 shim（`runtime/bin-dsh/dsh` → 应用自带 node + 运行时 `lib/bin.js`）后，把启动器里那段只按名字判断、**没有环境变量开关**的拦截（`rejectElectronProfile` 里的 `if (profile.toLowerCase() === "desktop") program.error(...)`）**幂等**换成标记注释；因为 `plugin` 动作里是 `if (!manageDesktopProfile) rejectElectronProfile(...)`，换掉内层判断就两条路径一起放行。找不到原文则不动（`UnknownShape` + WARN），本函数每次 dsh spawn 都会走一遍 → **运行时换版本后自动重打**。cargo test **146 通过**（含 3 条新测试：打补丁+幂等、形状不识则不猜、文件不存在）。
