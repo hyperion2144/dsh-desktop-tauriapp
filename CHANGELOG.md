@@ -4,6 +4,7 @@
 
 ## 未发布
 
+- **撤回上一轮的独立命令入口**：用户明确“不要单独的命令，要注入的 dsh 绕过”——`package.json` 的 `bin` 入口与全局 link 已撤（`desktop/scripts/dsh-desktop.mjs` 保留为脚本形式的应急手段，不再是安装到 PATH 的命令）；正解是上面那条：**幂等补丁打在运行时 `lib/bin.js`**，让注入的 `dsh` 自己放行。
 - **“我们注入的 dsh”自己放行 desktop profile（不加新命令）**。用户明确不要另一条命令，要注入的那份 dsh 绕过拦截。做法：新增 `runtime/cli_patch.rs`，在 `profiles::ensure_dsh_shim_dir` 写完 shim（`runtime/bin-dsh/dsh` → 应用自带 node + 运行时 `lib/bin.js`）后，把启动器里那段只按名字判断、**没有环境变量开关**的拦截（`rejectElectronProfile` 里的 `if (profile.toLowerCase() === "desktop") program.error(...)`）**幂等**换成标记注释；因为 `plugin` 动作里是 `if (!manageDesktopProfile) rejectElectronProfile(...)`，换掉内层判断就两条路径一起放行。找不到原文则不动（`UnknownShape` + WARN），本函数每次 dsh spawn 都会走一遍 → **运行时换版本后自动重打**。cargo test **146 通过**（含 3 条新测试：打补丁+幂等、形状不识则不猜、文件不存在）。
 - **日志时间改本地时区（+8）+ 每秒 flush（实时可 tail）**。①`tauri_plugin_log` 加 `TimezoneStrategy::UseLocal`：此前日志是 UTC，实机排查要脑内 +8（崩溃报告 21:04 对应日志 13:04）——现在两边同刻度；②文件 target 带缓冲（实测：文件 mtime 08:07 但内容停在 00:07，正在发生的卡顿看不到），新增 `setup` 里每秒 `log::logger().flush()`，代价可忽略、换来“打开日志就是现状”；③新增 npm `bin` 入口 `dsh-desktop`（`npm link` 后即可当普通命令用）。cargo test 143 通过。
 - **壳内代理加“耗时仪表” + 直连 vs 代理的实测数据（用户报“有时读内容很慢”）**。①先量化：**633 KB 的 index JS** 直连 3080 约 0.9 ms、过代理约 **0.65 ms（更快）**——因为从本地运行时 dist 出（#152 本地资产优先）；②真实 API `POST /api/settings/describe` 直连 0.6 ms、过代理 **1.6 ms（多约 1 ms）** ⇒ **代理不是“秒级卡”的原因**；而“必须用代理么”的结论：本地可以直连（dsh 对同机 loopback 免 cookie），代价是失去本地资产优先（实测过代理反而更快）与远程模式同构。③为了定位真因，代理新增耗时仪表：每次请求记 `SLOW <method> <target> status=… connect=…ms ttfb=…ms`，**ttfb ≥ 200ms 无条件打**（另可用 `DSH_DESKTOP_LOG_SHELL_ORIGIN=1` 全量开）。cargo test 143 通过。
