@@ -2,6 +2,10 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
+## 0.11.1 — 2026-09-30
+
+- **修复 iOS 打包失败（v0.11.0 的 CI 红）**：`bundle-format.ts` 复用了工程根**之外**的 `mobile/shell-web/local-assets.mjs`（`entryName`），Metro 默认只监视项目根 → CI 的 iOS bundling 报 `Unable to resolve module ../../../shell-web/local-assets.mjs`；tsc/vitest 不受项目根限制，所以本地全绿也会漏。修：`metro.config.js` 加 `watchFolders`（**只加 `shell-web`**，不把带自己 node_modules 的 `dsh-mobile-nav` 子模块拖进来）。本地用同一条失败路径验证：`npx expo export --platform ios` → 660 模块打包成功，产物里含 shell-web 逻辑。
+
 ## 0.11.0 — 2026-09-30
 
 - **撤回上一轮的独立命令入口**：用户明确“不要单独的命令，要注入的 dsh 绕过”——`package.json` 的 `bin` 入口与全局 link 已撤（`desktop/scripts/dsh-desktop.mjs` 保留为脚本形式的应急手段，不再是安装到 PATH 的命令）；正解是上面那条：**幂等补丁打在运行时 `lib/bin.js`**，让注入的 `dsh` 自己放行。
