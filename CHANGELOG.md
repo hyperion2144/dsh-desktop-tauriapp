@@ -6,7 +6,7 @@
 
 - **修复 iOS 打包失败的第二个原因（v0.11.0/v0.11.1 的 CI 红）**：随包整包 `mobile/expo-app/assets/dsh-frontend.tgz` 被当作构建产物写进了 `.gitignore` → CI 检出后**没有这个文件**，而 Metro 的 `require('../../assets/dsh-frontend.tgz')` 是**打包期静态解析**（不是运行时），于是 `Unable to resolve module ../../assets/dsh-frontend.tgz`（Android 那条不过 bundling 所以看不出来）。修：**产物入库**（CI 无法现场生成：脚本默认来源是桌面 staged 的 `desktop/src-tauri/resources/dsh/...`），并在 `.gitignore` 原位写明“改 dsh 运行时版本时必须重跑 `sync-builtin.mjs` 并提交该产物”。上一个原因（`shell-web` 在工程根之外）已在 0.11.1 修好并保留在这条历史里。
 
-## 0.11.1 — 2026-09-30
+## 0.11.1 — 2026-09-30（**未发布**，内容已并入 0.11.2）
 
 - **修复 iOS 打包失败（v0.11.0 的 CI 红）**：`bundle-format.ts` 复用了工程根**之外**的 `mobile/shell-web/local-assets.mjs`（`entryName`），Metro 默认只监视项目根 → CI 的 iOS bundling 报 `Unable to resolve module ../../../shell-web/local-assets.mjs`；tsc/vitest 不受项目根限制，所以本地全绿也会漏。修：`metro.config.js` 加 `watchFolders`（**只加 `shell-web`**，不把带自己 node_modules 的 `dsh-mobile-nav` 子模块拖进来）。本地用同一条失败路径验证：`npx expo export --platform ios` → 660 模块打包成功，产物里含 shell-web 逻辑。
 
