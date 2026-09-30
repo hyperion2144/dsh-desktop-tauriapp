@@ -607,6 +607,20 @@ pub(crate) fn ensure_dsh_shim_dir(app: &tauri::AppHandle) -> Option<std::path::P
         &format!("exec \"{node_s}\" \"{cli_s}\" \"$@\""),
         &format!("\"{node_s}\" \"{cli_s}\" %*"),
     )?;
+    // 顺手让**我们注入的 dsh** 也能跑 desktop profile（官方启动器里那段“Electron 专属”拦截
+    // 只按名字判断、没有开关；壳自己走 runProfile 不受限，但用户拿 shim 调 CLI 会撞上）。
+    // 幂等，且本函数每次 spawn 都会走一遍 → 运行时换版本后自动重打。
+    match crate::runtime::cli_patch::allow_desktop_profile(&cli) {
+        Ok(Some(crate::runtime::cli_patch::PatchOutcome::Patched)) => {
+            log::info!("[dsh-shim] 已放行 desktop profile：{}", cli_s)
+        }
+        Ok(Some(crate::runtime::cli_patch::PatchOutcome::AlreadyPatched)) => {}
+        Ok(Some(crate::runtime::cli_patch::PatchOutcome::UnknownShape)) => {
+            log::warn!("[dsh-shim] 未能识别启动器形态，未改：{}", cli_s)
+        }
+        Ok(None) => {}
+        Err(e) => log::warn!("[dsh-shim] 放行 desktop profile 失败：{e}"),
+    }
     Some(dir)
 }
 
