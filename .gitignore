@@ -27,4 +27,8 @@ viz/
 .dsh_hashline_edittool/
 desktop/.mnemon/
 desktop/package-lock.json
-mobile/expo-app/assets/dsh-frontend.tgz
+# 注意：`mobile/expo-app/assets/dsh-frontend.tgz`（随包完整运行时，2MB）**必须入库**——
+# CI 检出后无法现场生成（脚本默认来源是桌面 staged 的 `desktop/src-tauri/resources/dsh/...`，
+# 那里在 CI 里不存在），而 Metro 的 `require('../../assets/dsh-frontend.tgz')` 是**打包期静态解析**，
+# 文件不在就直接失败（曾导致 iOS 打包红两次）。改 dsh 运行时版本时请重跑：
+#   node mobile/expo-app/scripts/sync-builtin.mjs && git add mobile/expo-app/assets/dsh-frontend.tgz
