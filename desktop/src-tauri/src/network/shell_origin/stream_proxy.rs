@@ -182,10 +182,15 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
         up.cookie.as_deref(),
     );
 
+    // 耗时仪表（用户实报“有时候读内容很慢”：文件列表/模型列表/终端）：把上游连接与首字节分别计时，
+    // 这样“慢”会变成一条带数字的日志（谁慢、慢在哪一段），而不是凭感觉。
+    let t0 = std::time::Instant::now();
     let Ok(out) = upstream::connect(&up).await else {
+
         let _ = write_status(&mut inbound, 502).await;
         return;
     };
+    let connect_ms = t0.elapsed().as_millis();
     // **先开泵、再等响应头**（#154 死锁修复）：若按「写请求头 → 等响应头 → 才开始搬运」的
     // 顺序，带 body 的请求会与上游互等——上游在等剩余 body，我们在等响应头，双方永久挂住。
     // 实测：settings/describe、llm/listProviders 这类 POST 一直不返回，而 GET 全正常。
@@ -244,6 +249,18 @@ async fn handle(mut inbound: TcpStream, app: AppHandle) {
     if client_w.write_all(&response.encode()).await.is_err() {
         pump.abort();
         return;
+    }
+    // 首字节（TTFB）：页面“转圈”多久就卡在这一段：连接 + 上游处理 + 回写头。
+    let ttfb_ms = t0.elapsed().as_millis();
+    if ttfb_ms >= 200 || std::env::var("DSH_DESKTOP_LOG_SHELL_ORIGIN").as_deref() == Ok("1") {
+        log::info!(
+            "[stream-proxy] SLOW {} {} status={} connect={}ms ttfb={}ms",
+            request.method(),
+            request.target(),
+            response.status().unwrap_or(0),
+            connect_ms,
+            ttfb_ms
+        );
     }
     if resp_raw.len() > resp_end && client_w.write_all(&resp_raw[resp_end..]).await.is_err() {
         pump.abort();
