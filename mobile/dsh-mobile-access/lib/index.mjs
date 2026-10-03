@@ -584,6 +584,7 @@ export function createMobileAccessService(opts = {}) {
     tunnel,
     startTunnel,
     stopTunnel,
+    probe: runProbe, // #167：插件入口 apply 的 RPC 分支需要探测入口（私有函数跨作用域不可见）
     listen: (port = 0) => new Promise((res) => {
       // 0.0.0.0：局域网设备直连（配对门禁保护未配对路径；宿主 dsh 仍只面 loopback）。
       proxy.server.listen(port, '0.0.0.0', () => {
@@ -735,7 +736,7 @@ function apply(ctx) {
             // 同源调用方已信任（仅属主 + 同源 channel），直接调内部 probe
             const verdict = await new Promise((resolve) => {
               const json = (status, body) => resolve({ _status: status, ...body });
-              runProbe(url, json);
+              svc.probe(url, json); // #167：runProbe 是 service 私有函数，须经 svc 调用
             });
             return ok(verdict);
           }
