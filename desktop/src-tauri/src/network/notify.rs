@@ -103,6 +103,21 @@ pub(crate) async fn handle_notify_conn(sock: &mut tokio::net::TcpStream, app: &A
         return;
     }
     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").trim().to_string();
+    // #186：忙状态上报**不是通知**——它只驱动壳侧防休眠断言，落地后直接 204 返回。
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        if v.get("type").and_then(|x| x.as_str()) == Some("busy-state") {
+            let profile = v.get("profile").and_then(|x| x.as_str()).unwrap_or("");
+            let busy = v.get("busy").and_then(|x| x.as_bool()).unwrap_or(false);
+            crate::power::set_busy(profile, busy);
+            let _ = sock
+                .write_all(
+                    format!("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n{CORS_HEADERS}\r\n")
+                        .as_bytes(),
+                )
+                .await;
+            return;
+        }
+    }
     // 事件类型分派（#142 原生事件桥）：宿主脚本按 session/event 类型上报，
     // 未知/缺省回落任务完成（兼容旧轮询脚本）。
     let (scenario, msg) = match serde_json::from_str::<serde_json::Value>(&body) {
@@ -209,19 +224,22 @@ pub(crate) fn task_notifier_script(port: u16, token: &str) -> String {
 }
 
 /// 导航完成后注入任务完成监听（脚本自带守卫，重复注入无害）。
-pub(crate) fn inject_task_notifier(app: AppHandle, port: u16, token: &str) {
+///
+/// `label` 是目标窗口（#186 修：此前硬取 `"main"`，次窗从来没被注入过）。
+pub(crate) fn inject_task_notifier(app: AppHandle, label: &str, port: u16, token: &str) {
     if port == 0 {
         return;
     }
     let handle = app.clone();
+    let label = label.to_string();
     let script = task_notifier_script(port, token);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_millis(2500)).await;
-        if let Some(w) = handle.get_webview_window("main") {
+        if let Some(w) = handle.get_webview_window(&label) {
             if let Err(e) = w.eval(&script) {
-                log::warn!("任务完成监听注入失败：{e}");
+                log::warn!("任务完成监听注入失败（{label}）：{e}");
             } else {
-                log::info!("任务完成监听已注入（忙碌→空闲检测）");
+                log::info!("任务完成监听已注入（{label}，忙碌→空闲检测）");
             }
         }
     });

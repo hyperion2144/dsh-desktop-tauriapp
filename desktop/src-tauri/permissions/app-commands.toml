@@ -332,3 +332,18 @@ commands = { allow = ['choose_notification_sound'] }
 identifier = 'allow-exit-window-instance'
 description = '状态条「退出」（#180）：关本窗 UI + 销毁本窗绑定实例（仅本壳运行中实例）'
 commands = { allow = ['exit_window_instance'] }
+
+[[permission]]
+identifier = 'allow-read-desktop-keybindings'
+description = '快捷键（#187）：读取桌面档快捷键偏好文件原文（desktop:macos/desktop:windows 的绑定覆盖）'
+commands = { allow = ['read_desktop_keybindings'] }
+
+[[permission]]
+identifier = 'allow-write-desktop-keybindings'
+description = '快捷键（#187）：写回桌面档快捷键偏好文件（原子写 + 尺寸上限）'
+commands = { allow = ['write_desktop_keybindings'] }
+
+[[permission]]
+identifier = 'allow-close-current-window'
+description = '快捷键（#187）：关闭发起调用的窗口（主窗按既有语义只隐藏）'
+commands = { allow = ['close_current_window'] }

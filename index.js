@@ -185,6 +185,33 @@ export function apply(ctx) {
   const lastTurnEndAt = new Map()
   const TURN_END_DEBOUNCE_MS = 10_000
 
+  // ── 会话忙状态上报（#186）：驱动桌面壳的防休眠断言 ──
+  // 口径（用户拍板）：正在跑的会话 = 有 turn 在跑，且**不在等人工**
+  // （等审批 / 等 ask_user_question 回答不算在跑）。DOM 探针不能当判据（#185 调研：
+  // `[data-state="ongoing"]` 是通用 spinner，20+ 处复用，假阳性一堆）。
+  const busySessions = new Set()
+  const waitingSessions = new Set()
+  const questionCalls = new Map() // callId → sessionId（等用户回答的工具调用）
+  const busyProfile = (() => {
+    const fromEnv = process.env.DSH_DESKTOP_PROFILE || ''
+    if (fromEnv) return fromEnv
+    try { return ctx.get?.('profileContext')?.name || '' } catch { return '' }
+  })()
+  let lastBusy = null
+  const reportBusy = (force) => {
+    const busy = [...busySessions].some((sid) => !waitingSessions.has(sid))
+    if (!force && busy === lastBusy) return
+    lastBusy = busy
+    fetch(`http://127.0.0.1:${notifyPort}/notify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${notifyToken}` },
+      body: JSON.stringify({ type: 'busy-state', profile: busyProfile, busy }),
+    }).catch(() => { /* 壳不在：防休眠不是关键路径 */ })
+  }
+  // 心跳：忙状态不变也重发（壳侧只看租约新鲜度，陈旧只告警、不释放）。
+  const busyHeartbeat = setInterval(() => reportBusy(true), 10_000)
+  busyHeartbeat?.unref?.()
+
   ctx.on(
     'session/event',
     (...args) => {
@@ -199,8 +226,52 @@ export function apply(ctx) {
         }
         if (!event || typeof event.type !== 'string') return
 
+        // #186：忙状态转移（与通知解耦——busy-state 不投递通知，只驱动防休眠）
+        if (event.type === 'turn/start') {
+          if (session?.id) busySessions.add(session.id)
+          reportBusy(false)
+          return
+        }
+        if (event.type === 'approval/asked') {
+          if (session?.id) waitingSessions.add(session.id)
+          reportBusy(false)
+          report('dsh-approval', session?.title ? `「${session.title}」等待你的审批确认` : '')
+          return
+        }
+        if (event.type === 'approval/decided') {
+          if (session?.id) waitingSessions.delete(session.id)
+          reportBusy(false)
+          return
+        }
+        if (event.type === 'tool/call' && event.data?.name === 'ask_user_question') {
+          const callId = event.data?.callId ?? ''
+          if (session?.id && callId) {
+            questionCalls.set(callId, session.id)
+            waitingSessions.add(session.id)
+          }
+          reportBusy(false)
+          return
+        }
+        if (event.type === 'tool/result') {
+          // 回答交上去了：这个 callId 对应的等待结束
+          const callId = event.data?.message?.toolCallId ?? event.data?.callId ?? ''
+          const owner = callId ? questionCalls.get(callId) : undefined
+          if (owner) {
+            questionCalls.delete(callId)
+            waitingSessions.delete(owner)
+          }
+          reportBusy(false)
+          return
+        }
+
         if (event.type === 'turn/end') {
           const sid = session?.id ?? ''
+          // 忙状态先摘（不受下面的 10s 防抖影响：防休眠要随回合**立刻**释放）
+          if (sid) {
+            busySessions.delete(sid)
+            waitingSessions.delete(sid)
+          }
+          reportBusy(false)
           const now = Date.now()
           const last = lastTurnEndAt.get(sid) ?? 0
           if (now - last < TURN_END_DEBOUNCE_MS) return
@@ -217,10 +288,24 @@ export function apply(ctx) {
           }[kind] ?? '回合已结束'
           const err = kind === 'error' ? (event.data?.reason?.error?.message ?? '') : ''
           report('task-complete', err ? `${kindText}：${err}`.slice(0, 200) : kindText)
-        } else if (event.type === 'approval/asked') {
-          report('dsh-approval', session?.title ? `「${session.title}」等待你的审批确认` : '')
         }
       } catch { /* 单个事件处理失败不影响 dsh */ }
+    },
+    { global: true },
+  )
+
+  // 补充信号：agent 自身在跑（含子代理会话）也算忙；与 session/event 互补。
+  ctx.on(
+    'agent/status',
+    (payload = {}) => {
+      try {
+        const sid = payload?.agent?.session?.id ?? ''
+        if (!sid) return
+        if (payload.status === 'running') busySessions.add(sid)
+        else if (payload.status === 'idle') busySessions.delete(sid)
+        else return
+        reportBusy(false)
+      } catch { /* 忽略 */ }
     },
     { global: true },
   )

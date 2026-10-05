@@ -21,6 +21,7 @@ pub(crate) fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
         if p.join("package.json").exists() {
             return Some(p);
         }
+    }
     // 开发构建（debug）：**仓库活代码优先**。`target/<profile>/plugins/` 里的资源拷贝是
     // **构建期**快照（`tauri build` 才刷新），改了 `mobile/` 下的插件不重新打包就不会更新
     // ——隔离实例实测：壳一直加载到 8 月的旧副本，源码改动全部白改。
@@ -28,7 +29,6 @@ pub(crate) fn desktop_plugin_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     if let Some(root) = repo_checkout_root() {
         log::info!("开发构建：用仓库插件目录 {}", root.display());
         return Some(root);
-    }
     }
     // 打包内嵌副本（#123：归一去 Windows verbatim 前缀，路径后续进 Node 解析）
     // **安装路径**（打包运行）：插件随包发布到 `Contents/Resources/plugins/<name>`，

@@ -54,7 +54,9 @@
 - src/client/ —— 浏览器侧插件 client（index.ts 注册入口 / advanced-shell 局部拖拽 chrome /
   desktop-settings.tsx 桌面设置 Tab / downloads-tab.tsx 下载 Tab / theme-select.tsx 主题 /
   local-chrome.ts 状态条等 DOM 注入 / download-intercept.ts 下载拦截 / desktop-browser-bridge.ts
-  （#118 桥实现 + webview 标签兼容层）/ environment.ts 环境）。
+   （#118 桥实现 + webview 标签兼容层）/ platform-keyboard.ts 桌面档快捷键桥（#187：原生键 → dsh
+   `desktop:<os>` 档）/ composer-input-guard.ts 输入框控制字符守护（#188：WKWebView 方向键的
+   `insertText` 前哨）/ environment.ts 环境）。
   esbuild 产 lib/client.js；槽位注入处用 React 组件，禁 document.createElement 拼 UI。
 - desktop/src-tauri/ —— Rust 桌面壳主体
   - src/lib.rs 入口聚合（run() + DshState 构造 + generate_handler!）；build.rs 构建期 staging
@@ -128,7 +130,8 @@
 - lane 传输层（#147，勿退回）：上游 keep-alive 连接池 + 客户端/上游两侧 setNoDelay + 逐跳头不原样转发；
   别再写回 `agent: false`，那会让每个请求新建 TCP 并把 `connection: close` 透给浏览器。
   - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 10 例（含会话守卫 7 例）、
-   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 109 例；
+   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 171 例；
+   `node scripts/test-client.mjs` 快测（client 纯函数 + dshDesktop 载体冒烟，~0.6s）；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
 
@@ -166,6 +169,19 @@
    .npmrc 的 node-linker/store-dir 在 pnpm 11 被无视（实测落 isolated 布局 + 全局 store）；且内置
    node 是 sidecar（名 dsh-node），pnpm 生命周期脚本按 `node` 名找解释器，须造垫片目录并前置 PATH
    （runtime/registry.rs，含单测）。
+11. 桌面档快捷键（#187）：dsh `detectEnvironment()` 只看 `documentElement.dataset.platform` **是否存在**来判桌面档，
+   而 dsh 自己的 mac 几何 / 菜单配色只认字面量 `darwin` → 载体写**平台名**（macos/win32/linux）；写 darwin 会
+   连带触发 mac 专用几何，与自绘 chrome 打架。原生键桥在页面内实现（`src/client/platform-keyboard.ts`；
+   dsh 不在本仓 node_modules，且其 `shortcuts/protocol.js` 是 ESM，无法复用）。适配器 `get/edit` 只在
+    `ShortcutsService` 构造期被取一次 → 载体必须同步给出桩（晚到即永久丢失，快捷键会变只读）；取服务一律走
+    `ctx.get('shortcuts')`，**不要**用 `ctx.shortcuts` 属性访问——未声明该 inject 时 cordis 会当场抛
+    `cannot get property "shortcuts" without inject`，整个 client 半 `failed`（页面 boot 报
+    `dsh-desktop-tauriapp: failed`）；取不到就静默不动（不写进模块级 inject），让旧 dsh 自然回落 web 档。
+12. 输入框方向键与 C0 控制字符（#188）：macOS 壳是 WKWebView，它把方向键变成一次 `insertText` 的
+    `beforeinput`，`data` 是 C0 控制字符（← U+001C、→ U+001D）——不是 dsh/Lexical 的问题（composer bundle
+    里没有 `\x1d` 字节、keymap 也没注册 ArrowLeft/ArrowRight）。壳侧在 `document` capture 阶段拦掉
+    （`src/client/composer-input-guard.ts` 三层网：beforeinput + input 兜底 + MutationObserver），
+    放行 Tab/LF/CR 与输入法的组合事件；拦截日志要设上限（方向键每按一次都会触发）。
 
 ## Agent skills
 

@@ -17,6 +17,8 @@ mod commands;         // Tauri command 实现
 mod profiles;         // profile 管理
 mod register;         // dsh 系统命令注册：检测模型/托盘选项/异步缓存（图 #169）
 mod download;         // 下载管理器（#72）：model/persist/transfer/manager/commands
+mod power;            // 防休眠（#186）：有会话在跑时阻止系统休眠
+mod shortcuts;        // 快捷键（#187）：keybindings 偏好文件读写
 
 // ── 运行时核心导入 ──
 use runtime::state::{
@@ -72,6 +74,7 @@ use commands::{
     migrate_profile, get_dsh_source, set_dsh_source, list_profile_ports, set_profile_port,
     create_profile_flow_command, migration_status, task_status, list_runtime_catalog, download_runtime,
     remove_runtime, runtime_download_status,
+    read_desktop_keybindings, write_desktop_keybindings, close_current_window,
 };
 
 // ── std/tauri 导入 ──
@@ -191,6 +194,9 @@ pub fn run() {
             test_proxy_connectivity,
             save_desktop_settings,
             get_desktop_settings_data,
+            read_desktop_keybindings,
+            write_desktop_keybindings,
+            close_current_window,
             get_notifications_state,
             set_notifications_config,
             request_notification_permission_cmd,
@@ -481,6 +487,8 @@ pub fn run() {
             tauri::async_runtime::spawn(crate::network::forwarder::start());
             state.notify_port.store(nport, Ordering::SeqCst);
             *state.notify_token.lock().unwrap() = ntoken.clone();
+            // #186：防休眠仲裁器（开关读壳设置，忙状态由宿主插件经通知桥上报）
+            crate::power::init();
             // desktop profile 不再自动补建（#95 拍板）：dsh CLI 将 desktop 保留给 Electron
             // 官方桌面版（plugin add 被拒），spawn 实例只写模板不装插件——自动化三条路全堵死。
             // 想要 desktop/任意 profile：设置里的「新建 Profile」手动建。
@@ -746,6 +754,8 @@ pub fn run() {
                 // 主实例 worker：停掉其掌管的 dsh 进程（有句柄才杀，幂等）
                 state.main_worker.stop();
                 crate::runtime::instances::remove_instance(&state.main_worker.profile());
+                // #186：清空防休眠租约（断言随进程退出释放；这里让退出路径也显式落地）
+                crate::power::release_all();
                 // #89 次窗口：逐个销毁 worker（自行清理进程）+ 摘台账
                 {
                     let mut workers = state.workers.lock().unwrap();

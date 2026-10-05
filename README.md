@@ -12,7 +12,7 @@
 
 1. **内置运行时，零前置依赖**：Node sidecar + dsh 依赖树随安装包分发，双击即用；也可随时切换到自己装的外部 `dsh`
 2. **多 profile、多窗口**：每个 profile 独立端口与实例，托盘一键开新窗 / 就地切换；手机访问经 lane 反代跟随焦点窗口
-3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、鲸鱼娘桌宠、下载管理器、侧边栏浏览器 guest 载体（#118）
+3. **桌面化体验**：插件式桌面 chrome（macOS 原生红绿灯 / Windows 自绘标题栏）、任务完成通知、**dsh 快捷键全链路可用（含桌面档 `desktop:<os>`）**、**会话运行中阻止系统休眠**、鲸鱼娘桌宠、下载管理器、侧边栏浏览器 guest 载体（#118）
 4. **国内网络友好**：rustup / cargo / npm / GitHub / NSIS 全套镜像配置与「哨兵」超时判定，Windows 无管理员工具链方案（见 [skill/](skill/) 与 [docs/](docs/)）
 
 ## 安装
@@ -77,6 +77,8 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
 
 - **桌面 chrome（插件式局部注入）**：由内置插件的 client 在标准布局内注入局部拖拽区/状态条（不禁用 stock ui-layout）——macOS 用 `titleBarStyle: Overlay` 保留原生红绿灯；Windows 用 `decorations: false` 自绘标题栏按钮；配色随主题 token
 - **托盘常驻**：关闭窗口仅隐藏，托盘左键唤起、菜单退出，拦截 Cmd+Q 防误退；托盘含「重启 dsh 服务」「切换 Profile（本窗口）」「运行时版本」「dsh 服务地址」「本地端口…」「显示/隐藏桌宠」
+- **快捷键全链路（#187）**：桌面窗口不再吞键——壳在页面里装原生键盘桥（`dshDesktop.keyboard`），dsh 的快捷键按官方 `desktop:<os>` 档派发（命令面板 / 侧边栏 / `Ctrl/Cmd+Shift+.` 开合 NodeJS 诊断面板 / 关闭窗口等），改绑偏好存 `$DSH_HOME/desktop-keybindings.json`，改动即时生效
+- **会话运行中阻止系统休眠（#186）**：桌面设置可开关（默认开）。任一窗口有会话在跑就持系统级防休眠断言（macOS `IOPMAssertion` / Windows `SetThreadExecutionState`），等待审批或等待输入不持有，会话结束 / 关窗 / 退出应用立即释放；**屏幕仍照常熄灭**
 - **任务完成通知**：监听会话「忙碌→空闲」翻转，结束时 Dock 角标 +1；窗口失焦时弹系统通知（前台不打扰），回窗口自动清零；三平台通知权限 best-effort 申请并统一落日志
 - **鲸鱼娘桌宠**：透明置顶无边框小窗（纯 CSS 动画）、拖拽移动、左键唤起主窗、右键菜单（穿透/隐藏/退出）、任务完成弹气泡、位置记忆（多屏钳位）
 - **外链策略（对齐 dsh 官方桌面语义）**：新窗请求（`window.open` / `target=_blank`）→ 系统默认浏览器（应用内不开新窗）；异源顶层导航 → 阻止；`mailto:` / `tel:` → 系统。会话内链接的路由由 dsh 自己做（侧边栏/新标签），宿主不插手
@@ -87,7 +89,7 @@ cp -r skill ~/.claude/skills/dsh-desktop-tauriapp
 
 ### 设置与维护
 
-- **设置页区块**：dsh 来源（内置/外部，切换立即接管）· dsh 服务地址（本地/远程）· Profile · Profile 端口 · 迁移 Profile · dsh 运行时（下载/切换/卸载）· 下载 · 代理设置 · **依赖状态** · 手机访问
+- **设置页区块**：dsh 来源（内置/外部，切换立即接管）· dsh 服务地址（本地/远程）· Profile · Profile 端口 · 迁移 Profile · dsh 运行时（下载/切换/卸载）· 下载 · 代理设置 · **依赖状态** · **通知** · **电源（阻止休眠）** · 手机访问
 - **依赖状态自检与一键重建**：dsh 的插件安装/卸载由内置 pnpm 执行，其 store 大版本必须与 profile 的 `node_modules` 一致；面板列出各 profile 记录的 pnpm / 内置版本 / 是否需重建（运行中禁重建），壳启动时后台检查，不一致仅弹提示、由用户手动重建（#124 起不再自动重建）
 - **诊断**：webview 控制台镜像到 `$DSH_HOME/dsh-desktop-webview.log`，应用日志在 `~/Library/Logs/com.arcreel.dsh-desktop-tauriapp/`
 
@@ -149,6 +151,7 @@ xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Relea
 
 - **任务完成通知**为 DOM 启发式（监听 `data-state` 运行中标记），分不清成功/失败/被停，拿不到标题与 token；权威信号的语义化升级见 docs/
 - **桌宠**：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常）；置顶仅 Floating 级、盖不过全屏应用；Cmd+Tab 会出现桌宠条目（`skipTaskbar` 仅 Windows 生效）
+- **桌面档快捷键**：键桥是页面内实现，被 WebView / 系统菜单先消费的组合拿不到（macOS `Cmd+W` / `Cmd+Q` 仍走系统语义）；Windows 未在本机验证（本机无 Windows 编译目标，由 CI 把关）
 - **未签名分发**：macOS 非公证包需右键打开（`xattr -cr "/Applications/DeepSeek Harness Desktop.app"` 可解）；Windows 网络下载的 exe 触发 SmartScreen
 - **安装包体积**：内置运行时（Node 24 + dsh 依赖树）使 macOS dmg 约 200 MB 量级，Windows msi 约 240 MB
 - **侧边栏浏览器**：dsh 官方按 profile 名开关（仅 `desktop` profile 默认启用）；web profile 需在自己的 `cordis.patch.yml` 里 opt-in。宿主已实现独立 webview guest 载体（v0.10.0，[#118](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/118)）：侧边栏浏览器改为同窗子 webview，不再受 macOS 上 iframe 导航被守卫取消的影响

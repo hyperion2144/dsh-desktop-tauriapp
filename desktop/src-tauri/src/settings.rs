@@ -107,6 +107,11 @@ pub struct DesktopSettings {
     /// 新进程启动时 JSC 在 async-iterator 上 SIGSEGV，证据见 `~/Library/Logs/DiagnosticReports/`）。
     /// 与布局开关不同，这一个**不重启 dsh** 即生效（客户端每次启动读环境载荷）。
     pub desktop_render_budget: Option<bool>,
+    /// 有会话在跑时阻止**系统休眠**（#186）：`false` = 关掉（屏幕该熄还是熄、系统照常睡）。
+    /// 缺省 **true**（用户拍板默认开）。语义边界：只挡「空闲系统休眠」，不挡屏幕熄灭、
+    /// 不挡合盖（macOS 断言做不到）；等审批 / 等用户输入不算「在跑」（宿主插件上报口径）。
+    #[serde(default)]
+    pub prevent_sleep: Option<bool>,
     /// 每 profile 启动端口覆盖（#86）：键为 profile 名。web 缺省 3080、desktop 缺省 3081，
     /// 其余 profile 首次 spawn 时按公式分配并持久化到这里，保证后续启动稳定。
     pub profile_ports: Option<std::collections::BTreeMap<String, u16>>,
@@ -456,6 +461,11 @@ pub fn configured_desktop_render_budget() -> bool {
     load_desktop_settings().desktop_render_budget.unwrap_or(true)
 }
 
+/// 有会话在跑时是否阻止系统休眠（#186）：缺省 **true**（关掉才返回 false）。
+pub fn configured_prevent_sleep() -> bool {
+    load_desktop_settings().prevent_sleep.unwrap_or(true)
+}
+
 /// 手机端是否改用桌面布局（#147 路线 A）：缺省 false（保持移动布局，行为不变）。
 pub fn configured_desktop_layout_on_phones() -> bool {
     load_desktop_settings().desktop_layout_on_phones.unwrap_or(false)
@@ -511,6 +521,8 @@ mod tests {
       mux_heartbeat_ms: Some(30000),
       desktop_layout_on_phones: Some(true),
       // 新增字段必须补进测试初始化（否则编译失败——E0063 就是这么被抓出来的）。
+      // #186：防休眠开关走同一条 serde 往返（这里给 Some(false)，覆盖“显式关”的分支）。
+      prevent_sleep: Some(false),
       // 这里给 Some(false) 以**同时覆盖“显式关”的分支**（缺省 true 的断言在下面单独加）。
       desktop_render_budget: Some(false),
       profile_ports: Some([("web".into(), 3080), ("desktop".into(), 3081)].into_iter().collect()),
@@ -549,6 +561,8 @@ mod tests {
     assert_eq!(back.no_proxy.as_deref(), Some("*.corp"));
     assert_eq!(back.proxy_user.as_deref(), Some("alice"));
     assert_eq!(back.proxy_pass.as_deref(), Some("s3cret"));
+    // #186：防休眠开关随序列化往返不丢
+    assert_eq!(back.prevent_sleep, Some(false));
   }
 
   #[test]

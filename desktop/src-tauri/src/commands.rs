@@ -602,7 +602,10 @@ pub(crate) fn save_desktop_settings(patch: serde_json::Value) -> Result<(), Stri
                 .map_err(|e| format!("合并后的设置不合法：{e}"))?;
         }
     }
-    crate::settings::save_desktop_settings(&current)
+    crate::settings::save_desktop_settings(&current)?;
+    // #186：防休眠开关即时生效（关掉 → 1s 内释放断言；打开且有会话在跑 → 立即持有）。
+    crate::power::set_enabled(current.prevent_sleep.unwrap_or(true));
+    Ok(())
 }
 /// 桌面设置面板：一次性读取服务地址/端口/Profile 数据。
 #[tauri::command]
@@ -618,9 +621,37 @@ pub(crate) fn get_desktop_settings_data() -> serde_json::Value {
         // #147/#144 壳键：设置面板每次挂载据此回填（只写不回填的话，关掉再进勾选就“丢”了）
         "mux_heartbeat_ms": settings.mux_heartbeat_ms,
         "desktop_layout_on_phones": settings.desktop_layout_on_phones,
+        "prevent_sleep": settings.prevent_sleep,
+        // 顺手补漏：这个键面板一直在读（desktop_render_budget），命令却从没回吐过。
+        "desktop_render_budget": settings.desktop_render_budget,
         "port": configured_port(),
         "profiles": profiles,
     })
+}
+
+/// 读取桌面档快捷键偏好文件的原始文本（#187）。
+/// 文件不存在回 null：页面侧适配器按「用默认绑定」处理（dsh 会补默认键位）。
+#[tauri::command]
+pub(crate) fn read_desktop_keybindings() -> Result<Option<String>, String> {
+    crate::shortcuts::read_keybindings()
+}
+
+/// 写回桌面档快捷键偏好文件（#187）。
+/// 内容由页面侧适配器（src/client/platform-keyboard.ts）解析与序列化，
+/// Rust 只做尺寸上限 + 原子写，不解析 JSON（未知字段/未来 schemaVersion 原样保留）。
+#[tauri::command]
+pub(crate) fn write_desktop_keybindings(raw: String) -> Result<(), String> {
+    crate::shortcuts::write_keybindings(&raw)
+}
+
+/// 关闭（主窗为「隐藏」）发起调用的那个窗口（#187）。
+///
+/// dsh 侧边栏的「关闭窗口」快捷键（`ctx.shortcuts.closeWindow()`）走这里；
+/// 语义与自绘标题栏的关闭按钮一致：主窗只是隐藏、进程与托盘常驻（见 lib.rs 的
+/// CloseRequested 处理），次窗按 profile 窗口的既有关闭路径处理。
+#[tauri::command]
+pub(crate) fn close_current_window(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.close().map_err(|e| format!("关闭窗口失败：{e}"))
 }
 
 /// 新增 dsh 服务地址（设置面板表单提交，无弹窗）。返回归一化后的地址；重启后生效。
