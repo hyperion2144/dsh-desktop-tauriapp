@@ -63,3 +63,13 @@
 - **Evidence Source:** `.gitmodules`、`mobile/dsh-mobile-nav/package.json`（dsh-web-mobile 3.0.3）、`desktop/src-tauri/build.rs:30-38`、`AGENTS.md`（Project memory 段）
 - **Verified By:** repository-audit
 - **Affected typed relationships:** none
+
+### 2026-10-05 — Update（桌面档快捷键桥知识入册）
+
+- **Path:** `AGENTS.md`
+- **Operation:** Update
+- **Reason:** #187 落地 desktop 档快捷键桥：`src/client/` 清单补 `platform-keyboard.ts`（原生键 → dsh `desktop:<os>` 档），并新增血泪坑 11——dsh `detectEnvironment()` 只看 `documentElement.dataset.platform` 属性**是否存在**判定桌面档，而 dsh 自己的 mac 几何 / 菜单配色只认字面量 `darwin` → 载体必须写**平台名**（macos/win32/linux），否则连带走 mac 专用几何、与自绘 chrome 打架；键桥只能在页面内实现（dsh 不在本仓 node_modules，其 `shortcuts/protocol.js` 是 ESM）；适配器 `get/edit` 只在 `ShortcutsService` 构造期取一次，载体须同步给桩，否则快捷键面板变只读。
+- **Confidence:** High
+- **Evidence Source:** `desktop/src-tauri/src/ui/browser_guests/mod.rs`（`DESKTOP_CARRIER_INIT_SCRIPT` + `PLATFORM_MARKER`）、`src/client/platform-keyboard.ts`、`desktop/src-tauri/src/shortcuts.rs`、`dsh-client-shortcuts/lib/client.js:1342-1349` 与 `:2479-2500`、`cargo test --lib`（171 passed）、`node scripts/test-client.mjs`
+- **Verified By:** ticket #187（实现 + crate/client 级验收）
+- **Affected typed relationships:** none

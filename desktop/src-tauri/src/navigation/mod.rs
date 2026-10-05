@@ -41,7 +41,7 @@ pub(crate) fn navigate_main(app: &AppHandle, url: &str, nport: u16, ntoken: &str
             log::warn!("窗口导航失败：{e}");
             return;
         }
-        inject_task_notifier(app.clone(), nport, ntoken);
+        inject_task_notifier(app.clone(), "main", nport, ntoken);
     }
     log::info!("本地服务就绪，已导航到 {url}");
     set_status(app, STATUS_READY, "运行中");
@@ -297,7 +297,7 @@ pub(crate) async fn wait_ready_and_navigate(app: AppHandle, epoch: u64, nport: u
             let url = format!("http://127.0.0.1:{port}/");
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.eval(&format!("window.location.replace({url:?});"));
-                inject_task_notifier(app.clone(), nport, &ntoken);
+                inject_task_notifier(app.clone(), "main", nport, &ntoken);
             }
             log::info!("本地服务就绪，已导航到 {url}");
             set_status(&app, STATUS_READY, "运行中");
@@ -320,7 +320,7 @@ pub(crate) async fn wait_ready_and_navigate(app: AppHandle, epoch: u64, nport: u
             let url = format!("http://127.0.0.1:{port}/?token={web_token}");
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.eval(&format!("window.location.replace({url:?});"));
-                inject_task_notifier(app.clone(), nport, &ntoken);
+                inject_task_notifier(app.clone(), "main", nport, &ntoken);
             }
             log::info!("本地服务就绪，已导航到 {url}");
             set_status(&app, STATUS_READY, "运行中");

@@ -439,7 +439,7 @@ async fn wait_ready_and_attach(
             let url = format!("http://127.0.0.1:{port}/?token={token}");
             if let Some(w) = app.get_webview_window(&label) {
                 let _ = w.eval(&format!("window.location.replace({url:?});"));
-                inject_task_notifier(app.clone(), nport, &ntoken);
+                inject_task_notifier(app.clone(), &label, nport, &ntoken);
             }
             return;
         }
@@ -454,7 +454,7 @@ async fn wait_ready_and_attach(
         if let Some(w) = app.get_webview_window(&label) {
             let url = format!("http://127.0.0.1:{port}/");
             let _ = w.eval(&format!("window.location.replace({url:?});"));
-            inject_task_notifier(app.clone(), nport, &ntoken);
+            inject_task_notifier(app.clone(), &label, nport, &ntoken);
             let _ = w.set_focus();
         }
         log::info!("[multiwin:{profile}] 窗口已接入（{host_port}）");

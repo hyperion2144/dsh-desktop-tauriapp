@@ -61,6 +61,8 @@ interface DesktopData {
   desktop_layout_on_phones?: boolean | null
   /** #147 路线 B：桌面是否启用视觉窗口化（缺省 true；关掉可排除它带来的观感差异） */
   desktop_render_budget?: boolean | null
+  /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
+  prevent_sleep?: boolean | null
 }
 
 interface DshSourceState {
@@ -322,11 +324,15 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
   const [desktopRenderBudget, setDesktopRenderBudget] = useState(true)
+  // #186：有会话在跑时阻止系统休眠（缺省开）
+  const [preventSleep, setPreventSleep] = useState(true)
+  const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
 
   // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
   useEffect(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
     setDesktopRenderBudget(desktop.desktop_render_budget !== false)
+    setPreventSleep(desktop.prevent_sleep !== false)
     const hb = desktop.mux_heartbeat_ms
     setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
   }, [desktop])
@@ -486,6 +492,7 @@ function DesktopSettingsPanel(): React.ReactElement {
           mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
           desktop_render_budget: d.desktop_render_budget ?? null,
+          prevent_sleep: d.prevent_sleep ?? null,
         })
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
         if (d.profiles.length > 0) {
@@ -728,6 +735,20 @@ function DesktopSettingsPanel(): React.ReactElement {
           : '已保存：桌面关闭视觉窗口化，下次启动生效。'
       )
     )
+  }
+
+  /** #186：防休眠开关（即时保存；壳侧状态机立刻生效，不需要重启）。 */
+  const handleTogglePreventSleep = (next: boolean): void => {
+    setPreventSleep(next)
+    void nsSave({ prevent_sleep: next })
+      .then(() =>
+        setPreventSleepNote(
+          next
+            ? '已保存：有会话在跑时阻止系统休眠（屏幕仍会照常熄灭）。'
+            : '已保存：不再阻止系统休眠。'
+        )
+      )
+      .catch((e) => setPreventSleepNote(`保存失败：${String(e)}`))
   }
 
   /** #147 路线 A：保存「手机端改用桌面布局」开关。 */
@@ -1543,6 +1564,25 @@ function DesktopSettingsPanel(): React.ReactElement {
           相同的桌面布局：明显更流畅，代价是排版更挤（可横屏缓解）。不勾选 = 移动布局。改动重启 dsh 生效。
         </div>
 
+      {/* ── 电源（#186）── */}
+      <SectionBox title="电源">
+        <div style={ROW_STYLE}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              data-desktop-settings="prevent-sleep"
+              checked={preventSleep}
+              onChange={(e) => handleTogglePreventSleep(e.target.checked)}
+            />
+            有会话在跑时阻止系统休眠（缺省开）
+          </label>
+        </div>
+        {preventSleepNote && <div style={NOTE_STYLE}>{preventSleepNote}</div>}
+        <div style={NOTE_STYLE}>
+          熄屏后若还有会话在跑，壳会持有系统防休眠断言（macOS 走 IOKit、Windows 走线程执行状态），
+          直到会话跑完、dsh 实例停止或退出壳。屏幕该关还是照关，只是不让整机睡过去；合盖仍然会睡。改动立即生效。
+        </div>
+      </SectionBox>
       {/* ── 代理设置 ── */}
       <SectionBox title="代理设置">
         <div style={LABEL_STYLE}>代理模式</div>

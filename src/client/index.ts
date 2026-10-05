@@ -8,6 +8,8 @@ import { installMobileRenderBudget, setRenderBudgetForDesktop } from './mobile-r
 import { registerDesktopSettings } from './desktop-settings.tsx'
 import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
+import { installDesktopPlatformBridge } from './platform-keyboard.ts'
+import { installComposerInputGuard } from './composer-input-guard.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './environment.ts'
@@ -49,7 +51,9 @@ function installWebviewConsoleMirror(): void {
     try {
       const msg = args
         .map((a) => {
-          if (a instanceof Error) return a.stack || a.message
+          // JSC（WKWebView）的 err.stack 只有栈帧（func@url:line:col），不带 message——必须单独
+          // 带上 message，否则页面侧抛出的错误在日志里只剩两行栈帧、丢掉唯一的原因文本（#188 实测）。
+          if (a instanceof Error) return a.stack ? `${a.message}\n${a.stack}` : a.message
           if (typeof a === 'object') {
             try { return JSON.stringify(a) } catch { return String(a) }
           }
@@ -71,8 +75,12 @@ function installWebviewConsoleMirror(): void {
     }
   }
   window.addEventListener('error', (e) => {
-    const msg = e.error?.stack || e.message || 'Uncaught error'
-    fwd('error', [msg])
+    // 同上：onerror 事件的 error 也要 message + stack 一起报，否则只剩栈帧。
+    const err = e.error as Error | undefined
+    const text = err?.message
+      ? `${err.message}${err.stack ? `\n${err.stack}` : ''}`
+      : err?.stack || e.message || 'Uncaught error'
+    fwd('error', [text])
   })
   window.addEventListener('unhandledrejection', (e) => {
     const r = e.reason as { message?: string; stack?: string } | undefined
@@ -106,35 +114,59 @@ function installNoRubberBand(): void {
  * @param ctx - browser Cordis context.
  */
 export function apply(ctx: ClientContext): void {
-  // 最早装：把 console.* 镜像到 ~/.dsh/dsh-desktop-webview.log（开发期排查前端 bug 必备）。
-  // 即使非 advanced 模式（普通浏览器直访 dsh）也装，便于离线调试。
-  installWebviewConsoleMirror()
-  // WebView 橡皮筋滚动对齐浏览器（禁 rubber-band）
-  installNoRubberBand()
-  // 移动端渲染预算（#147 路线 B）：窄屏 + 触摸时给会话滚动容器做视觉窗口化；
-  // 只在本仓做，不动 dsh-mobile-nav 子模块；命中不了容器则整体 no-op。
-  const renderBudgetEnv = requestDesktopClientEnvironment()
-  // 壳下发开关优先；未下发（纯浏览器/查询失败）时保持缺省开。
-  void renderBudgetEnv.then((environment) => {
-    if (environment?.renderBudget === false) setRenderBudgetForDesktop(false)
-    installMobileRenderBudget()
-  })
-  // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
-  registerDownloadsTab(ctx)
-  // blob:/data: 下载拦截转 IPC（纯浏览器不装）
-  installDownloadInterceptor()
-  // 侧边栏浏览器 guest 桥（#118/#134）：仅壳内本地窗口（dshDesktop 标记存在）安装，
-  // 纯浏览器无副作用
-  installDesktopBrowserBridge()
-  registerDesktopSettings(ctx)
-  // 桌面通知设置 tab（#142）：权限卡/总开关/免打扰/12 场景开关与音效
-  registerNotificationsTab(ctx)
-  // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
-  // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；
-  // 模式/平台本就是壳的运行状态，由壳下发。纯浏览器无 IPC → 不激活（原语义不变）。
-  void requestDesktopClientEnvironment()
-    .then((environment) => {
-      if (environment?.mode === 'advanced') applyAdvancedShell(ctx, environment)
+  // cordis 把 apply 抛出的异常记成 entry 的 failed 状态，而 dsh 的 boot 校验只打印
+  // 「<名字>: failed」、不打印原因——所以这里逐步标注，抛出前先把原因写进控制台。
+  let step = '未开始'
+  try {
+    step = 'console 镜像'
+    // 最早装：把 console.* 镜像到 ~/.dsh/dsh-desktop-webview.log（开发期排查前端 bug 必备）。
+    // 即使非 advanced 模式（普通浏览器直访 dsh）也装，便于离线调试。
+    installWebviewConsoleMirror()
+    step = '橡皮筋滚动'
+    // WebView 橡皮筋滚动对齐浏览器（禁 rubber-band）
+    installNoRubberBand()
+    step = '输入框控制字符守护'
+    // 输入框控制字符守护（#188）：capture 阶段拦下带控制字符的 beforeinput。
+    installComposerInputGuard()
+    step = '移动端渲染预算'
+    // 移动端渲染预算（#147 路线 B）：窄屏 + 触摸时给会话滚动容器做视觉窗口化；
+    // 只在本仓做，不动 dsh-mobile-nav 子模块；命中不了容器则整体 no-op。
+    const renderBudgetEnv = requestDesktopClientEnvironment()
+    // 壳下发开关优先；未下发（纯浏览器/查询失败）时保持缺省开。
+    void renderBudgetEnv.then((environment) => {
+      if (environment?.renderBudget === false) setRenderBudgetForDesktop(false)
+      installMobileRenderBudget()
     })
-    .catch(() => {})
+    step = '下载管理器 tab'
+    // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
+    registerDownloadsTab(ctx)
+    step = '下载拦截'
+    // blob:/data: 下载拦截转 IPC（纯浏览器不装）
+    installDownloadInterceptor()
+    step = '浏览器 guest 桥'
+    // 侧边栏浏览器 guest 桥（#118/#134）：仅壳内本地窗口（dshDesktop 标记存在）安装，
+    // 纯浏览器无副作用
+    installDesktopBrowserBridge()
+    step = '桌面档快捷键桥'
+    // 桌面档（desktop:<os>）快捷键桥（#187）：把 dsh 的 desktop 档键盘输入与 keybindings
+    // 偏好接到壳上；只在壳注入了 dshDesktop.keyboard 的本地窗口生效（远程/纯浏览器不装）
+    installDesktopPlatformBridge(ctx)
+    step = '桌面设置 tab'
+    registerDesktopSettings(ctx)
+    step = '通知设置 tab'
+    // 桌面通知设置 tab（#142）：权限卡/总开关/免打扰/12 场景开关与音效
+    registerNotificationsTab(ctx)
+    step = '高级布局'
+    // 桌面 chrome 激活条件 = 壳经 IPC 下发的环境为 advanced。
+    // 不再用 URL 标记：token 交换的 303 会剥掉 query，标记无法与 token 同跳；
+    // 模式/平台本就是壳的运行状态，由壳下发。纯浏览器无 IPC → 不激活（原语义不变）。
+    void requestDesktopClientEnvironment()
+      .then((environment) => {
+        if (environment?.mode === 'advanced') applyAdvancedShell(ctx, environment)
+      })
+      .catch(() => {})
+  } catch (error) {
+    console.error(`[dsh-desktop-tauriapp] 插件激活失败于「${step}」`, error)
+    throw error
+  }
 }

@@ -394,6 +394,8 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
+    // #186：把实例身份交给宿主插件——busy-state 上报要带 profile，壳侧按它记账 / 清理。
+    cmd.env("DSH_DESKTOP_PROFILE", profile);
     // dsh 原生事件桥（#142）：把通知口交给宿主事件脚本（session/event → /notify）；
     // 通知服务器未启动（port=0）时不注入，宿主脚本自行降级。
     let nport = app.state::<crate::runtime::state::DshState>().notify_port.load(std::sync::atomic::Ordering::SeqCst);

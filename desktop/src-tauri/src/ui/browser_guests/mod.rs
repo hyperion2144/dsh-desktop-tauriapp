@@ -535,6 +535,24 @@ pub(crate) fn browser_guest_state(
 /// 载体脚本里的 origin 判定占位符：注入时换成真实判定（占位符让 JS 本体仍然是 `const`
 /// 字符串，不必把满屏的 `{`/`}` 改成 `{{`/`}}`）。
 const SHELL_ORIGIN_TEST: &str = "__DSH_SHELL_ORIGIN_TEST__";
+/// 载体脚本里的平台名占位符（#187）。
+///
+/// dsh 只判断 `document.documentElement.dataset.platform` **是否存在**来选 desktop 运行时档，
+/// 而它自己那几处 Electron 几何/菜单底色分支认的是字面量 `data-platform="darwin"`
+/// （ui-primitives / ui-layout / ui-sidebar / ui-theme）——所以这里写平台名（macos/win32/linux）：
+/// 既进 desktop 档，又不触发为 Electron 准备的布局变体。
+const PLATFORM_MARKER: &str = "__DSH_PLATFORM_NAME__";
+
+/// 本机平台名（写进 `data-platform` 的值，见 [`PLATFORM_MARKER`]）。
+fn platform_marker() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "win32"
+    } else {
+        "linux"
+    }
+}
 
 /// 载体初始化脚本（真正注入给宿主页的那一份）。
 ///
@@ -544,7 +562,9 @@ const SHELL_ORIGIN_TEST: &str = "__DSH_SHELL_ORIGIN_TEST__";
 /// `globalThis.dshDesktop`，dsh 就回落 iframe 浏览器模式（macOS 上子框架导航被守卫取消，
 /// 侧边栏永远停在「正在打开…」）。旧的 loopback 形态一并保留，便于回滚与旧窗口。
 pub(crate) fn desktop_carrier_init_script() -> String {
-    DESKTOP_CARRIER_INIT_SCRIPT.replace(SHELL_ORIGIN_TEST, &origin_test())
+    DESKTOP_CARRIER_INIT_SCRIPT
+        .replace(SHELL_ORIGIN_TEST, &origin_test())
+        .replace(PLATFORM_MARKER, platform_marker())
 }
 
 /// 生成 origin 判定表达式（JS 函数字面量）。
@@ -567,12 +587,50 @@ fn origin_test() -> String {
 /// 仅壳内 dsh 页面安装：dsh 的 carrier 探测读取 `globalThis.dshDesktop`，存在且
 /// protocolVersion===1 即选 guest 模式；方法体惰性转发到 `__dshShellBridgeImpl`（由壳 client
 /// 插件稍后安装——dsh 只在用户首次打开浏览器标签时才调用桥方法，时序天然安全）。
-/// 注入时用 [`desktop_carrier_init_script`] 把占位符换成真实判定。
+///
+/// #187 起同一载体还负责两件事：
+/// - 写 `data-platform` 平台名标记（让 dsh 选 desktop 运行时档，见 [`PLATFORM_MARKER`]）；
+/// - 挂 `dshDesktop.keyboard`（DesktopKeyboardApi）与 `dshDesktop.shortcuts`
+///   （DesktopShortcutsApi）的惰性转发桩——dsh 的 shortcuts 服务在**构造期**就会取用它们，
+///   而真实实现（`__dshShellKeyboardImpl`，见 src/client/platform-keyboard.ts）要等 client
+///   插件装载，所以桩必须自己轮询等待实现出现（最长 30s，超时按「无桥」降级：
+///   偏好只读默认绑定、按键不吞不派发，页面不炸）。
+///
+/// 注入时用 [`desktop_carrier_init_script`] 把占位符换成真实判定与平台名。
 const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
   'use strict';
   var isShellPage = __DSH_SHELL_ORIGIN_TEST__;
   if (!isShellPage(location.origin) || globalThis.dshDesktop) return;
   function impl() { return globalThis.__dshShellBridgeImpl; }
+  // #187：desktop 档键盘桥 / 快捷键偏好桥的真实实现（client 插件安装）。
+  function keyboardImpl() { return globalThis.__dshShellKeyboardImpl; }
+  // 轮询等待实现出现：dsh 构造 shortcuts 服务时（早于/晚于插件装载都可能）取的就是这两个对象。
+  function whenKeyboard(waited) {
+    return new Promise(function (resolve, reject) {
+      var i = keyboardImpl();
+      if (i) { resolve(i); return; }
+      if (waited >= 30000) { reject(new Error('keyboard-bridge-not-ready')); return; }
+      setTimeout(function () { resolve(whenKeyboard(waited + 100)); }, 100);
+    });
+  }
+  function forward(method) {
+    return function () {
+      var args = Array.prototype.slice.call(arguments);
+      return whenKeyboard(0).then(function (i) { return i[method].apply(i, args); });
+    };
+  }
+  function forwardSubscribe(method, listener) {
+    var off = null;
+    var cancelled = false;
+    whenKeyboard(0).then(function (i) {
+      if (cancelled) return;
+      off = i[method](listener);
+    }, function () { /* 实现始终没出现：订阅为空，dsh 保持默认绑定 */ });
+    return function () {
+      cancelled = true;
+      if (typeof off === 'function') off();
+    };
+  }
   // 宽限等待：client 插件（bridge 实现）在插件装载期可能尚未就绪；轮询至多 4s。
   // 升级期残留旧插件（壳新、页面 client 旧）时超时后干净报错而非立即炸。
   function whenReady(op, arg) {
@@ -587,6 +645,13 @@ const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
       })();
     });
   }
+  // 平台名标记（见 PLATFORM_MARKER 注释）：document-start 时 documentElement 可能还没建好，
+  // 带一次重试；dsh 读这个标记是在页面脚本阶段，晚于本脚本。
+  var markPlatform = function () {
+    if (!document.documentElement) { setTimeout(markPlatform, 0); return; }
+    document.documentElement.dataset.platform = '__DSH_PLATFORM_NAME__';
+  };
+  markPlatform();
   globalThis.dshDesktop = {
     protocolVersion: 1,
     browser: {
@@ -596,6 +661,18 @@ const DESKTOP_CARRIER_INIT_SCRIPT: &str = r#"(function () {
         var i = impl();
         return i ? i.onOpenRequested(lease, listener) : function () {};
       }
+    },
+    // DesktopKeyboardApi：核验过的原生输入 + 关窗（配置仍是最新时才关）
+    keyboard: {
+      subscribe: function (listener) { return forwardSubscribe('subscribeInput', listener); },
+      closeWindow: forward('closeWindow')
+    },
+    // DesktopShortcutsApi：keybindings 偏好读写（落 $DSH_HOME/desktop-keybindings.json）
+    shortcuts: {
+      get: forward('get'),
+      edit: forward('edit'),
+      subscribe: function (listener) { return forwardSubscribe('subscribeConfig', listener); },
+      recording: forward('recording')
     }
   };
 })();

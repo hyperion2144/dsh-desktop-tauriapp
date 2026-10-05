@@ -106,8 +106,11 @@ impl DshWorker {
 
     /// 停掉当前掌管的 dsh 进程（任何状态：运行中 / 启动中 / 刚拉起）。
     pub(crate) fn stop(&self) {
+        let profile = self.profile();
+        // #186：实例一停就摘掉它的防休眠租约——进程没了就不会再有 busy 上报，
+        // 不摘的话断言会一直持有到壳退出（「会话结束 / 关窗不留残留」的验收项）。
+        crate::power::forget_profile(&profile);
         if let Some(mut child) = self.child.lock().unwrap().take() {
-            let profile = self.profile();
             log::info!("[worker:{profile}] 停掉当前 dsh 进程（PID {}）", child.id());
             let _ = child.kill();
             let _ = child.wait();
