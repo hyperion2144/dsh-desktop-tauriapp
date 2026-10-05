@@ -285,6 +285,34 @@ pub(crate) async fn ui_input_confirm(
     Ok(())
 }
 
+
+/// 状态条「退出」（#180）：关本窗 UI + 销毁本窗绑定实例。
+/// 主窗 = 停主 worker 当前 profile 并隐藏主窗（红叉仍是隐藏，此为真退出，两者并存）；
+/// 次窗 = 停该 profile 实例并关窗。非本壳实例（复用外部/远程/已停）一律拒绝——
+/// 与状态条展示门控（仅 status=2）互为备份（Q10）。
+#[tauri::command]
+pub(crate) fn exit_window_instance(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let label = window.label().to_string();
+    let profile = if label == "main" {
+        crate::settings::configured_profile()
+    } else if let Some(p) = label.strip_prefix("profile-") {
+        p.to_string()
+    } else {
+        return Err(format!("未知窗口：{label}"));
+    };
+    let port = crate::settings::port_for_profile(&profile);
+    let owned = label != "main"
+        || crate::runtime::builtin::configured_dsh_mode()
+            != crate::runtime::builtin::DshMode::External;
+    if !owned || !crate::process::lifecycle::port_open(port) {
+        return Err("当前窗口的 dsh 不是本壳实例（复用外部/远程/已停止），不能从这里退出".into());
+    }
+    crate::ui::multiwin::exit_profile_instance(&app, &profile);
+    Ok(())
+}
 /// 打开一个内联输入弹窗（主窗口任意页面通用），返回用户输入（取消/超时/空输入 → None）。
 /// flow 用于区分并发场景；最多等待 3 分钟。
 pub(crate) async fn prompt_input(

@@ -120,6 +120,8 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   let attempts = 0
   let mountTimer = 0
   let statusTimer = 0
+  let currentStatus = -1
+  let exitMode: '' | 'hover' = ''
   let resizeObserver: ResizeObserver | null = null
   let mutationObserver: MutationObserver | null = null
 
@@ -147,6 +149,8 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       .then((value) => {
         const s = (value as { status?: number }).status
         if (typeof s !== 'number') return
+        currentStatus = s
+        if (exitMode !== '') return // 退出交互态：不覆盖按钮/文案
         const dot = bar.querySelector('.dshDesktopStatusDot') as HTMLElement | null
         const text = bar.querySelector('.dshDesktopStatusText') as HTMLElement | null
         const label = STATUS_TEXT[s] ?? `状态 ${s}`
@@ -156,6 +160,98 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       })
       .catch(() => {})
   }
+
+  // #180 反馈定稿：点击后弹独立确认弹窗（不在状态条内继续选择）；失败信息可见。
+  const setExitMode = (mode: '' | 'hover') => {
+    exitMode = mode
+    const text = bar.querySelector('.dshDesktopStatusText') as HTMLElement | null
+    if (mode === '') {
+      delete bar.dataset.dshExitMode
+      if (text !== null) text.textContent = STATUS_TEXT[currentStatus] ?? `状态 ${currentStatus}`
+      bar.title = `dsh：${STATUS_TEXT[currentStatus] ?? ''}`
+      refreshStatus()
+      return
+    }
+    bar.dataset.dshExitMode = 'hover'
+    if (text !== null) text.textContent = '退出'
+    bar.title = '完全退出本窗口（关闭窗口 + 停止实例）'
+  }
+
+  const openExitConfirm = () => {
+    document.getElementById('dshDesktopExitConfirm')?.remove()
+    const overlay = document.createElement('div')
+    overlay.id = 'dshDesktopExitConfirm'
+    overlay.style.cssText =
+      'position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;'
+    const card = document.createElement('div')
+    card.style.cssText =
+      'background:var(--dsw-alias-bg-layer-1,#1e1e1e);border:1px solid var(--dsw-alias-border-l2,#444);border-radius:12px;padding:18px 20px;min-width:320px;max-width:80vw;box-shadow:0 12px 40px rgba(0,0,0,0.4);color:var(--dsw-alias-label-primary,#eee);'
+    const titleEl = document.createElement('div')
+    titleEl.textContent = '完全退出本窗口'
+    titleEl.style.cssText = 'font-size:14px;font-weight:600;margin-bottom:10px;'
+    const bodyEl = document.createElement('div')
+    bodyEl.textContent = '将关闭本窗口并停止其 dsh 实例（运行中的会话进程一并停止）。确认继续？'
+    bodyEl.style.cssText = 'font-size:12.5px;line-height:1.6;color:var(--dsw-alias-label-secondary,#bbb);'
+    const row = document.createElement('div')
+    row.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:14px;'
+    const close = () => {
+      document.removeEventListener('keydown', onKey)
+      overlay.remove()
+      setExitMode('')
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close()
+    }
+    const mkBtn = (label: string, primary: boolean) => {
+      const btn = document.createElement('button')
+      btn.textContent = label
+      btn.style.cssText = primary
+        ? 'padding:6px 14px;border-radius:8px;border:none;background:#dc2626;color:#fff;font-size:13px;cursor:default;'
+        : 'padding:6px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2,#444);background:transparent;color:var(--dsw-alias-label-primary,#eee);font-size:13px;cursor:default;'
+      btn.addEventListener('click', () => {
+        if (!primary) {
+          close()
+          return
+        }
+        const invoke = tauriInvoke()
+        if (!invoke) {
+          close()
+          return
+        }
+        btn.disabled = true
+        void invoke('exit_window_instance', {})
+          .then(() => close())
+          .catch((err) => {
+            // #180 反馈：失败必须可见（此前静默恢复导致「没退出」无从排查）
+            bodyEl.textContent = `退出失败：${String(err)}`
+            bodyEl.style.color = '#ef4444'
+            btn.disabled = false
+          })
+      })
+      return btn
+    }
+    row.appendChild(mkBtn('取消', false))
+    row.appendChild(mkBtn('确认退出', true))
+    card.appendChild(titleEl)
+    card.appendChild(bodyEl)
+    card.appendChild(row)
+    overlay.appendChild(card)
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) close()
+    })
+    document.addEventListener('keydown', onKey)
+    document.body.appendChild(overlay)
+  }
+  bar.addEventListener('mouseenter', () => {
+    if (currentStatus === 2 && exitMode === '') setExitMode('hover')
+  })
+  bar.addEventListener('mouseleave', () => {
+    if (exitMode === 'hover') setExitMode('')
+  })
+  bar.addEventListener('click', () => {
+    if (exitMode !== 'hover' || currentStatus !== 2) return
+    openExitConfirm()
+  })
   refreshStatus()
   statusTimer = window.setInterval(refreshStatus, 5000)
 

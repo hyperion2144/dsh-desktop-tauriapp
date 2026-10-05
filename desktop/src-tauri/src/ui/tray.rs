@@ -28,6 +28,16 @@ static RUNTIME_CATALOG: std::sync::Mutex<Option<Vec<(String, String)>>> =
 /// 按当前接入模式构建托盘菜单（含「切换模式」项，标签显示当前模式）。
 pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let advanced = app.state::<DshState>().mode.load(Ordering::SeqCst) == MODE_ADVANCED;
+    // #181 反馈：聚焦中的 profile（事件驱动记录，main→激活 profile）——● 聚焦标记的数据源
+    let focused_label = crate::ui::multiwin::focused_window_label(app);
+    let focused_profile = if focused_label == "main" {
+        crate::settings::configured_profile()
+    } else {
+        focused_label
+            .strip_prefix("profile-")
+            .unwrap_or(&focused_label)
+            .to_string()
+    };
     let toggle_label = if advanced {
         "切换为兼容模式（标准布局）"
     } else {
@@ -40,17 +50,35 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     for info in crate::profiles::scan_profiles() {
         let port = port_for_profile(&info.name);
         let running = crate::process::lifecycle::port_open(port);
-        let id = format!("open-profile-{}", info.name);
-        // ● = 主 worker 当前管理的 profile（主窗正在跑的）；运行中用文字后缀
+        // #179 反馈定稿（三级）：PROFILE 窗口 → <profile> → 聚焦窗口 / 退出（停止实例）。
+        let open_id = format!("open-profile-{}", info.name);
         let is_current = info.name == app.state::<DshState>().main_worker.profile();
-        let text = if is_current {
-            format!("● {} · {}（当前）", info.name, port)
-        } else if running {
-            format!("{} · {}（运行中·点击聚焦）", info.name, port)
+        let exitable = running
+            && !(info.name == configured_profile()
+                && crate::runtime::builtin::configured_dsh_mode() == DshMode::External);
+        if !running {
+            sub = sub.text(&open_id, &format!("在新窗口打开 {}", info.name));
+            continue;
+        }
+        // #181 反馈：● 改标「聚焦中」的 profile（此前 ● 标主 worker 的 profile，被误读为当前窗口）
+        let head = if info.name == focused_profile {
+            format!("● {} · {}（聚焦中）", info.name, port)
         } else {
-            format!("在新窗口打开 {}", info.name)
+            format!("{} · {}（运行中）", info.name, port)
         };
-        sub = sub.text(&id, &text);
+        let mut psub = tauri::menu::SubmenuBuilder::with_id(
+            app,
+            &format!("profile-menu-{}", info.name),
+            &head,
+        )
+        .text(&open_id, "聚焦窗口")
+        .separator()
+        .text(
+            &format!("exit-profile-{}", info.name),
+            "退出（停止实例）",
+        )
+        .build()?;
+        sub = sub.item(&psub);
     }
     let profile_sub = sub
         .text("new-profile", "新建 Profile…")
@@ -63,14 +91,17 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         let port = port_for_profile(&info.name);
         let running = crate::process::lifecycle::port_open(port);
         let id = format!("switch-profile-{}", info.name);
-        // ● = 主 worker 当前管理的 profile（主窗正在跑的）；运行中用文字后缀
+        // #181 反馈：● 改标「聚焦中」的 profile（本窗切换的作用对象一目了然）
+        let is_focused = info.name == focused_profile;
         let is_current = info.name == app.state::<DshState>().main_worker.profile();
-        let text = if is_current {
-            format!("● {} · {}（当前）", info.name, port)
+        let text = if is_focused {
+            format!("● {}（聚焦中）", info.name)
+        } else if is_current {
+            format!("○ {} · {}（当前主窗）", info.name, port)
         } else if running {
-            format!("{} · {}（运行中）", info.name, port)
+            format!("○ {} · {}（运行中）", info.name, port)
         } else {
-            format!("{} · {}", info.name, port)
+            format!("○ {}", info.name)
         };
         ssub = ssub.text(&id, &text);
     }
@@ -117,23 +148,27 @@ pub fn tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         asub = asub.text(&id, &text);
     }
     let addr_sub = asub.build()?;
+    // dsh 系统命令注册（#175）：仅未注册/冲突时显示；状态来自异步缓存，菜单构建零 shell 调用
+    let register_item = crate::register::tray_item(app)?;
     let toggle = MenuItem::with_id(app, "toggle-mode", toggle_label, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, "restart", "重启 dsh 服务", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出 DeepSeek Harness Desktop", true, None::<&str>)?;
-    Ok(Menu::with_items(
-        app,
-        &[
-            &show,
-            &pet,
-            &profile_sub,
-            &switch_sub,
-            &runtime_sub,
-            &addr_sub,
-            &restart,
-            &toggle,
-            &quit,
-        ],
-    )?)
+    // #175：注册选项是条件项（已注册/未检测时隐藏），with_items 改走动态列表
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![
+        &show,
+        &pet,
+        &profile_sub,
+        &switch_sub,
+        &runtime_sub,
+        &addr_sub,
+    ];
+    if let Some(item) = &register_item {
+        items.push(item);
+    }
+    items.push(&restart);
+    items.push(&toggle);
+    items.push(&quit);
+    Ok(Menu::with_items(app, &items)?)
 }
 
 /// 刷新托盘「切换模式」标签（模式切换/重启后调用）。
@@ -144,6 +179,7 @@ pub fn refresh_tray_mode(app: &AppHandle) {
             let _ = tray.set_menu(Some(menu));
         }
     }
+
 }
 
 /// 构建菜单栏托盘：左键显示窗口，菜单提供显示/隐藏桌宠/切换模式/重启/退出。
@@ -170,16 +206,32 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => show_main(app),
             "pet" => toggle_pet(app),
+            "register-dsh-cli" => crate::register::handle_menu_click(app),
             "restart" => restart_dsh(app),
             id if id.starts_with("open-profile-") => {
+                // #179 反馈：托盘菜单回调里同步建窗在 macOS 菜单跟踪态下有卡死风险，
+                // 统一 defer 到后台线程执行（exit/switch 同）。
                 let name = id.strip_prefix("open-profile-").unwrap_or("").to_string();
-                crate::ui::multiwin::open_profile_window(app, &name);
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::ui::multiwin::open_profile_window(&app, &name);
+                });
+            }
+            id if id.starts_with("exit-profile-") => {
+                let name = id.strip_prefix("exit-profile-").unwrap_or("").to_string();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    crate::ui::multiwin::exit_profile_instance(&app, &name);
+                });
             }
             id if id.starts_with("switch-profile-") => {
-                let name = id.strip_prefix("switch-profile-").unwrap_or("").to_string();
                 // 「本窗口」= 当前聚焦窗口（无聚焦则主窗）；桌宠窗不参与
-                let label = crate::ui::multiwin::focused_window_label(app);
-                crate::ui::multiwin::switch_profile_in_window(app, &label, &name);
+                let name = id.strip_prefix("switch-profile-").unwrap_or("").to_string();
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let label = crate::ui::multiwin::focused_window_label(&app);
+                    crate::ui::multiwin::switch_profile_in_window(&app, &label, &name);
+                });
             }
             "runtime-builtin" => switch_runtime(app, None, DshMode::Builtin),
             "runtime-external" => switch_runtime(app, None, DshMode::External),
@@ -222,7 +274,8 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 ..
             } = event
             {
-                show_main(tray.app_handle());
+                // #181 反馈：左键单击聚焦「最后聚焦窗口」（可能是次窗），不再写死主窗
+                crate::ui::window::focus_last_or_main(tray.app_handle());
             }
         })
         .build(app)
@@ -231,6 +284,17 @@ pub fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         })?;
     // #98：托盘就绪后异步拉取运行时目录（失败静默，菜单先显示本地 内置+已装）
     spawn_fetch_catalog(app.handle());
+    // #175：托盘就绪后异步检测 dsh 系统命令注册状态（结果变化才重建菜单，构建路径零 shell 调用）
+    crate::register::refresh_async(app.handle().clone());
+    // #179/#180 反馈：托盘状态实时性兜底——spawn/退出等事件点之外，每 15s 低频重建
+    // 菜单（状态变化窗口期 ≤15s；菜单构建为缓存+端口探测的毫秒级读取，安全）。
+    let poll_handle = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            crate::ui::tray::refresh_tray_mode(&poll_handle);
+        }
+    });
     Ok(())
 }
 

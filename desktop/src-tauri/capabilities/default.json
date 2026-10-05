@@ -18,6 +18,7 @@
     "allow-get-mode-prompt-needed",
     "allow-get-dsh-status",
     "allow-restart-dsh-service",
+    "allow-exit-window-instance",
     "allow-ui-input-confirm",
     "allow-pet-show-main",
     "allow-pet-hide",

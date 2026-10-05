@@ -279,6 +279,12 @@
           "markdownDescription": "桌面设置面板：下载并安装 dsh 运行时（#95）"
         },
         {
+          "description": "状态条「退出」（#180）：关本窗 UI + 销毁本窗绑定实例（仅本壳运行中实例）",
+          "type": "string",
+          "const": "allow-exit-window-instance",
+          "markdownDescription": "状态条「退出」（#180）：关本窗 UI + 销毁本窗绑定实例（仅本壳运行中实例）"
+        },
+        {
           "description": "下载管理器：blob 分块结束（落盘+通知）",
           "type": "string",
           "const": "allow-finish-blob-download",

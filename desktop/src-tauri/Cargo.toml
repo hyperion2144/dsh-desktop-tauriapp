@@ -51,7 +51,7 @@ rodio = { version = "0.22", default-features = false, features = ["playback", "w
 # 本地通知服务 token：必须用操作系统熵（时间戳+pid 既可预测，又会在同一时钟刻度内重复）
 getrandom = "0.3"
 [target."cfg(windows)".dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_System_Time"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_SystemInformation", "Win32_System_Time", "Win32_System_Environment"] }
 # #118 浏览器 guest：WebView2 COM 历史读控（GoBack/GoForward/CanGoBack/CanGoForward）
 webview2-com = "0.38"
 windows-core = "0.61"

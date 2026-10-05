@@ -24,6 +24,7 @@
     "allow-get-dsh-status",
     "allow-get-desktop-client-environment",
     "allow-restart-dsh-service",
+    "allow-exit-window-instance",
     "allow-ui-input-confirm",
     "core:window:allow-start-dragging",
     "core:window:allow-internal-toggle-maximize",

@@ -45,6 +45,9 @@ pub(crate) struct DshState {
     pub(crate) ready_once: AtomicBool,
     /// 输入弹窗的确认通道（prompt_input 挂起，页面 ui_input_confirm 回填）。
     pub(crate) pending_input: Mutex<Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>>,
+    /// 最后聚焦窗口 label（#181：事件驱动记录——点托盘菜单后实时 is_focused 必失焦，
+    /// 「本窗口」类操作的作用对象以事件记录为准；pet 不参与，无记录回落 main）。
+    pub(crate) last_focused: Mutex<Option<String>>,
     /// 托盘"退出"标志（置位后放行窗口关闭与应用退出）。
     pub(crate) quitting: AtomicBool,
     /// 是否已提示过"隐藏到托盘"。
@@ -130,6 +133,47 @@ impl DshState {
         self.windows.lock().unwrap().remove(profile);
     }
 
+    /// 记录最后聚焦窗口（#181）：pet 不参与；仅 main / profile-* 两类载体。
+    pub(crate) fn note_focused(&self, label: &str) {
+        let mut guard = self.last_focused.lock().unwrap();
+        if guard.as_deref() != Some(label) {
+            // #181 实测诊断持久化：Focus 事件桥接是否触发，由 ~/.dsh/focus-debug.log 实证
+            log::info!("[focus] 最后聚焦窗口：{label}");
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(crate::settings::dsh_home().join("focus-debug.log"))
+            {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let _ = std::io::Write::write_all(
+                    &mut f,
+                    format!("[{secs}] focused: {label}\n").as_bytes(),
+                );
+            }
+            *guard = Some(label.to_string());
+        }
+    }
+
+    /// 窗口销毁时摘除记录（仅当记录仍指向它；否则不动）。
+    pub(crate) fn clear_focused_if(&self, label: &str) {
+        let mut guard = self.last_focused.lock().unwrap();
+        if guard.as_deref() == Some(label) {
+            *guard = None;
+        }
+    }
+
+    /// 托盘「本窗口」作用对象（#181）：最后聚焦记录，无记录回落主窗。
+    pub(crate) fn focused_label(&self) -> String {
+        self.last_focused
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| "main".to_string())
+    }
+
     /// 反查窗口 label 当前绑定的 profile（#117：支持「在本窗口切换 profile」后
     /// 窗口 label 与 profile 不再一一对应，环境下发/托盘标记必须以此为准）。
     pub(crate) fn profile_of_window(&self, label: &str) -> Option<String> {
@@ -201,6 +245,7 @@ mod tests {
             tray: Mutex::new(None),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
+            last_focused: Mutex::new(None),
             quitting: AtomicBool::new(false),
             tray_tip_shown: AtomicBool::new(false),
             unread: AtomicU32::new(0),
@@ -247,6 +292,7 @@ mod tests {
             tray: Mutex::new(None),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
+            last_focused: Mutex::new(None),
             quitting: AtomicBool::new(false),
             tray_tip_shown: AtomicBool::new(false),
             unread: AtomicU32::new(0),

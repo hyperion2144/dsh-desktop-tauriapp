@@ -327,3 +327,8 @@ commands = { allow = ['preview_notification_sound'] }
 identifier = 'allow-choose-notification-sound'
 description = '通知（#142）：系统文件选择器挑选音频文件'
 commands = { allow = ['choose_notification_sound'] }
+
+[[permission]]
+identifier = 'allow-exit-window-instance'
+description = '状态条「退出」（#180）：关本窗 UI + 销毁本窗绑定实例（仅本壳运行中实例）'
+commands = { allow = ['exit_window_instance'] }

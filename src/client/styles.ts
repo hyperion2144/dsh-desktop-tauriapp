@@ -35,6 +35,11 @@ body[data-dsh-desktop-platform="linux"] .dshDesktopChromeStrip { background: var
 [data-dsh-desktop-scroll]::-webkit-scrollbar { width: 8px; height: 8px; }
 [data-dsh-desktop-scroll]::-webkit-scrollbar-thumb { background: var(--dsw-alias-scrollbar-bg-l2, rgba(128,128,128,0.4)); border-radius: 4px; }
 [data-dsh-desktop-scroll]::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-scrollbar-hover-l2, rgba(128,128,128,0.6)); }
+/* 状态条「退出」（#180）：仅运行中悬停/确认态生效，data-* 稳定标记；文案超宽折叠。 */
+.dshDesktopStatusText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dshDesktopStatusBar[data-dsh-exit-mode="hover"] { background: rgba(220, 38, 38, 0.16); color: #ef4444; font-weight: 600; }
+.dshDesktopExitBtn { padding: 3px 10px; border-radius: 6px; border: 1px solid rgba(239, 68, 68, 0.55); background: transparent; color: inherit; font-size: 11px; line-height: 1; cursor: default; flex: none; }
+.dshDesktopExitBtn:hover { filter: brightness(1.1); }
 `
 
 /** Install and remove the advanced shell's local-window-chrome styles. @returns the style disposer. */

@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
-    "dev": "tauri dev",
-    "build": "tauri build"
+    "dev": "node scripts/ensure-fresh-acl.mjs && tauri dev",
+    "build": "node scripts/ensure-fresh-acl.mjs && tauri build"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

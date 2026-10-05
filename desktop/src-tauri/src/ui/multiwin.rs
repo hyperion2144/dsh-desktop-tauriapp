@@ -2,8 +2,8 @@
 //!
 //! 定稿（#84 变体 A）：托盘「PROFILE 窗口」分组——运行中点击聚焦窗口，
 //! 未运行点击开新窗（每 profile 至多一窗）。激活 profile 的窗口就是主窗（"main"）。
-//! 窗口关闭语义：非最后窗口关闭 = 停该实例并摘台账；最后窗口关闭 = 隐藏回托盘
-//! （现状，主窗处理不变）；应用退出 = 全回收。
+//! 窗口关闭语义（#178 定稿）：任意窗口关闭 = 只销毁窗口 UI、实例保留（关窗≠停实例）；
+//! 主窗关闭 = 隐藏回托盘；实例崩溃/退出仍关窗+通知；应用退出 = 全回收。
 
 use std::time::Duration;
 
@@ -46,12 +46,7 @@ pub(crate) fn open_profile_window(app: &AppHandle, profile: &str) {
     );
     match claim {
         ClaimDecision::Free => spawn_and_attach(app, profile, port),
-        ClaimDecision::Ours => show_notification(
-            app,
-            crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
-            "无法打开窗口",
-            &format!("{profile}：实例已在运行但未绑定窗口。托盘「重启 dsh 服务」后可接入。"),
-        ),
+        ClaimDecision::Ours => attach_running_profile(app, profile, port),
         _ => show_notification(
             app,
             crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
@@ -85,20 +80,33 @@ impl AttachOptions {
             close_window_on_exit: false,
         }
     }
+    /// 附着运行中实例（#178 重开=附着）：实例已在跑 token 很快可取；崩溃仍关窗（Q6）。
+    const fn attach_running() -> Self {
+        Self {
+            token_wait_rounds: Some(60),
+            close_window_on_exit: true,
+        }
+    }
 }
 
-/// 当前聚焦窗口的 label（托盘「切换 Profile」的作用对象）；无聚焦窗口回落主窗。
-/// 桌宠窗不参与（装饰窗，不对应 profile）。
+/// 托盘「本窗口」作用对象（#181）：读事件驱动的「最后聚焦窗口」记录——点托盘菜单后
+/// 窗口必失焦，实时 is_focused 扫描恒回落主窗（#117 体感偏差根因）；窗口销毁摘除、
+/// pet 不参与、无记录回落主窗。与 #94 lane 转发同一套焦点事件源，避免两套焦点真相。
 pub(crate) fn focused_window_label(app: &AppHandle) -> String {
+    let state = app.state::<DshState>();
+    let recorded = state.focused_label();
+    // #181 实测反馈兑底：若 Focused 事件漏发（记录仍指主窗），用实时 is_focused
+    // 扫描补判——托盘菜单场景窗口已失焦扫不到（保持记录），但窗真聚焦时能自愈。
     for (label, w) in app.webview_windows() {
-        if label == "pet" {
-            continue;
-        }
-        if w.is_focused().unwrap_or(false) {
+        if label != "pet" && w.is_focused().unwrap_or(false) {
+            if recorded != label {
+                state.note_focused(&label);
+                log::info!("[focus] 兑底扫描校正：{recorded} → {label}");
+            }
             return label;
         }
     }
-    "main".to_string()
+    recorded
 }
 
 /// 托盘「切换 Profile」：把指定窗口就地切换到目标 profile（不新建窗口，区别于
@@ -193,22 +201,21 @@ pub(crate) fn switch_profile_in_window(app: &AppHandle, label: &str, target: &st
     }
 }
 
-/// spawn 该 profile 的实例并建窗绑定，随后进入就绪导航。
-fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
-    let label = window_label(profile);
+/// 建 profile 窗口（spawn 与附着共用，#178）：载体注入/下载拦截/新窗守卫同一路径。
+fn build_profile_window(app: &AppHandle, profile: &str, label: &str) -> Result<(), tauri::Error> {
     let dl_app = app.clone();
-    let build = WebviewWindowBuilder::new(app, &label, WebviewUrl::default())
+    let build = WebviewWindowBuilder::new(app, label, WebviewUrl::default())
         .title(format!("DeepSeek Harness · {profile}"))
         .inner_size(1280.0, 840.0)
         .min_inner_size(940.0, 620.0)
         .disable_drag_drop_handler()
         // #118/#134：同主窗——注入 dshDesktop 载体标记（仅本地 loopback 生效）
-.initialization_script(crate::ui::browser_guests::desktop_carrier_init_script())
+        .initialization_script(crate::ui::browser_guests::desktop_carrier_init_script())
         // 远程模式：同主窗——对壳配置的远程主机注入 ownsHost 能力位
         .initialization_script(crate::ui::browser_guests::remote_owns_host_init_script(
             crate::settings::load_desktop_settings().remote_addr.as_deref(),
         ))
-        // #118：同主窗——宿主页 Started 加载时清理旧 guest（dsh 重启后旧实例自愈）
+        // #118：宿主页 Started 加载时清理旧 guest（dsh 重启后旧实例自愈）
         .on_page_load(|w, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
                 crate::ui::browser_guests::release_guests_of_host(w.app_handle(), w.label());
@@ -236,21 +243,61 @@ fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
                 tauri::webview::NewWindowResponse::Deny
             }
         });
-    if let Err(e) = build.build() {
+    build.build().map(|_| ())
+}
+
+/// 绑定 + 标题栏形态（建窗成功后的公共收尾）。
+fn bind_and_apply_titlebar(app: &AppHandle, profile: &str, label: &str) {
+    app.state::<DshState>().bind_window(profile, label.to_string());
+    let advanced = app
+        .state::<DshState>()
+        .mode
+        .load(std::sync::atomic::Ordering::SeqCst)
+        == crate::MODE_ADVANCED;
+    if let Some(w) = app.get_webview_window(label) {
+        crate::ui::tray::apply_titlebar_for(&w, advanced);
+    }
+}
+
+/// spawn 该 profile 的实例并建窗绑定，随后进入就绪导航。
+fn spawn_and_attach(app: &AppHandle, profile: &str, port: u16) {
+    let label = window_label(profile);
+    if let Err(e) = build_profile_window(app, profile, &label) {
         log::error!("[multiwin] 建窗失败（{label}）：{e}");
         return;
     }
-    app.state::<DshState>().bind_window(profile, label.clone());
-    // 标题栏形态 + 三插件注入都跟随主窗口当前模式（#90 用户拍板：次窗与主窗一致）
-    let advanced = app.state::<DshState>().mode.load(std::sync::atomic::Ordering::SeqCst)
-        == crate::MODE_ADVANCED;
-    if let Some(w) = app.get_webview_window(&label) {
-        crate::ui::tray::apply_titlebar_for(&w, advanced);
-    }
-
+    bind_and_apply_titlebar(app, profile, &label);
     spawn_and_navigate_to(app, profile, port, label, false);
 }
 
+/// 附着运行中实例（#178）：托盘「PROFILE 窗口」点击运行中项 / 关窗后重开——
+/// 建窗 + 绑定 + 就绪导航，**不 spawn 不重启**，会话延续；崩溃仍关窗+通知（Q6）。
+fn attach_running_profile(app: &AppHandle, profile: &str, port: u16) {
+    let label = window_label(profile);
+    if let Err(e) = build_profile_window(app, profile, &label) {
+        log::error!("[multiwin] 附着建窗失败（{label}）：{e}");
+        return;
+    }
+    bind_and_apply_titlebar(app, profile, &label);
+    let state = app.state::<DshState>();
+    let nport = state.notify_port.load(std::sync::atomic::Ordering::SeqCst);
+    let ntoken = state.notify_token.lock().unwrap().clone();
+    let app2 = app.clone();
+    let profile2 = profile.to_string();
+    let label2 = label;
+    tauri::async_runtime::spawn(async move {
+        wait_ready_and_attach(
+            app2,
+            profile2,
+            label2,
+            port,
+            nport,
+            ntoken,
+            AttachOptions::attach_running(),
+        )
+        .await;
+    });
+}
 /// spawn 该 profile 实例并就绪导航到指定窗口（不建窗）——建窗路径与「本窗口切换」共用。
 /// `in_place`：就地切换（窗口已在，启动失败/实例退出都不关窗）；false = 建窗路径。
 fn spawn_and_navigate_to(app: &AppHandle, profile: &str, port: u16, label: String, in_place: bool) {
@@ -378,6 +425,8 @@ async fn wait_ready_and_attach(
             tokio::time::sleep(Duration::from_millis(500)).await;
             continue;
         }
+        // #179/#180 反馈：端口开始监听 = 「运行中」，即刻刷新托盘（不等导航完成）
+        crate::ui::tray::refresh_tray_mode(&app);
         let Some((name, value)) = exchange_token_for_cookie(&host_port, &token) else {
             rounds += 1;
             if rounds % 5 == 1 {
@@ -409,6 +458,8 @@ async fn wait_ready_and_attach(
             let _ = w.set_focus();
         }
         log::info!("[multiwin:{profile}] 窗口已接入（{host_port}）");
+        // #179/#180 反馈：接入完成，托盘状态对齐（运行中子菜单就位）
+        crate::ui::tray::refresh_tray_mode(&app);
         // #89 第二批：就绪后进入运行期监督（次实例无保险丝重试，进程退出即通知+关窗）
         supervise_secondary(app, profile, label, port, opts.close_window_on_exit).await;
         return;
@@ -462,6 +513,8 @@ async fn supervise_secondary(
 pub(crate) fn close_profile_instance(app: &AppHandle, profile: &str, stop_process: bool) {
     app.state::<DshState>().unbind_window(profile);
     if !stop_process {
+        // 崩溃/退出路径（stop_process=false）：实例状态变化，同样刷新托盘
+        crate::ui::tray::refresh_tray_mode(app);
         return;
     }
     // 关闭窗口 = 销毁该 profile 的 worker：worker 自行清理其 dsh 进程
@@ -483,4 +536,71 @@ pub(crate) fn close_profile_instance(app: &AppHandle, profile: &str, stop_proces
 #[allow(dead_code)] // #91 验收 / 主窗隐藏判定将使用
 pub(crate) fn has_secondary_windows(app: &AppHandle) -> bool {
     app.webview_windows().keys().any(|l| l.starts_with("profile-"))
+}
+
+/// 次窗口关闭（#178 新语义）：只销毁窗口 UI → 解绑窗口，worker/台账/端口全部保留，
+/// 会话继续跑；托盘「PROFILE 窗口」该项回到「运行中·点击聚焦」，点击即重新附着。
+pub(crate) fn detach_profile_window(app: &AppHandle, profile: &str) {
+    app.state::<DshState>().unbind_window(profile);
+    log::info!("[multiwin:{profile}] 窗口已关闭，实例保留运行（关窗≠停实例）");
+    crate::ui::tray::refresh_tray_mode(app);
+}
+
+/// 入口（托盘/状态条共用，#179/#180）：快速校验后 defer 到后台执行——
+/// kill+wait 与窗口销毁不占主线程（实机反馈：退出卡死）。
+pub(crate) fn exit_profile_instance(app: &AppHandle, profile: &str) {
+    if profile == crate::settings::configured_profile()
+        && crate::runtime::builtin::configured_dsh_mode()
+            == crate::runtime::builtin::DshMode::External
+    {
+        // 主实例外部复用模式：绝不杀（Q10——那不是本壳的进程）
+        show_notification(
+            app,
+            crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
+            "无法退出",
+            "外部 dsh 模式下实例由外部 CLI 管理，不在本壳退出范围",
+        );
+        return;
+    }
+    let app2 = app.clone();
+    let profile2 = profile.to_string();
+    tauri::async_runtime::spawn(async move {
+        exit_profile_instance_bg(&app2, &profile2).await;
+    });
+}
+
+/// 退出执行（后台线程）：停实例 + 清端口 + 关窗 + 刷新托盘 + 通知。
+async fn exit_profile_instance_bg(app: &AppHandle, profile: &str) {
+    if profile == crate::settings::configured_profile() {
+        let state = app.state::<DshState>();
+        state.main_worker.stop();
+        crate::runtime::instances::remove_instance(profile);
+        let port = crate::settings::port_for_profile(profile);
+        let _ = crate::process::lifecycle::stop_port_owner(port).await;
+        // 主窗「关窗」= 隐藏回托盘；Dock 菜单「显示主窗口」可唤回（重开 = 拉起并导航）
+        if let Some(w) = app.get_webview_window("main") {
+            // 主窗隐藏回托盘；Dock 菜单「显示主窗口」可唤回（#181 反馈定稿）
+            let _ = w.hide();
+        }
+        show_notification(
+            app,
+            crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
+            &format!("{profile} 实例已退出"),
+            "托盘「显示主窗口」可重新拉起",
+        );
+        crate::ui::tray::refresh_tray_mode(app);
+        return;
+    }
+    // 次实例：停 worker + 摘台账 + 清端口，再关窗 UI（close 事件的 detach 为无害 no-op）
+    let label = window_label(profile);
+    close_profile_instance(app, profile, true);
+    if let Some(w) = app.get_webview_window(&label) {
+        let _ = w.close();
+    }
+    show_notification(
+        app,
+        crate::network::notify_policy::scenario::INSTANCE_LIFECYCLE,
+        &format!("{profile} 实例已退出"),
+        "已停止实例并关闭窗口",
+    );
 }

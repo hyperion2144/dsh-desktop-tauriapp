@@ -15,6 +15,7 @@ mod settings;         // 设置读写 + dsh_home + app_port
 mod platform;         // 平台特定：open_external
 mod commands;         // Tauri command 实现
 mod profiles;         // profile 管理
+mod register;         // dsh 系统命令注册：检测模型/托盘选项/异步缓存（图 #169）
 mod download;         // 下载管理器（#72）：model/persist/transfer/manager/commands
 
 // ── 运行时核心导入 ──
@@ -184,6 +185,7 @@ pub fn run() {
             get_dsh_status,
             restart_dsh_service,
             ui_input_confirm,
+            commands::exit_window_instance,
             get_proxy_settings,
             save_proxy_settings,
             test_proxy_connectivity,
@@ -252,6 +254,7 @@ pub fn run() {
             tray: Mutex::new(None),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
+            last_focused: Mutex::new(None),
             quitting: AtomicBool::new(false),
             tray_tip_shown: AtomicBool::new(false),
             unread: AtomicU32::new(0),
@@ -626,9 +629,16 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // #181：窗口销毁时摘除「最后聚焦窗口」记录（仍指向它才摘，否则回落主窗）
+            if let WindowEvent::Destroyed = event {
+                window
+                    .state::<DshState>()
+                    .clear_focused_if(window.label());
+            }
             // #94：焦点窗口决定 lane 转发目标（主窗=激活 profile，次窗=对应 profile）
             if let WindowEvent::Focused(true) = event {
                 let label = window.label();
+                window.state::<DshState>().note_focused(&label);
                 let profile = if label == "main" {
                     crate::settings::configured_profile()
                 } else {
@@ -674,12 +684,12 @@ pub fn run() {
                     _ => {}
                 },
                 label if label.starts_with("profile-") => {
-                    // #89 次窗口：关闭 = 停该实例并摘台账（放行关闭）
+                    // #178：次窗口关闭 = 只销毁窗口 UI、解绑（关窗≠停实例），实例与会话继续跑
                     if let WindowEvent::CloseRequested { .. } = event {
                         let profile = label.strip_prefix("profile-").unwrap_or("").to_string();
                         let app = window.app_handle().clone();
                         tauri::async_runtime::spawn(async move {
-                            crate::ui::multiwin::close_profile_instance(&app, &profile, true);
+                            crate::ui::multiwin::detach_profile_window(&app, &profile);
                         });
                     }
                 }
@@ -690,6 +700,7 @@ pub fn run() {
                             return; // 托盘退出流程：放行关闭
                         }
                         api.prevent_close();
+                        // 主窗隐藏回托盘；隐藏后经 Dock 菜单「显示主窗口」唤回（#181 反馈定稿）
                         let _ = window.hide();
                         if !state.tray_tip_shown.swap(true, Ordering::SeqCst) {
                             show_notification(
@@ -717,8 +728,17 @@ pub fn run() {
                 if !quitting {
                     api.prevent_exit();
                     if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.hide();
+                    // 主窗隐藏回托盘；Dock 菜单「显示主窗口」可唤回（#181 反馈定稿）
+                    let _ = w.hide();
                     }
+                }
+            }
+            // #178：macOS Dock 点击/再激活 → 显示主窗（已有可见窗时系统已处理）；
+            // show_main 内部对「实例已停」会重新拉起并导航（与托盘「显示主窗口」对齐）。
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { has_visible_windows, .. } => {
+                if !has_visible_windows {
+                    show_main(app);
                 }
             }
             RunEvent::Exit => {

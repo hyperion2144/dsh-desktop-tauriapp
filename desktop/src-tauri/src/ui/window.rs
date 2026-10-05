@@ -4,6 +4,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::network::notify::show_notification;
 
+use crate::runtime::state::DshState;
 /// 在当前启动页上注入错误提示（红色横幅 + 状态文本变色），保留 dsh 控制台输出不动。
 /// 不导航到 error.html——桌面壳只有启动页和 dsh Web GUI 两个页面。
 pub(crate) fn show_error(app: &AppHandle, reason: &str) {
@@ -31,6 +32,32 @@ pub(crate) fn show_main(app: &AppHandle) {
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
+    // #178：主实例已停（端口无人监听）且非启动期 → 重新拉起并导航（决策 #171/Q6/Q10：
+    // 退出后重开 = 拉起并导航，不是死窗口）。启动期不重复拉起（守护器在跑）。
+    let state = app.state::<DshState>();
+    let starting =
+        state.status.load(std::sync::atomic::Ordering::SeqCst) == crate::STATUS_STARTING;
+    let profile = crate::settings::configured_profile();
+    let port = crate::settings::port_for_profile(&profile);
+    if !starting && !crate::process::lifecycle::port_open(port) {
+        let mode = state.mode.load(std::sync::atomic::Ordering::SeqCst);
+        crate::ui::tray::restart_dsh_in_mode(app, mode, None);
+    }
+}
+
+/// 托盘左键（#181 反馈）：聚焦「最后聚焦窗口」（可能是次窗）；主窗或窗口丢失时
+/// 回 show_main（含已停实例拉起）。
+pub(crate) fn focus_last_or_main(app: &AppHandle) {
+    let label = app.state::<DshState>().focused_label();
+    if label != "main" {
+        if let Some(w) = app.get_webview_window(&label) {
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+            return;
+        }
+    }
+    show_main(app);
 }
 
 /// 双击拖拽区触发 macOS 风格的"zoom"——把窗口几何切到当前屏幕的 work area
