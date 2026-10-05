@@ -184,7 +184,7 @@ fn write_user_path_raw(raw: &str, vtype: u32) -> Result<(), String> {
     }
 }
 
-}
+
 
 /// 广播环境变量变更（资源管理器等「感兴趣的应用」即时更新；已开终端不受影响，#174 #11/#12）。
 /// 挂起窗口不阻塞（SMTO_ABORTIFHUNG + 2s 超时）；广播失败不影响注册本身（注册表已落）。
