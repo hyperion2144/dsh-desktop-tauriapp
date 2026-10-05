@@ -2,6 +2,26 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
+## Unreleased（未发布，版本号待实机验收后与三处同步一起定）
+
+- **dsh 注册为系统命令：托盘一键（#169，实现 #175–#177）**：托盘新增「注册 dsh 为系统命令」，仅未注册时显示；「已注册」判定 = 用户环境的真实解析结果命中本壳（考虑 PATH 顺序，而非文件存在）。注册物是壳维护的稳定 shim（`runtime/bin-dsh/dsh`，随运行时切换自动跟随）。macOS：一次 osascript 提权完成 `/usr/local/bin/dsh` symlink（目录不存在自动创建；同名文件冲突先提示、可选强制覆盖——原文件带时间戳备份），授权后实测解析、仍被遮蔽才按实际 shell（zsh/bash/fish）在对应 rc 追加幂等 PATH 修正（conda 式 sentinel 块）；Windows：写入用户级 PATH 注册表（`HKCU\Environment\Path`，保持 `REG_EXPAND_SZ` 原类型与未展开段、禁用 setx 三坑）并广播 `WM_SETTINGCHANGE`，新开终端即生效（已开终端不受影响）；被系统 PATH 遮蔽属用户级无法覆盖，如实提示。取消提权为中性退出，无半成品。
+- **关窗后台运行（#169，实现 #178–#180）**：任意窗口（主/次）关闭只收 UI，dsh 实例与运行中会话继续跑；重开同 profile = 附着运行中实例（会话不中断）；实例崩溃仍通知+关窗。真正退出只走托盘：「PROFILE 窗口」组按 profile 提供「退出（停止实例）」（仅运行中且本壳持有进程时显示；复用外部/远程绝不显示绝不杀）；侧边栏状态条「运行中」悬停变退出按钮 + 独立确认弹窗（新命令 `exit_window_instance`，失败红字可见）。主窗关闭维持隐藏回托盘；macOS Dock 左键（Reopen）聚焦最后使用的窗口。
+- **托盘跟随聚焦窗口（#169，实现 #181）**：「本窗口」类托盘操作改事件驱动「最后聚焦窗口」记录（根因：点托盘必失焦，原实时 `is_focused` 恒回落主窗）；托盘三级头与「切换 Profile」子菜单以 ● 标记聚焦中窗口；15s 兜底轮询 + 实时扫描自愈。
+- **托盘状态实时性与稳定性**：托盘菜单补齐端口监听/接入完成/崩溃路径即时刷新 + 15s 兜底轮询（状态变化窗口期 ≤15s）；托盘菜单动作改后台执行（修 macOS 菜单回调里同步建窗卡死）；托盘左键改「聚焦最后使用的窗口（回落主窗）」。
+- **构建流程防护（两个前置脚本）**：`ensure-fresh-acl.mjs`——capabilities/permissions 变更即自动 `cargo clean` 本 crate，防 ACL 增量缓存旧导致新命令报 not allowed by ACL；`ensure-windows-syntax.mjs`——`cfg(windows)` 文件 macOS 本地不参与 rustc 解析，rustc 单文件语法守卫拦「本地绿 CI 红」；二者已挂 `dev`/`build` 前置。
+- **修复**：`register/windows.rs` 多余闭合括号（合入 b89fccd 后 Windows CI 抓到，即上面守卫针对的那类错误）；状态条退出命令的 remote-desktop ACL 漏放行。
+- **已知边界**：Dock 右键常驻主窗条目未做（tauri 2.11.5 无 dock menu API，需 objc 手写 `NSApp.setDockMenu`，待拍板）；`~/.dsh/focus-debug.log` 聚焦诊断日志为验收期临时产物（实机验收收口后移除）。
+
+
+## 0.12.0 — 2026-10-05
+
+- **会话运行中阻止系统休眠（#186）**：只要任一窗口有会话在跑，就替系统持一条防休眠断言，空闲/退出即释放。设置项落在壳私有设置 `desktop-settings.json` 的 `prevent_sleep`（默认开），开关在桌面设置页新增的「电源」区块（即时保存、从持久化值回填）。实现：`desktop/src-tauri/src/power/` 仲裁器维护 enabled + busy 集合（busy 由页面探针上报的 `busy-state` 驱动，1s tick 甄别状态边沿），macOS 用 IOKit `IOPMAssertionCreateWithName`（`PreventUserIdleSystemSleep`）、Windows 用 `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)`、其余平台空实现；单测 `macos_assertion_is_visible_to_pmset` 真的拿 `pmset` 验证断言看得见。只防「系统空闲休眠」（熄屏后仍在跑就不睡），合盖不在范围。顺带修了老问题「次级窗口从来不注入任务探针」（`inject_task_notifier` 参数化）。
+- **dsh 快捷键全链路可用（含桌面档 desktop:<os>，#187）**：dsh 0.2.1-alpha.1 的桌面档（`document.documentElement.dataset.platform` 存在即判桌面）要求壳供应「原生按键输入」，而壳里此前零实现 → 页面把按键交给桌面档、dsh 自己也再不从 DOM 派发，于是所有快捷键（包括 ⌘⇧. 呼出 Inspector）在壳里都没反应。壳侧在既有页面初始化脚本里加薄载体 `dshDesktop.keyboard`（`subscribe` / `closeWindow`）与惰性 `dshDesktop.shortcuts` 桩（适配器只在 `ShortcutsService` 构造期取一次，晚到就永久只读）；client 侧新增 `src/client/platform-keyboard.ts`，用 window 捕获层的 keydown/keyup 状态机把完整按键组合转成桌面档输入，只吞成形的组合、其余照常给页面（方向键、输入法不受影响）。实测：⌘K / ⌘N / ⌘R 均命中并转发，自检 `catalog=18 listeners=1 revision=true`。新增三条命令 `read_desktop_keybindings` / `write_desktop_keybindings` / `close_current_window`（同步 `permissions/app-commands.toml` + default/remote capabilities + `gen/schemas`）。**边界**：⌘⇧. 能否出 DevTools 面板取决于 Inspector 插件自己能不能激活（壳不代管它的开关）；本机实测它的 host 半因 `globalThis.fetch is an accessor and cannot be observed safely` 激活失败 → `inspector.toggle` 不入目录，与壳侧通路无关。
+- **修复输入框方向键出现控制字符乱码（#188）**：macOS 壳是 WKWebView，按方向键时它会对编辑层发一次 `insertText` 的 `beforeinput`，`data` 是 C0 控制字符（← U+001C、→ U+001D；空输入框或光标在末尾时最明显），落进会话就是那个「乱码」。这不是 dsh/Lexical 的问题：composer bundle 里既没有 `\x1d` 字节，keymap 也没注册左右方向键。新增 `src/client/composer-input-guard.ts` 三层网：`document` 捕获阶段拦含控制字符的 `beforeinput`（data 或 `dataTransfer('text/plain')`）+ `input` 兜底 + MutationObserver 清扫；Tab/LF/CR 与输入法的组合事件照常放行，拦截日志设上限（方向键每按一次都会触发一次）——方向键的光标移动不受影响（用户实机确认）。
+- **修复桌面插件 client 在页面里激活失败（#187 引入，正式版同中）**：取 dsh 服务用了 `ctx.shortcuts` 属性访问，而未声明该 inject 的上下文在 cordis 里会当场抛 `cannot get property "shortcuts" without inject` → 本插件 client 半 `failed`、页面 boot 报 `dsh-desktop-tauriapp: failed`。改为 `ctx.get('shortcuts')` + try/catch 静默兜底（取不到就不装桌面档，让旧 dsh 自然回落 web 档）。同时给 `apply()` 包上带 step 标注的 try/catch（抛错时日志写明卡在哪一步，否则 JSC 的 `err.stack` 只剩栈帧、丢掉 message），并修了 webview 控制台镜像丢错误 message 的老问题。
+- **修复：开发构建（debug）永远加载到构建期插件快照**。`desktop/src-tauri/src/process/plugin.rs` 的 `desktop_plugin_dir()` 里，`#[cfg(debug_assertions)]` 的「仓库活代码优先」分支被错嵌在 `DSH_DESKTOP_PLUGIN` 环境变量分支内部，不设该变量时根本不执行 → 隔离实例一直回落到 `resource_dir()/plugins` 的旧副本（实测差三个月、与当前 dsh 不兼容，源码改动全部白改）。已移回函数体层级。
+- **测试与文档**：cargo test **171 通过 / 0 失败**（含防休眠断言可见性、快捷键文件读写等新例）；`node scripts/test-client.mjs` 覆盖 client 纯函数与 `dshDesktop` 载体冒烟（`node:vm` 最小 DOM 桩真跑载体脚本，~0.6s）；README / AGENTS.md（新增血泪坑 11、12）/ `docs/CHANGELOG-MEMORY.md` 同步。
+
 ## 0.11.2 — 2026-09-30
 
 - **修复 iOS 打包失败的第二个原因（v0.11.0/v0.11.1 的 CI 红）**：随包整包 `mobile/expo-app/assets/dsh-frontend.tgz` 被当作构建产物写进了 `.gitignore` → CI 检出后**没有这个文件**，而 Metro 的 `require('../../assets/dsh-frontend.tgz')` 是**打包期静态解析**（不是运行时），于是 `Unable to resolve module ../../assets/dsh-frontend.tgz`（Android 那条不过 bundling 所以看不出来）。修：**产物入库**（CI 无法现场生成：脚本默认来源是桌面 staged 的 `desktop/src-tauri/resources/dsh/...`），并在 `.gitignore` 原位写明“改 dsh 运行时版本时必须重跑 `sync-builtin.mjs` 并提交该产物”。上一个原因（`shell-web` 在工程根之外）已在 0.11.1 修好并保留在这条历史里。
