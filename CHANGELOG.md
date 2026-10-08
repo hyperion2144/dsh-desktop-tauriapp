@@ -2,6 +2,10 @@
 
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
+## Unreleased
+
+- **修复 Windows 托盘注册的 dsh 系统命令不跟随运行时版本切换（#191）**：托盘注册进用户级 PATH（`HKCU\Environment\Path`）的是稳定 shim 目录 `runtime/bin-dsh/`，命令「跟随运行时切换」靠的是每次 spawn 按当前 `dsh_runtime` 幂等重写 shim 内容——unix spawn 路径一直如此（macOS symlink 天然跟随），Windows `spawn_dsh`（cfg(windows)）漏了这次重写，切版本后 `dsh.cmd` 仍指旧版本的 node.exe + bin.js。修：Windows spawn 内置分支补 `ensure_dsh_shim_dir` 调用（与 unix 同构；全壳唯一 spawn 入口 worker → 托盘切换/守护自愈/冷启动全覆盖；外部模式双重防护不写 shim；IO 失败不阻断 spawn，内置模式重写失败打 warn 日志可观测）。新增回归测试锁 write_shim「内容随切换更新 + 未变不重写」契约；cargo test 171 通过 / 1 失败（power 的 pmset 可见性测试因本机 live App 持有同名断言误报，与本次无关——本次 unix 编译路径零改动）。
+
 ## 0.12.0 — 2026-10-05
 
 - **dsh 注册为系统命令：托盘一键（#169，实现 #175–#177）**：托盘新增「注册 dsh 为系统命令」，仅未注册时显示；「已注册」判定 = 用户环境的真实解析结果命中本壳（考虑 PATH 顺序，而非文件存在）。注册物是壳维护的稳定 shim（`runtime/bin-dsh/dsh`，随运行时切换自动跟随）。macOS：一次 osascript 提权完成 `/usr/local/bin/dsh` symlink（目录不存在自动创建；同名文件冲突先提示、可选强制覆盖——原文件带时间戳备份），授权后实测解析、仍被遮蔽才按实际 shell（zsh/bash/fish）在对应 rc 追加幂等 PATH 修正（conda 式 sentinel 块）；Windows：写入用户级 PATH 注册表（`HKCU\Environment\Path`，保持 `REG_EXPAND_SZ` 原类型与未展开段、禁用 setx 三坑）并广播 `WM_SETTINGCHANGE`，新开终端即生效（已开终端不受影响）；被系统 PATH 遮蔽属用户级无法覆盖，如实提示。取消提权为中性退出，无半成品。

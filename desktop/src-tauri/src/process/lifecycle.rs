@@ -660,6 +660,18 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         }
     }
     let source = crate::runtime::builtin::resolve_source(app).map_err(SpawnError::Other)?;
+    // #191：shim 物化（对齐 unix 分支「每次 spawn 重写」语义）。托盘注册进用户级
+    // PATH 的是**稳定目录** `runtime/bin-dsh/`，命令要跟随运行时切换，靠的是每次
+    // spawn 按当前 settings.dsh_runtime 重写 shim 内容（write_shim 幂等）；不补这次
+    // 重写，切版本后新开终端的 `dsh` 仍命中旧版本的 node.exe + bin.js。外部模式
+    // 该函数自行返回 None（那一份 dsh 本来就在用户 PATH 上，不写 shim）——调用点
+    // 不预判模式，判定权留给 callee；但内置模式下 None = 重写失败（运行时残缺/
+    // 目录不可写），注册的系统命令会保持旧指向，须可观测（#191 规格审查补充）。
+    if crate::profiles::ensure_dsh_shim_dir(app).is_none()
+        && matches!(source, crate::runtime::builtin::DshSource::Builtin { .. })
+    {
+        log::warn!("[dsh-shim] shim 重写失败：注册的 dsh 命令将保持旧指向（运行时目录缺失或不可写）");
+    }
     let (node, launcher_args) = match &source {
         crate::runtime::builtin::DshSource::Builtin { node, dsh_lib, launcher } => {
             log::info!("[spawn] 内置模式：node + runProfile（不经 CLI）");
