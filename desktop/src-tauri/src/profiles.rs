@@ -1369,4 +1369,50 @@ mod tests {
         // 树内符号链接随 node_modules 排除，不重建（重建发生在 pnpm install 后）
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // #191 回归锁：「跟随运行时切换」的机制本体 = write_shim 的内容幂等重写——
+    // 运行时切换（输入路径变化 → 内容变化）必须落到 shim 文件；内容未变时不得
+    // 重写。Windows spawn 路径 #191 补上的那次 ensure_dsh_shim_dir（AppHandle
+    // 依赖，单测不可构造）依赖的就是这个契约。
+    #[test]
+    fn write_shim_rewrites_on_content_change_and_skips_when_identical() {
+        // 与 write_shim 内部一致的平台内容格式（cfg! 编译期取分支）。
+        let expected_body = |unix: &str, win: &str| -> String {
+            if cfg!(windows) {
+                format!("@echo off\r\n{win}\r\n")
+            } else {
+                format!("#!/bin/sh\n{unix}\n")
+            }
+        };
+
+        let dir = std::env::temp_dir().join(format!("dsh-shim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let unix_old = "exec \"/old/node\" \"/old/lib/bin.js\" \"$@\"";
+        let win_old = "\"C:\\old\\node.exe\" \"C:\\old\\lib\\bin.js\" %*";
+        write_shim(&dir, "dsh", unix_old, win_old).unwrap();
+        let file = if cfg!(windows) { dir.join("dsh.cmd") } else { dir.join("dsh") };
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            expected_body(unix_old, win_old)
+        );
+
+        // 内容变化（模拟切到新运行时）→ 必须重写：Windows 曾缺的正是这次重写
+        let unix_new = "exec \"/new/node\" \"/new/lib/bin.js\" \"$@\"";
+        let win_new = "\"C:\\new\\node.exe\" \"C:\\new\\lib\\bin.js\" %*";
+        write_shim(&dir, "dsh", unix_new, win_new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            expected_body(unix_new, win_new)
+        );
+        let mtime_switched = std::fs::metadata(&file).unwrap().modified().unwrap();
+
+        // 内容相同（未切换）→ 不重写（mtime 不动）：已在用的终端/进程不受影响
+        write_shim(&dir, "dsh", unix_new, win_new).unwrap();
+        let mtime_stable = std::fs::metadata(&file).unwrap().modified().unwrap();
+        assert_eq!(mtime_switched, mtime_stable, "内容未变时不得重写");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
