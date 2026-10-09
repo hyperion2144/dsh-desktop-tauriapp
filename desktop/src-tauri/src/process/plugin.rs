@@ -82,10 +82,15 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
     // 首行 connection scope 补丁：DSH 0.1.5 Web profile 的 connection 条目缺少
     // webRuntime/webServer 注入，导致 rpc.handle 注册的 channel 不会挂 HTTP 路由
     // （浏览器侧报 transport failure）。与 dsh-mnemon 的 cordis.patch.yml 同一手法。
+    // #199 二阶：DSH 0.2.1-alpha.2 起上游移除 webRuntime 服务（dsh-web-app 改读
+    // webStartup，connection 插件同版改 API，见下方 connection_inject_list）；
+    // 旧版本的 connection 真读 ctx.webRuntime——两代契约互不兼容，inject 列表必须
+    // 随选中运行时版本切换。
     // #144：附带 dsh 网关心跳覆盖（typert-gateway → websocketHeartbeatIntervalMs），
     // 否则 dsh 默认 2s Ping + 连丢 2 次 terminate 会把移动端挂起/弱网的连接秒判死。
+    let inject = connection_inject_list(crate::settings::load_desktop_settings().dsh_runtime.as_deref());
     let content = format!(
-        "- id: connection\n  inject: [webRuntime, webServer]\n{}\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n{}",
+        "- id: connection\n  inject: {inject}\n{}\n- insert:\n    - id: dsh-desktop-tauriapp\n      name: dsh-desktop-tauriapp\n    - id: dsh-mobile-access\n      name: dsh-mobile-access\n{}",
         gateway_patch_block(crate::settings::configured_mux_heartbeat_ms()),
         mobile_layout_insert_block(crate::settings::configured_desktop_layout_on_phones())
     );
@@ -94,6 +99,74 @@ pub(crate) fn desktop_plugin_patch_path(app: &tauri::AppHandle) -> PathBuf {
         let _ = std::fs::write(&path, content);
     }
     path
+}
+
+/// #199：connection 行的 inject 列表，随选中 dsh 运行时版本切换两代服务契约。
+/// DSH 0.2.1-alpha.2 起 dsh-web-app 移除 `webRuntime` 服务（参数改经 `webStartup`
+/// 服务表达式，官方 web profile 的 connection 行即 `inject: [webStartup]`）；
+/// 更低版本的 connection 真读 `ctx.webRuntime`（换名即 fatal：`cannot get property
+/// "webRuntime" without inject`）。版本未知或解析失败保守回旧契约（与历史行为一致）。
+pub(crate) fn connection_inject_list(runtime: Option<&str>) -> &'static str {
+    if runtime_at_least(runtime.unwrap_or(""), (0, 2, 1), Some("alpha.2")) {
+        "[webStartup, webServer]"
+    } else {
+        "[webRuntime, webServer]"
+    }
+}
+
+/// 语义化版本下界判定：core 三段数字比较，相等时比预发布段（正式版 > 预发布；
+/// 预发布按点分段做数字感知比较，覆盖 alpha.N 系列，如 alpha.10 > alpha.2）。
+/// 解析失败（空串/非数字/超三段）一律视为不满足下界（保守）。
+fn runtime_at_least(v: &str, min_core: (u64, u64, u64), min_pre: Option<&str>) -> bool {
+    let v = v.trim();
+    if v.is_empty() {
+        return false;
+    }
+    let (core, pre) = match v.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (v, None),
+    };
+    let mut nums = core.split('.');
+    let mut parsed = (0u64, 0u64, 0u64);
+    for slot in [&mut parsed.0, &mut parsed.1, &mut parsed.2] {
+        match nums.next().and_then(|s| s.parse().ok()) {
+            Some(n) => *slot = n,
+            None => return false,
+        }
+    }
+    if nums.next().is_some() {
+        return false;
+    }
+    if parsed != min_core {
+        return parsed > min_core;
+    }
+    match (pre, min_pre) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(p), Some(min)) => pre_segments_at_least(p, min),
+    }
+}
+
+/// 预发布段点分比较：全数字段按数值（(n, "")），否则按字符串（(0, s)）。
+fn pre_segments_at_least(p: &str, min: &str) -> bool {
+    let segments = |s: &str| -> Vec<(u64, String)> {
+        s.split('.')
+            .map(|part| match part.parse::<u64>() {
+                Ok(n) => (n, String::new()),
+                Err(_) => (0, part.to_string()),
+            })
+            .collect()
+    };
+    let a = segments(p);
+    let b = segments(min);
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).cloned().unwrap_or((0, String::new()));
+        let y = b.get(i).cloned().unwrap_or((0, String::new()));
+        if x != y {
+            return x > y;
+        }
+    }
+    true
 }
 
 /// dsh 网关（`typert-gateway` 条目，载入 `@deepseek-ai/dsh-api-gateway`）的 mux 心跳覆盖（#144）。
@@ -443,6 +516,26 @@ pub(crate) fn desktop_platform_tag() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_inject_switches_at_021a2() {
+        // #199 二阶：0.2.1-alpha.2 是两代 connection 服务契约的分界。旧侧保持
+        // webRuntime（alpha.1 的 connection 真读 ctx.webRuntime），新侧切 webStartup。
+        assert_eq!(connection_inject_list(None), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("  ")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("garbage")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("0.1.7")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("0.2.1-alpha.1")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("0.2.0-rc.1")), "[webRuntime, webServer]");
+        assert_eq!(connection_inject_list(Some("0.2.1-alpha.2")), "[webStartup, webServer]");
+        // 预发布段数字感知：alpha.10 > alpha.2（纯字典序会误判回旧契约）
+        assert_eq!(connection_inject_list(Some("0.2.1-alpha.10")), "[webStartup, webServer]");
+        // 正式版 >= 同号预发布
+        assert_eq!(connection_inject_list(Some("0.2.1")), "[webStartup, webServer]");
+        assert_eq!(connection_inject_list(Some("0.2.2")), "[webStartup, webServer]");
+        assert_eq!(connection_inject_list(Some("1.0.0")), "[webStartup, webServer]");
+    }
 
     #[test]
     fn mobile_layout_insert_block_follows_setting() {
