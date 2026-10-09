@@ -148,8 +148,6 @@ xcodebuild -workspace DeepSeek.xcworkspace -scheme DeepSeek -configuration Relea
 - 另请注意：DeepSeek 鲸鱼为官方商标，本应用是非官方客户端
 
 ## 已知限制
-
-- **任务完成通知**为 DOM 启发式（监听 `data-state` 运行中标记），分不清成功/失败/被停，拿不到标题与 token；权威信号的语义化升级见 docs/
 - **桌宠**：macOS 打包（DMG）后透明可能丢失（tauri issue #13415，dev 正常）；置顶仅 Floating 级、盖不过全屏应用；Cmd+Tab 会出现桌宠条目（`skipTaskbar` 仅 Windows 生效）
 - **桌面档快捷键**：键桥是页面内实现，被 WebView / 系统菜单先消费的组合拿不到（macOS `Cmd+W` / `Cmd+Q` 仍走系统语义）；Windows 未在本机验证（本机无 Windows 编译目标，由 CI 把关）
 - **未签名分发**：macOS 非公证包需右键打开（`xattr -cr "/Applications/DeepSeek Harness Desktop.app"` 可解）；Windows 网络下载的 exe 触发 SmartScreen
