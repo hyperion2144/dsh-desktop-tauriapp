@@ -4,3 +4,4 @@ pub mod worker;
 pub mod probing;
 pub mod plugin;
 pub mod stderr_buf;
+pub mod client_env;

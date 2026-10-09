@@ -394,6 +394,13 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
     cmd.env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
+    // #199：壳身份 env——运行时 telemetry 装配读 DSH_CLIENT_VERSION（serviceVersion
+    // 必填；缺失在 0.2.1-alpha.2 起致命），product-analytics 的 appVersion 同源。
+    for (k, v) in crate::process::client_env::client_identity_envs(
+        &app.package_info().version.to_string(),
+    ) {
+        cmd.env(k, v);
+    }
     // #186：把实例身份交给宿主插件——busy-state 上报要带 profile，壳侧按它记账 / 清理。
     cmd.env("DSH_DESKTOP_PROFILE", profile);
     // dsh 原生事件桥（#142）：把通知口交给宿主事件脚本（session/event → /notify）；
@@ -701,6 +708,13 @@ pub(crate) fn spawn_dsh(app: &tauri::AppHandle, profile: &str, port: u16, advanc
         .env("DSH_MOBILE_LANE_PORT", lane.to_string())
         .env("DSH_MOBILE_ENABLED", "1")
         .env("DSH_DESKTOP_PORT", port.to_string());
+    // #199：同 unix 分支——壳身份 env（DSH_CLIENT_VERSION），telemetry 装配必填，
+    // 见 process::client_env 模块注释。
+    for (k, v) in crate::process::client_env::client_identity_envs(
+        &app.package_info().version.to_string(),
+    ) {
+        cmd.env(k, v);
+    }
     let cloudflared = configured_cloudflared_bin();
     if !cloudflared.is_empty() {
         cmd.env("DSH_CLOUDFLARED_BIN", cloudflared);
