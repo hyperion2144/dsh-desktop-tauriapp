@@ -13,7 +13,11 @@ use crate::settings::{DesktopSettings, load_desktop_settings};
 // ==================== 代理设置 ====================
 // 托盘「代理设置」数据模型 + 系统代理检测 + spawn 注入
 //（依研究票《系统代理检测机制事实调查（macOS/Windows）》结论，docs/agents/research-tray-proxy-system-detection.md）。
-// 契约：manual/system 在 spawn dsh 时注入 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY（大小写各一）；
+// 契约：manual/system 在 spawn dsh 时注入 HTTP_PROXY/HTTPS_PROXY/NO_PROXY（大小写各一）；
+// ALL_PROXY/all_proxy 一律不注入（#196）：它不在 dsh 消费者的读取面内（Node --use-env-proxy / pnpm 只认
+// http_proxy / https_proxy / no_proxy），而 Node 的 --use-env-proxy 仍会把它当 URL 解析——一个无意义的值
+// （历史事故里是字符串 "undefined"）就让 worker thread 抛 ERR_INVALID_URL、dsh 子进程启动即崩。
+// 不写 = 既不覆盖也不清除：系统环境里用户自己设的值保持原样继承。
 // off/解析失败不注入任何代理变量；只要有代理注入，NO_PROXY 恒含回环保底（localhost,127.0.0.1,::1），
 // 保证桌面壳↔本机 dsh web / lane 反代链路绝不被代理劫持。
 
@@ -34,7 +38,7 @@ pub struct ProxyEnv {
     pub http: Option<String>,
     /// HTTPS_PROXY 值（http:// 或 https:// 代理）。
     pub https: Option<String>,
-    /// ALL_PROXY 值（socks5:// 代理；部分 CLI 工具才识别，尽力而为）。
+    /// ALL_PROXY 值（socks5:// 代理）：只供 reqwest（壳自身请求）与设置页回显，#196 后不进子进程 env。
     pub all: Option<String>,
     /// NO_PROXY 值（逗号分隔，已规范化并合并回环保底）。
     pub no_proxy: String,
@@ -514,15 +518,15 @@ pub fn resolved_proxy_env(settings: &DesktopSettings) -> Option<ProxyEnv> {
 }
 
 /// 把解析出的代理环境写入子进程 env（大小写各一：Unix 工具惯用小写，Windows 工具惯用大写，研究边界 11）。
+/// #196：即便 all=socks5://… 也不写 ALL_PROXY/all_proxy——env 注入面只留 HTTP/HTTPS/NO_PROXY；
+/// 否则一个 Node --use-env-proxy 会解析的无意义值（历史上是 "undefined"）就能在 worker thread
+/// 初始化阶段炸成 ERR_INVALID_URL，让 dsh 子进程启动即崩。
 pub fn apply_proxy_env(cmd: &mut Command, proxy: &ProxyEnv) {
     if let Some(url) = &proxy.http {
         cmd.env("HTTP_PROXY", url).env("http_proxy", url);
     }
     if let Some(url) = &proxy.https {
         cmd.env("HTTPS_PROXY", url).env("https_proxy", url);
-    }
-    if let Some(url) = &proxy.all {
-        cmd.env("ALL_PROXY", url).env("all_proxy", url);
     }
     if !proxy.no_proxy.is_empty() {
         cmd.env("NO_PROXY", &proxy.no_proxy).env("no_proxy", &proxy.no_proxy);
@@ -779,6 +783,36 @@ mod tests {
     for key in ["NO_PROXY", "no_proxy"] {
       assert_eq!(get(key).as_deref(), Some("localhost,127.0.0.1,::1"), "{key} 应为 NO_PROXY");
     }
-    assert_eq!(get("ALL_PROXY"), None, "all 未设置时不应出现");
+  }
+
+  #[test]
+  fn apply_proxy_env_never_sets_all_proxy_even_with_socks() {
+    // #196：socks5（ProxyEnv.all）只走 reqwest + 设置页回显本就不该碰 env——旧实现会把 all 写进
+    // ALL_PROXY/all_proxy，而无意义值（实报为字符串 "undefined"）会让 Node --use-env-proxy 在 worker
+    // thread 初始化时 new URL() 抛 ERR_INVALID_URL。这条锁住「all 有值也不写」。
+    let mut cmd = Command::new("echo");
+    let proxy = ProxyEnv {
+      http: Some("http://127.0.0.1:7890".into()),
+      https: Some("http://127.0.0.1:7890".into()),
+      all: Some("socks5://127.0.0.1:7891".into()),
+      no_proxy: "localhost,127.0.0.1,::1".into(),
+    };
+    apply_proxy_env(&mut cmd, &proxy);
+    let get = |name: &str| {
+      cmd
+        .get_envs()
+        .find(|(k, _)| k.to_string_lossy() == name)
+        .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    };
+    assert_eq!(get("ALL_PROXY"), None, "#196：all 有值时也不得写 ALL_PROXY");
+    assert_eq!(get("all_proxy"), None, "#196：大小写两个都不写（走的是同一条 if let 分支）");
+    // 其余槽位不受影响（all 无值时同样走这条断言集）
+    assert_eq!(get("HTTP_PROXY").as_deref(), Some("http://127.0.0.1:7890"));
+    assert_eq!(get("http_proxy").as_deref(), Some("http://127.0.0.1:7890"));
+    assert_eq!(get("HTTPS_PROXY").as_deref(), Some("http://127.0.0.1:7890"));
+    assert_eq!(get("https_proxy").as_deref(), Some("http://127.0.0.1:7890"));
+    assert_eq!(get("NO_PROXY").as_deref(), Some("localhost,127.0.0.1,::1"));
+    assert_eq!(get("no_proxy").as_deref(), Some("localhost,127.0.0.1,::1"));
   }
 }
+
