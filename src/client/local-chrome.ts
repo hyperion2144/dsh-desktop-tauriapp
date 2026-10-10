@@ -1,4 +1,11 @@
 import type { DesktopClientPlatform } from './environment.ts'
+import {
+  PLUGIN_WARNING_COLOR,
+  composeStatusLabel,
+  isCriticalStatus,
+  pluginWarningTitle,
+  readPluginWarnings,
+} from './plugin-health.ts'
 
 /** 各平台自绘条高度（CSS px）。 */
 const STRIP_HEIGHT: Record<DesktopClientPlatform, number> = {
@@ -122,6 +129,7 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   let statusTimer = 0
   let currentStatus = -1
   let exitMode: '' | 'hover' = ''
+  let pluginWarnings: string[] = []
   let resizeObserver: ResizeObserver | null = null
   let mutationObserver: MutationObserver | null = null
 
@@ -150,13 +158,24 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
         const s = (value as { status?: number }).status
         if (typeof s !== 'number') return
         currentStatus = s
+        // 告警状态任何时候都要刷新（含 hover 退出态），只是不覆盖按钮/文案
+        pluginWarnings = readPluginWarnings(value)
         if (exitMode !== '') return // 退出交互态：不覆盖按钮/文案
         const dot = bar.querySelector('.dshDesktopStatusDot') as HTMLElement | null
         const text = bar.querySelector('.dshDesktopStatusText') as HTMLElement | null
-        const label = STATUS_TEXT[s] ?? `状态 ${s}`
-        if (dot !== null) dot.style.background = STATUS_COLOR[s] ?? '#9ca3af'
+        // #212：缺件必须在状态条上看得见；但「服务异常/下线」比缺件更要紧，那种状态只附加说明。
+        const label = composeStatusLabel(s, STATUS_TEXT[s] ?? `状态 ${s}`, pluginWarnings)
+        if (dot !== null) {
+          dot.style.background =
+            pluginWarnings.length > 0 && !isCriticalStatus(s)
+              ? PLUGIN_WARNING_COLOR
+              : (STATUS_COLOR[s] ?? '#9ca3af')
+        }
         if (text !== null) text.textContent = label
-        bar.title = `dsh：${label}`
+        bar.title = pluginWarnings.length > 0 ? pluginWarningTitle(pluginWarnings) : `dsh：${label}`
+        // 稳定标记（勿用 hash 类名，见 AGENTS.md 坑 8）：回归/端到端可断言缺件。
+        if (pluginWarnings.length > 0) bar.dataset.dshPluginMissing = pluginWarnings.join(',')
+        else delete bar.dataset.dshPluginMissing
       })
       .catch(() => {})
   }
@@ -167,8 +186,10 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
     const text = bar.querySelector('.dshDesktopStatusText') as HTMLElement | null
     if (mode === '') {
       delete bar.dataset.dshExitMode
-      if (text !== null) text.textContent = STATUS_TEXT[currentStatus] ?? `状态 ${currentStatus}`
-      bar.title = `dsh：${STATUS_TEXT[currentStatus] ?? ''}`
+      const lifecycle = STATUS_TEXT[currentStatus] ?? `状态 ${currentStatus}`
+      if (text !== null) text.textContent = composeStatusLabel(currentStatus, lifecycle, pluginWarnings)
+      bar.title =
+        pluginWarnings.length > 0 ? pluginWarningTitle(pluginWarnings) : `dsh：${lifecycle}`
       refreshStatus()
       return
     }

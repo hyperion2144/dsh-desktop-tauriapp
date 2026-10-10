@@ -274,6 +274,7 @@ pub fn run() {
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
             running_sources: Mutex::new(Default::default()),
+            plugin_warnings: Mutex::new(Default::default()),
             skip_startup_check: AtomicBool::new(false),
             pending_active_profile: Mutex::new(None),
             downloads: download::DownloadManager::new(),

@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "tauri": "tauri",
-    "dev": "node scripts/ensure-windows-syntax.mjs && node scripts/ensure-fresh-acl.mjs && tauri dev",
-    "build": "node scripts/ensure-windows-syntax.mjs && node scripts/ensure-fresh-acl.mjs && tauri build"
+    "dev": "node scripts/ensure-embedded-plugins.mjs && node scripts/ensure-windows-syntax.mjs && node scripts/ensure-fresh-acl.mjs && tauri dev",
+    "build": "node scripts/ensure-embedded-plugins.mjs && node scripts/ensure-windows-syntax.mjs && node scripts/ensure-fresh-acl.mjs && tauri build",
+    "test:scripts": "node --test scripts/*.test.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"

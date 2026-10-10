@@ -16,7 +16,8 @@
 - npm run build:client        （根目录；必先于桌面构建，build.rs 会把根 lib/ 内嵌进应用）
 - cd desktop && npm run tauri dev   （开发运行）
 - cd desktop && npm run build       （等价 tauri build，产 release .app/.dmg）
-- cd desktop/src-tauri && cargo check  （快速编译检查）
+- cd desktop/src-tauri && cargo check  （快速编译检查；**先 `git submodule update --init --recursive`**——
+  `mobile/dsh-mobile-nav` 为空时 `build.rs` 的 staging 硬闸门会直接 panic，见坑 13）
 - desktop/scripts/acceptance.sh       （macOS 三条路径验收：复用/拉起回收/受限 PATH）
 - node desktop/scripts/dsh-desktop.mjs <plugin|boot|runtime>
                                      （在 **desktop profile** 上跑 dsh：官方 CLI 硬拦 `--profile desktop`
@@ -56,7 +57,8 @@
   local-chrome.ts 状态条等 DOM 注入 / download-intercept.ts 下载拦截 / desktop-browser-bridge.ts
    （#118 桥实现 + webview 标签兼容层）/ platform-keyboard.ts 桌面档快捷键桥（#187：原生键 → dsh
    `desktop:<os>` 档）/ composer-input-guard.ts 输入框控制字符守护（#188：WKWebView 方向键的
-   `insertText` 前哨）/ environment.ts 环境）。
+   `insertText` 前哨）/ plugin-health.ts 插件缺件告警（#212：读 `get_dsh_status` 的
+   `plugin_warnings`，状态条渲染「插件缺失」与修复说明）/ environment.ts 环境）。
   esbuild 产 lib/client.js；槽位注入处用 React 组件，禁 document.createElement 拼 UI。
 - desktop/src-tauri/ —— Rust 桌面壳主体
   - src/lib.rs 入口聚合（run() + DshState 构造 + generate_handler!）；build.rs 构建期 staging
@@ -81,7 +83,7 @@
   - dsh-mobile-access/ —— 手机访问服务（host+client 半区）：改写反代、配对/控制路由、
     SSE、cloudflared 隧道；host apply(ctx) 随 dsh 装载启动 lane；client.js = 设置「手机访问」Tab
   - shell-web/ —— 浏览器 H5 壳纯逻辑（parsePairInput/buildEnterUrl/createPairStore，被 Expo/Harmony 移植）
-  - dsh-mobile-nav/ —— 上游移动布局插件 dsh-web-mobile 的 git 子模块（.gitmodules；mexiaosqwq/dsh-web-mobile，当前 v3.0.3，MIT；测试 npm run test:core；CI checkout 需 submodules: recursive）
+  - dsh-mobile-nav/ —— 上游移动布局插件 dsh-web-mobile 的 git 子模块（.gitmodules；mexiaosqwq/dsh-web-mobile，当前 **v3.0.5**，MIT；测试 npm run test:core；CI checkout 需 submodules: recursive）。pin 必须选**过得了 dsh 兼容保险丝**的版本：`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility()` 用 `semver.satisfies(runtime, peerRange, {includePrerelease:true})` 判 `@deepseek-ai/dsh*` peer——v3.0.3 及更早的 9 个 client peer 上界是 `<0.2.0`，在 0.2.1-alpha.2 下被判不兼容并 `failed to import`；v3.0.4/v3.0.5 追加了 `>=0.2.0-rc.1 <0.3.0-0` 才对得上（#212）。
   - expo-app/ —— Android/iOS 原生壳（Expo/RN，用户确认的技术栈；src/lib/pair.ts 为逻辑源）
   - harmony/ —— 鸿蒙壳源码骨架（ArkTS + ArkWeb，需 DevEco 编译）
 - docs/ —— 设计与审计；docs/desktop-guardian-profile-remote-design.md 为托盘三件套设计稿；docs/mobile-access-design.md 为移动端设计稿，原型见 docs/prototypes/；docs/agents/ 为 agent 协作文档
@@ -118,6 +120,11 @@
   （shell-web 单测锁死语义，两端按其移植，勿各自漂移）。旧行为「鸿蒙挂起 ≥10s 直接整页重载」已删。
 - 桌面三包注入链路：build.rs staging 内嵌（desktop + dsh-mobile-access + dsh-web-mobile）
   → materialize 挂共享池 → desktop-plugin-inject.yml（运行时写入 app 数据目录）三行 --patch。
+  staging 是**构建硬闸门**（#212）：任一文件/目录拷贝失败即 `panic!` 中止构建（旧实现只 warning +
+  照旧打印「已打包」→ 0.12.0 就是这么产出缺 `plugins/dsh-web-mobile` 的安装包）。
+  `desktop/scripts/ensure-embedded-plugins.mjs` 是 `dev`/`build` 前置的同款守卫（缺件非零退出）。
+  挂池缺件时 `materialize_desktop_plugin_for()` 写 `DshState.plugin_warnings` → `get_dsh_status`
+  → 侧边栏状态条橙色「插件缺失」（启动照旧，只提示不阻断）。
  - 设备会话持久化：$DSH_HOME/storages/mobile-access/pairing.json（0600），重启后设备表恢复，手机无需重扫（前提手机侧会话 cookie 未丢；该 cookie 无 Max-Age，浏览器/WebView 清掉则需重新配对）。
 - 手机布局与卡顿根因（#147）：**卡顿在宿主前端**（会话整段挂载 + 逐块 Shiki 高亮；审计见
   `mobile/dsh-mobile-nav/docs/audits/2026-09-23-session-switch-jank-handover.md`），不在网络、也不在布局插件。
@@ -129,8 +136,8 @@
   `__DSH_TRANSPORT__={ownsHost:true}`（否则模型设置报 settings are unavailable in this browser）；不装 dshDesktop 载体。
 - lane 传输层（#147，勿退回）：上游 keep-alive 连接池 + 客户端/上游两侧 setNoDelay + 逐跳头不原样转发；
   别再写回 `agent: false`，那会让每个请求新建 TCP 并把 `connection: close` 透给浏览器。
-  - 测试：mobile-access `npm test`（node 60 例，含 WS 空闲保活帧泵 7 例 + lane 路由契约 5 例 + 完整访问/透传不变式 2 例）、shell-web 10 例（含会话守卫 7 例）、
-   dsh-mobile-nav `npm run test:core` 191 例、expo-app `npm test`（vitest 15 例，含会话守卫 7 例）；cargo test 171 例；
+  - 测试：mobile-access `npm test`（node 71 例，含 WS 空闲保活帧泵 + lane 路由契约 + 完整访问/透传不变式）、shell-web 19 例（含会话守卫 7 例）、
+   dsh-mobile-nav `npm run test:core` 349 例、expo-app `npm test`（vitest 103 例，含会话守卫 7 例）；cargo test 180 通过 / 1 失败（power 的 pmset 可见性测试因本机 live App 持同名断言误报，环境性，与代码无关）、desktop 脚本守卫 `cd desktop && npm run test:scripts` 5 例、build script staging 单测 6 例（`cargo test --locked embed_plugins`，#212）；
    `node scripts/test-client.mjs` 快测（client 纯函数 + dshDesktop 载体冒烟，~0.6s）；
    桥契约仿真（#118 guest 载体，手动）：
    `desktop/scripts/bridge-contract/run.sh` 产测试页，读 window.__RESULTS__ 期望 22/22 PASS。
@@ -182,6 +189,12 @@
     里没有 `\x1d` 字节、keymap 也没注册 ArrowLeft/ArrowRight）。壳侧在 `document` capture 阶段拦掉
     （`src/client/composer-input-guard.ts` 三层网：beforeinput + input 兜底 + MutationObserver），
     放行 Tab/LF/CR 与输入法的组合事件；拦截日志要设上限（方向键每按一次都会触发）。
+13. 内嵌插件 staging（#212）：`build.rs` 的 `stage_embedded_plugins()` 是**硬闸门**（拷贝失败 panic
+    中止构建），子模块没 checkout 时会直接报错并提示 `git submodule update --init --recursive`；
+    别把它降级回 warning：0.12.0 就是在无子模块的 worktree 里构建、四份文件全失败仍打印「已打包」，
+    产出的安装包缺 `plugins/dsh-web-mobile`，挂池只 WARN 跳过、用户零感知；目录拷贝必须**递归**
+    （v3.0.5 的 `lib/types/` 子目录曾被非递归实现静默丢掉）。`desktop/scripts/ensure-embedded-plugins.mjs`
+    （`dev`/`build` 前置）与它清单同源，改一处必须改另一处（有单测锁死）。
 
 ## Agent skills
 

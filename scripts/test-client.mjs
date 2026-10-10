@@ -399,5 +399,57 @@ gt.fire('input', mkEvent({ target: area, type: 'input' }))
 assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
+// ── plugin-health（#212）：内嵌插件缺件告警的纯函数 ──
+await build({
+  entryPoints: [join(root, 'src/client/plugin-health.ts')],
+  outfile: join(tmp, 'plugin-health.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+
+const ph = await import(join(tmp, 'plugin-health.mjs'))
+
+// 读取：壳送的缺件清单；脏数据一律当「无告警」，绝不因为状态查询把状态条搞崩
+assert.deepEqual(ph.readPluginWarnings({ plugin_warnings: ['dsh-web-mobile'] }), ['dsh-web-mobile'], '取出缺件清单')
+assert.deepEqual(ph.readPluginWarnings({ plugin_warnings: [] }), [], '空数组 = 无告警')
+assert.deepEqual(ph.readPluginWarnings({}), [], '缺字段 = 无告警')
+assert.deepEqual(ph.readPluginWarnings(null), [], 'null = 无告警（不 throw）')
+assert.deepEqual(ph.readPluginWarnings({ plugin_warnings: 'dsh-web-mobile' }), [], '非数组 = 无告警')
+assert.deepEqual(
+  ph.readPluginWarnings({ plugin_warnings: [1, '', '  ', 'dsh-mobile-access'] }),
+  ['dsh-mobile-access'],
+  '脏元素被过滤，只留非空字符串',
+)
+
+// 文案：无告警回空串（调用方据此回落到生命周期文案）
+assert.equal(ph.pluginWarningLabel([]), '', '无告警不占状态条文案')
+assert.equal(ph.pluginWarningLabel(['dsh-web-mobile']), '插件缺失：dsh-web-mobile', '单缺件文案')
+assert.equal(ph.pluginWarningLabel(['a', 'b']), '插件缺失：a、b', '多缺件用顿号连接')
+assert.equal(ph.pluginWarningTitle([]), '', '无告警无悬停说明')
+assert.ok(
+  ph.pluginWarningTitle(['dsh-web-mobile']).includes('重装或更新本应用可修复'),
+  '悬停说明给出修复办法（与壳日志、票面措辞一致）',
+)
+assert.equal(ph.PLUGIN_WARNING_COLOR, '#f59e0b', '告警色是橙（与红/绿的生命周期色区分）')
+
+// 合成文案（#212 复核建议修 2）：严重态（服务异常/下线）不能被缺件顶替，只做附加说明
+assert.equal(ph.composeStatusLabel(2, '运行中', []), '运行中', '无缺件原样返回生命周期文案')
+assert.equal(
+  ph.composeStatusLabel(2, '运行中', ['dsh-web-mobile']),
+  '插件缺失：dsh-web-mobile',
+  '普通状态：缺件优先（壳「运行中」但插件没挂上，用户只有这里能知道）',
+)
+assert.equal(
+  ph.composeStatusLabel(5, '服务异常', ['dsh-web-mobile']),
+  '服务异常（插件缺失：dsh-web-mobile）',
+  '严重态：服务信息不被顶替',
+)
+assert.equal(ph.composeStatusLabel(6, '服务下线', ['a', 'b']), '服务下线（插件缺失：a、b）', '下线态同样保留')
+assert.equal(ph.isCriticalStatus(5), true, '5=服务异常是严重态')
+assert.equal(ph.isCriticalStatus(6), true, '6=服务下线是严重态')
+assert.equal(ph.isCriticalStatus(1), false, '1=启动中不是严重态')
+assert.equal(ph.isCriticalStatus(2), false, '2=运行中不是严重态')
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')

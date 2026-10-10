@@ -6,3 +6,6 @@ pub mod builtin;
 pub mod registry; // dsh 运行时仓库：版本目录/下载安装/多版本共存（#95）
 pub mod paths; // 资源路径 verbatim 归一（#123）
 pub mod cli_patch; // 让我们注入的 dsh 放行 desktop profile（幂等补丁）
+
+#[cfg(test)]
+mod embed_plugins_test; // #212：build script 的 staging 核心（同一份源码）拉进 cargo test
