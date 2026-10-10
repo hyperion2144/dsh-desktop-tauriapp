@@ -576,6 +576,9 @@ mod tests {
     #[test]
     fn node_shim_dir_provides_node_command() {
         // #135：内置 node 文件名是 dsh-node，垫片目录必须提供叫 `node` 的硬链/符号链接。
+        // #161：名字是平台契约——Windows 的垫片是 `node.exe`（见 `node_shim_dir` 里的
+        // `#[cfg(windows)]`），断言必须跟着走。之前这里写死 `node`，而 Windows job 只跑
+        // `cargo check`（不编译、更不执行 `#[cfg(test)]`），所以这个必然的失败一直没被发现。
         let root = std::env::temp_dir().join(format!("dsh-shim-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let bin_dir = root.join("bin");
@@ -585,8 +588,13 @@ mod tests {
         let dst = root.join("runtimes").join("0.0.0");
         let dir = node_shim_dir(&fake_node, &dst).expect("垫片目录应创建成功");
         assert_eq!(dir, dst.parent().unwrap().join(".node-shim"));
-        let link = dir.join("node");
-        assert!(link.is_file(), "垫片应提供 node 命令：{}", link.display());
+        let shim_name = if cfg!(windows) { "node.exe" } else { "node" };
+        let link = dir.join(shim_name);
+        assert!(
+            link.is_file(),
+            "垫片应提供 {shim_name} 命令：{}",
+            link.display()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

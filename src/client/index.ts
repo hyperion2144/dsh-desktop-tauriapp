@@ -10,6 +10,7 @@ import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
 import { installDesktopPlatformBridge } from './platform-keyboard.ts'
 import { installComposerInputGuard } from './composer-input-guard.ts'
+import { installWindowRestoreRecovery } from './window-restore-recovery.ts'
 
 export { applyAdvancedShell } from './advanced-shell.ts'
 export { parseDesktopClientEnvironment, requestDesktopClientEnvironment } from './environment.ts'
@@ -128,6 +129,11 @@ export function apply(ctx: ClientContext): void {
     step = '输入框控制字符守护'
     // 输入框控制字符守护（#188）：capture 阶段拦下带控制字符的 beforeinput。
     installComposerInputGuard()
+    step = '窗口还原重排钩子'
+    // 窗口还原重排（#161）：Windows 最小化→还原后 WebView2 可能整片不重绘（黑屏）；
+    // 壳侧用尺寸微调逼重绘，页面侧保证还原那一刻按视口尺寸写的 chrome 几何是新的。
+    // 同时把 __dshShellRestoreImpl 入口挂给壳（纯浏览器无副作用、重复调用幂等）。
+    installWindowRestoreRecovery()
     step = '移动端渲染预算'
     // 移动端渲染预算（#147 路线 B）：窄屏 + 触摸时给会话滚动容器做视觉窗口化；
     // 只在本仓做，不动 dsh-mobile-nav 子模块；命中不了容器则整体 no-op。

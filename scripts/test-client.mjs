@@ -399,5 +399,189 @@ gt.fire('input', mkEvent({ target: area, type: 'input' }))
 assert.equal(area.value, 'xy', '输入框 value 里的控制字符也被擦掉')
 
 
+
+// ── window-restore-recovery（#161）：还原判定纯函数 ──
+await build({
+  entryPoints: [join(root, 'src/client/window-restore-recovery.ts')],
+  outfile: join(tmp, 'window-restore-recovery.mjs'),
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+
+const wr = await import(join(tmp, 'window-restore-recovery.mjs'))
+
+// 判定：只有「可见」才排期；隐藏期间一律不动作（否则最小化时白跑）
+assert.deepEqual(
+  wr.restoreReasons({ visible: false, focused: false, hiddenWhileBlurred: true }),
+  [],
+  '隐藏状态不给理由',
+)
+assert.deepEqual(
+  wr.restoreReasons({ visible: true, focused: true, hiddenWhileBlurred: false }),
+  ['visibility-restore'],
+  '可见 + 有焦点但没欠账 → 只有 visibility-restore',
+)
+assert.deepEqual(
+  wr.restoreReasons({ visible: true, focused: true, hiddenWhileBlurred: true }),
+  ['visibility-restore', 'focus-recovery'],
+  '焦点路径只有在失去焦点期间确实 hidden 过才算数',
+)
+assert.deepEqual(
+  wr.restoreReasons({ visible: true, focused: false, hiddenWhileBlurred: true }),
+  ['visibility-restore'],
+  '没有焦点时不给 focus-recovery（避免误判成还原）',
+)
+
+// 订阅：幂等去重 + 单个订阅者抛错不连坐 + 退订干净
+const noop = () => {}
+wr.onWindowRestore(noop)
+assert.equal(wr.restoreHandlerCount(), 1, '订阅生效')
+wr.onWindowRestore(noop)
+assert.equal(wr.restoreHandlerCount(), 1, '同一函数重复订阅只留一份（幂等）')
+const offNoop = wr.onWindowRestore(noop)
+
+const calls = []
+const offThrows = wr.onWindowRestore(() => {
+  throw new Error('boom')
+})
+const offSecond = wr.onWindowRestore((request) => calls.push(request.reason))
+// 抛错的那个排在前面：后面的订阅者必须照跑
+assert.equal(wr.runRestoreHandlers({ reason: 'shell-command', signals: ['shell-command'] }), true, '有订阅者时报「跑了」')
+assert.deepEqual(calls, ['shell-command'], '抛错的订阅者不连坐后面的')
+offThrows()
+offSecond()
+assert.equal(wr.restoreHandlerCount(), 1, '退订只摘自己那一个')
+offNoop()
+assert.equal(wr.restoreHandlerCount(), 0, '退订干净（不留悬挂 handler）')
+
+// ── 最小 window/document 桩里真跑一遍安装与三路信号（#161）──
+// 桩里只放本模块真正用到的东西：监听表、visibilityState/hasFocus、定时器。
+const restoreStub = `
+const listeners = {};
+const doc = {
+  visibilityState: 'visible',
+  focused: true,
+  hasFocus() { return this.focused },
+  addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn) },
+};
+const document = doc;
+const win = {
+  addEventListener(type, fn) { (listeners['win:' + type] = listeners['win:' + type] || []).push(fn) },
+};
+const window = win;
+globalThis.window = win;
+const run = (key, event) => { for (const fn of [...(listeners[key] || [])]) fn(event) };
+const seen = [];
+globalThis.__restoreTest = {
+  install: installWindowRestoreRecovery,
+  subscribe: onWindowRestore,
+  count: restoreHandlerCount,
+  doc, win, listeners, seen,
+  run,
+  hide() { doc.visibilityState = 'hidden' },
+  show() { doc.visibilityState = 'visible' },
+  blurPage() { doc.focused = false },
+  focusPage() { doc.focused = true },
+  fire: {
+    visibility: () => run('visibilitychange', {}),
+    blur: () => run('win:blur', {}),
+    focus: () => run('win:focus', {}),
+    pageshow: (persisted = true) => run('win:pageshow', { persisted }),
+  },
+};
+`
+const restoreSource = readFileSync(join(tmp, 'window-restore-recovery.mjs'), 'utf8')
+  .replace(/^export \{[^}]*\};?$/m, '')
+assert.ok(!restoreSource.includes('export '), '转译产物里的 export 已剥掉（vm 里当脚本跑）')
+const restoreSandbox = { setTimeout, clearTimeout }
+createContext(restoreSandbox)
+runInContext(restoreStub + restoreSource, restoreSandbox, { filename: 'window-restore-recovery.js' })
+const rt = restoreSandbox.__restoreTest
+rt.subscribe((request) => rt.seen.push(request.signals.join('+')))
+
+rt.install()
+const restoreListeners = JSON.stringify(Object.keys(rt.listeners).sort())
+rt.install()
+assert.equal(JSON.stringify(Object.keys(rt.listeners).sort()), restoreListeners, '重复安装不重挂监听')
+assert.equal(typeof rt.win.__dshShellRestoreImpl?.restore, 'function', '挂上壳侧入口 __dshShellRestoreImpl.restore')
+
+// 正常隐藏 → 显形：visibilitychange 一路
+rt.hide(); rt.fire.visibility()
+assert.equal(rt.seen.length, 0, '最小化（hidden）期间不重排')
+rt.show(); rt.fire.visibility()
+assert.equal(rt.seen.length, 1, '回到可见触发一次重排')
+
+// WebView2 可能只发 focus（不发 visibilitychange）：焦点回来 + 曾隐藏 ⇒ 仍要重排
+rt.blurPage(); rt.hide(); rt.fire.blur()
+rt.focusPage(); rt.show(); rt.fire.focus()
+assert.equal(rt.seen.length, 2, '焦点兜底路径也触发重排')
+assert.ok(rt.seen[1].includes('focus-recovery'), '焦点路径带 focus-recovery 标记')
+
+// 从未隐藏过的普通焦点切换不打扰（防误判成还原）
+rt.fire.focus()
+assert.equal(rt.seen.length, 2, '没隐藏过的 focus 不重排')
+
+// pageshow：只有 bfcache 恢复才算「回到可见」；首次加载与隐藏期间都不动
+rt.fire.pageshow(false)
+assert.equal(rt.seen.length, 2, '首次加载的 pageshow（persisted=false）不重排')
+rt.hide()
+rt.fire.pageshow(true)
+assert.equal(rt.seen.length, 2, '隐藏期间的 bfcache 恢复不重排')
+rt.show()
+rt.fire.pageshow(true)
+assert.equal(rt.seen.length, 3, 'bfcache 恢复触发一次重排')
+
+// 壳显式入口：隐藏时不认、可见时带 shell-command
+rt.hide()
+assert.equal(rt.win.__dshShellRestoreImpl.restore('shell-command'), false, '隐藏时壳的还原请求被拒（返回 false）')
+rt.show()
+assert.equal(rt.win.__dshShellRestoreImpl.restore('shell-command'), true, '可见时壳的还原请求被执行')
+assert.ok(rt.seen[3].includes('shell-command'), '壳请求带 shell-command 标记')
+
+// ── 模块重装（HMR）与桥入口共存 ──
+// 已有 impl（旧 bundle / 别的插件装的）不许被静默覆盖：挂上我们的，同时委托过去。
+rt.win.__dshShellRestoreImpl = { restore: () => { rt.seen.push(['previous']); return true } }
+
+// 模拟「模块代码再求值一次」：包一层 IIFE 绕开顶层 const 重声明，其余照原样跑。
+const reeval = (tooling, filename) =>
+  runInContext(
+    `(function () {\n${restoreSource}\n${tooling}\n})()`,
+    restoreSandbox,
+    { filename },
+  )
+
+reeval(
+  `const __log = [];
+globalThis.__dshShellRestoreReinstall = {
+  subscribe: onWindowRestore,
+  signals: () => __log.slice(),
+  clear: () => { __log.length = 0 },
+};
+onWindowRestore((request) => __log.push(request.signals.join('+')));`,
+  'window-restore-recovery-reeval.js',
+)
+
+assert.equal(rt.win.__dshShellRestoreInstalled, true, '重装看到的是同一份安装状态')
+assert.equal(
+  JSON.stringify(Object.keys(rt.listeners).sort()),
+  restoreListeners,
+  '重装不重挂监听（已装过就早退，不叠监听）',
+)
+rt.win.__dshShellRestoreImpl.restore('shell-command')
+assert.ok(rt.seen.at(-1).includes('previous'), '旧 impl 被委托调用（不静默覆盖）')
+delete rt.win.__dshShellRestoreImpl
+
+const reinstalled = restoreSandbox.__dshShellRestoreReinstall
+assert.ok(reinstalled, '重装后的模块把自己挂上了')
+reinstalled.clear()
+rt.fire.visibility()
+assert.equal(
+  reinstalled.signals().length,
+  1,
+  '重装后的新订阅者仍被驱动（handler 表挂 window，旧监听照样喂它）',
+)
+
 rmSync(tmp, { recursive: true, force: true })
 console.log('client 纯函数测试：全部通过 ✓')
