@@ -1,4 +1,5 @@
 import type { DesktopClientPlatform } from './environment.ts'
+import { onWindowRestore } from './window-restore-recovery.ts'
 
 /** 各平台自绘条高度（CSS px）。 */
 const STRIP_HEIGHT: Record<DesktopClientPlatform, number> = {
@@ -453,8 +454,13 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
     }, 250)
   }
   sync()
+  // #161：窗口「最小化 → 还原」后重算一遍按视口尺寸写的内联几何。
+  // 还原时窗口尺寸/DPI 可能已经变了（最大化、跨屏），黑屏期间的旧内联值会错位；
+  // 重绘本身由 Rust 侧的尺寸微调负责（ui::window_recovery），这里只保证几何正确。
+  const unobserveRestore = onWindowRestore(() => schedule())
 
   return () => {
+    unobserveRestore()
     if (raf !== 0) cancelAnimationFrame(raf)
     if (mountTimer !== 0) window.clearInterval(mountTimer)
     if (statusTimer !== 0) window.clearInterval(statusTimer)
