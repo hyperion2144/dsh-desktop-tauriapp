@@ -378,15 +378,21 @@ pub(crate) fn materialize_desktop_plugin(app: &tauri::AppHandle) {
 pub(crate) fn materialize_desktop_plugin_for(app: &tauri::AppHandle, profile: &str) {
     let pool = dsh_home().join("profiles").join(profile).join("node_modules");
     let _ = std::fs::create_dir_all(&pool);
+    // #212：三插件里任何一个没定位到都要留痕（error 级日志 + 状态里的告警清单）。
+    // 以前每个分支只打一条 WARN 就静默继续 —— 0.12.0 缺件事故用户完全无感。
+    let mut missing: Vec<&str> = Vec::new();
+
     if let Some(dir) = desktop_plugin_dir(app) {
         materialize_pool_package(&pool, "dsh-desktop-tauriapp", &dir);
     } else {
         log::warn!("未定位到 dsh-desktop-tauriapp 插件包，跳过共享模块池挂载");
+        missing.push("dsh-desktop-tauriapp");
     }
     if let Some(dir) = mobile_package_dir(app, "dsh-mobile-access", "dsh-mobile-access") {
         materialize_pool_package(&pool, "dsh-mobile-access", &dir);
     } else {
         log::warn!("未定位到 dsh-mobile-access 插件包，跳过共享模块池挂载");
+        missing.push("dsh-mobile-access");
     }
     // link_name 与上游 cordis.patch.yml 的 name 一致（v2.3.0 起为无 scope 的
     // dsh-web-mobile）：dsh 从 profile 解析 'name: dsh-web-mobile' 时按这个 key
@@ -396,7 +402,27 @@ pub(crate) fn materialize_desktop_plugin_for(app: &tauri::AppHandle, profile: &s
         materialize_pool_package(&pool, "dsh-web-mobile", &dir);
     } else {
         log::warn!("未定位到 dsh-web-mobile 插件包，跳过共享模块池挂载");
+        missing.push("dsh-web-mobile");
     }
+
+    report_plugin_health(app, profile, &missing);
+}
+
+/// 把「哪些内嵌插件没挂上」写进状态并给出可见信号（#212）。
+///
+/// 只记不拦：启动照旧（可能少一两个插件），但 `log::error!` 与 `get_dsh_status` 的
+/// `plugin_warnings` 都会带上清单 —— 客户端状态条据此显示「插件缺失」。
+fn report_plugin_health(app: &tauri::AppHandle, profile: &str, missing: &[&str]) {
+    let state = app.state::<crate::runtime::state::DshState>();
+    if missing.is_empty() {
+        state.set_plugin_warnings(profile, Vec::new());
+        return;
+    }
+    log::error!(
+        "内嵌插件未挂载：{}（安装包可能不完整；相关功能不可用，重装或更新本应用可修复）",
+        missing.join("、")
+    );
+    state.set_plugin_warnings(profile, missing.iter().map(|name| (*name).to_string()).collect());
 }
 
 /// 退出时清理所有 profile 下的桌面插件 junction/symlink（不删复制体）。

@@ -180,6 +180,8 @@ pub(crate) fn get_dsh_status(state: tauri::State<DshState>) -> serde_json::Value
         "port": configured_port(),
         "profile": configured_profile(),
         "remote": load_desktop_settings().remote_addr,
+        // #212：内嵌插件缺失清单（非空 = 壳挂池时没定位到该包，客户端状态条据此显示「插件缺失」）
+        "plugin_warnings": state.plugin_warnings_for(&configured_profile()),
     })
 }
 

@@ -62,3 +62,7 @@ jobs:
         if: matrix.test
         working-directory: desktop/src-tauri
         run: cargo test --locked
+      # #212：内嵌插件 staging 守卫的单测（纯 node、无依赖；子模块没 checkout 时第一道就红）
+      - name: Embedded plugin guard tests
+        working-directory: desktop
+        run: npm run test:scripts

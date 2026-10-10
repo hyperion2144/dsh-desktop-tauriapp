@@ -37,7 +37,8 @@
   ],
   "scripts": {
     "build:client": "node scripts/build-client.mjs",
-    "test:client": "node scripts/test-client.mjs"
+    "test:client": "node scripts/test-client.mjs",
+    "test:scripts": "node --test desktop/scripts/*.test.mjs"
   },
   "dsh": {
     "client": {

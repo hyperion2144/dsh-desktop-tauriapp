@@ -78,6 +78,8 @@ pub(crate) struct DshState {
     /// #90：每 profile 实际使用的 dsh 来源（"builtin"/"external"，spawn 时记录；
     /// 设置 Tab 显示实际运行来源而非设置值——用户实测反馈）。
     pub(crate) running_sources: Mutex<std::collections::BTreeMap<String, String>>,
+    /// #212：每 profile 的内嵌插件缺失清单（挂池时写、`get_dsh_status` 读；空 = 一切正常）。
+    pub(crate) plugin_warnings: Mutex<std::collections::BTreeMap<String, Vec<String>>>,
     pub(crate) skip_startup_check: AtomicBool,
     /// 启动时用户选择的 profile（dsh 启动后前端通过 nsSave 持久化到 settings.yaml）。
     pub(crate) pending_active_profile: Mutex<Option<String>>,
@@ -205,6 +207,25 @@ impl DshState {
     pub(crate) fn clear_running_source(&self, profile: &str) {
         self.running_sources.lock().unwrap().remove(profile);
     }
+
+    /// 记录「哪些内嵌插件没挂上」（#212）：空列表 = 一切正常。
+    /// 按 profile 存 —— 状态条问的是它自己那个 profile 的实情。
+    pub(crate) fn set_plugin_warnings(&self, profile: &str, warnings: Vec<String>) {
+        self.plugin_warnings
+            .lock()
+            .unwrap()
+            .insert(profile.to_string(), warnings);
+    }
+
+    /// 读某 profile 的插件告警（客户端状态条轮询 `get_dsh_status` 时取）。
+    pub(crate) fn plugin_warnings_for(&self, profile: &str) -> Vec<String> {
+        self.plugin_warnings
+            .lock()
+            .unwrap()
+            .get(profile)
+            .cloned()
+            .unwrap_or_default()
+    }
     /// 存 per-profile web token（spawn stdout 线程调用）。
     pub(crate) fn set_web_token(&self, profile: &str, token: String) {
         self.web_tokens
@@ -259,6 +280,7 @@ mod tests {
             windows: Mutex::new(Default::default()),
             web_tokens: Mutex::new(Default::default()),
              running_sources: Mutex::new(Default::default()),
+            plugin_warnings: Mutex::new(Default::default()),
             skip_startup_check: AtomicBool::new(false),
             pending_active_profile: Mutex::new(None),
             downloads: crate::download::DownloadManager::default(),
@@ -266,6 +288,56 @@ mod tests {
         assert_eq!(state.notify_port.load(Ordering::SeqCst), 0);
         assert!(state.notify_token.lock().unwrap().is_empty());
         assert!(state.pre_zoom_geom.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn plugin_warnings_are_per_profile_and_clearable() {
+        // #212：缺件告警按 profile 存，挂齐后必须被清空 —— 否则状态条会一直显示「插件缺失」。
+        let state = DshState {
+            main_worker: crate::process::worker::DshWorker::new("web".into(), 3080, true),
+            spawned_this_run: AtomicBool::new(false),
+            mode_prompt_needed: AtomicBool::new(false),
+            mode: AtomicU8::new(MODE_ADVANCED),
+            status: AtomicU8::new(STATUS_STARTING),
+            loading_url: Mutex::new(None),
+            tray: Mutex::new(None),
+            ready_once: AtomicBool::new(false),
+            pending_input: Mutex::new(None),
+            last_focused: Mutex::new(None),
+            quitting: AtomicBool::new(false),
+            tray_tip_shown: AtomicBool::new(false),
+            unread: AtomicU32::new(0),
+            pet_save_at: Mutex::new(None),
+            notify_port: AtomicU16::new(0),
+            notify_token: Mutex::new(String::new()),
+            web_token: Mutex::new(String::new()),
+            pre_zoom_geom: Mutex::new(None),
+            stderr_bufs: Mutex::new(Default::default()),
+            workers: Mutex::new(Default::default()),
+            windows: Mutex::new(Default::default()),
+            web_tokens: Mutex::new(Default::default()),
+            running_sources: Mutex::new(Default::default()),
+            plugin_warnings: Mutex::new(Default::default()),
+            skip_startup_check: AtomicBool::new(false),
+            pending_active_profile: Mutex::new(None),
+            downloads: crate::download::DownloadManager::default(),
+        };
+        assert!(state.plugin_warnings_for("desktop").is_empty(), "没挂池过 = 无告警");
+        state.set_plugin_warnings("desktop", vec!["dsh-web-mobile".to_string()]);
+        assert_eq!(
+            state.plugin_warnings_for("desktop"),
+            vec!["dsh-web-mobile".to_string()],
+            "缺件清单按 profile 可读回"
+        );
+        assert!(
+            state.plugin_warnings_for("web").is_empty(),
+            "别的 profile 不受影响（状态条只问自己那个 profile）"
+        );
+        state.set_plugin_warnings("desktop", Vec::new());
+        assert!(
+            state.plugin_warnings_for("desktop").is_empty(),
+            "挂齐后清空，不残留旧告警"
+        );
     }
 
     #[test]
@@ -292,6 +364,7 @@ mod tests {
             tray: Mutex::new(None),
             ready_once: AtomicBool::new(false),
             pending_input: Mutex::new(None),
+            plugin_warnings: Mutex::new(Default::default()),
             last_focused: Mutex::new(None),
             quitting: AtomicBool::new(false),
             tray_tip_shown: AtomicBool::new(false),
