@@ -24,6 +24,7 @@ import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
 import type { ViewRegistry } from '../shared/view-grant.ts'
+import type { GuestCommands } from './guest-manager.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
@@ -90,8 +91,9 @@ export interface ServiceOptions {
   pickSoundFile?: () => Promise<string | null>
   /** 弹目录选择器选下载位置（index.ts 注入 Electrobun 的 openFileDialog；缺省落 ~/Downloads） */
   chooseDownloadDir?: (start: string) => Promise<string | null>
-  /** 每视图授权台账（#220 决策 12）：index.ts 注入进程级那一个，页面桥带 token 回来查表 */
   views?: ViewRegistry
+  /** 浏览器 guest 命令（guest 挂在发起调用的窗口上，所以由窗口层实现并注入） */
+  guests?: GuestCommands
   /** 应用版本（诊断快照里报；index.ts 注入壳自己的版本号） */
   appVersion?: string
   /** 页面语言（诊断快照里报） */
@@ -565,9 +567,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onActivate: options.onActivate,
     views: options.views,
     onLog: log,
-    onRpc: async (raw) => {
+    onRpc: async (raw, grant) => {
       if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
-      return await dispatchRpc(rpcRouter, raw)
+      return await dispatchRpc(
+        rpcRouter,
+        raw,
+        grant === null ? {} : { caller: { kind: grant.kind, profile: grant.profile, label: grant.label } },
+      )
     },
   }
   const server = startShellServer(serverOptions)
@@ -930,6 +936,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       },
       migrationStatus: () => taskTracker.migrationStatus(),
       testProxy: (url) => testProxyConnectivity(url),
+      guests: options.guests,
     }),
   )
   return service

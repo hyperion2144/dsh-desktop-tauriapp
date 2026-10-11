@@ -9,7 +9,9 @@ import type { DownloadManager } from './downloads.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
 import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
-import { argNumber, argString, type RpcHandler } from './rpc.ts'
+import { argNumber, argString, type RpcContext, type RpcHandler } from './rpc.ts'
+import type { GuestCommands } from './guest-manager.ts'
+import type { GuestPush } from '../shared/guest-policy.ts'
 import { listSounds, type Notifier } from './notifications.ts'
 import { permissionHint, type NotifyPermission } from '../shared/notify-permission.ts'
 import type { PortClaim } from '../shared/ports.ts'
@@ -96,6 +98,8 @@ export interface CommandDeps {
   migrateProfile?: (source: string, dest: string, overwrite: boolean) => Promise<string>
   /** 迁移进度（面板 300ms 轮询） */
   migrationStatus?: () => MigrationStatus
+  /** 浏览器 guest（侧边栏浏览器 / 远程窗口的子 webview）；无窗口单测可以不接 */
+  guests?: GuestCommands
   /** TCP 连一次代理，返回耗时 ms（旧壳 test_proxy_connectivity） */
   testProxy?: (url: string) => Promise<number>
 }
@@ -126,13 +130,6 @@ export interface RuntimeSnapshot {
 
 /** 已实现命令里，明确「还没搬过来」的那几条：报清楚原因，UI 才能给人看。 */
 const NOT_PORTED: Record<string, string> = {
-  browser_guest_state: '浏览器 guest 尚未移植',
-  browser_guest_acquire: '浏览器 guest 尚未移植',
-  browser_guest_navigate: '浏览器 guest 尚未移植',
-  browser_guest_set_bounds: '浏览器 guest 尚未移植',
-  browser_guest_set_visible: '浏览器 guest 尚未移植',
-  browser_guest_release: '浏览器 guest 尚未移植',
-  browser_guest_release_all: '浏览器 guest 尚未移植',
 }
 
 /** profile 可以是静态值（单测）或取值函数（壳里跟着托盘切 profile 变） */
@@ -149,6 +146,14 @@ function pidAlive(pid: number): boolean {
   } catch {
     return pid === process.pid
   }
+}
+
+/** 命令的调用方（每视图授权台账里的 label/profile）；无台账时按「当前 profile 的主窗」兜底。 */
+function callerOf(context: RpcContext | undefined, deps: CommandDeps): { label: string; profile: string } {
+  const caller = context?.caller
+  if (caller !== undefined) return { label: caller.label, profile: caller.profile }
+  const profile = profileOf(deps)
+  return { label: `profile-${profile}`, profile }
 }
 
 export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler> {
@@ -584,6 +589,48 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       if (url === '') throw new Error('代理地址为空')
       if (deps.testProxy === undefined) throw new Error('test_proxy_connectivity：壳未接连接测试')
       return deps.testProxy(url)
+    },
+    // 浏览器 guest（旧壳 desktop/src-tauri/src/ui/browser_guests/mod.rs 的 8 条命令）。
+    // guest 挂在**发起调用的那个窗口**上，所以调用方从 RPC 上下文里取（每视图授权台账）。
+    browser_guest_acquire: async (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_acquire：壳未接浏览器 guest')
+      return await guests.acquire(args, callerOf(context, deps))
+    },
+    browser_guest_release: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_release：壳未接浏览器 guest')
+      return guests.release(args, callerOf(context, deps))
+    },
+    browser_guest_navigate: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_navigate：壳未接浏览器 guest')
+      return guests.navigate(args, callerOf(context, deps))
+    },
+    browser_guest_control: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_control：壳未接浏览器 guest')
+      return guests.control(args, callerOf(context, deps))
+    },
+    browser_guest_set_bounds: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_set_bounds：壳未接浏览器 guest')
+      return guests.setBounds(args, callerOf(context, deps))
+    },
+    browser_guest_set_visible: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_set_visible：壳未接浏览器 guest')
+      return guests.setVisible(args, callerOf(context, deps))
+    },
+    browser_guest_state: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_state：壳未接浏览器 guest')
+      return guests.state(args, callerOf(context, deps)) satisfies GuestPush
+    },
+    browser_guest_release_all: (args, context) => {
+      const guests = deps.guests
+      if (guests === undefined) throw new Error('browser_guest_release_all：壳未接浏览器 guest')
+      return guests.releaseAll(args, callerOf(context, deps))
     },
   }
 

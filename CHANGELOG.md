@@ -3,6 +3,20 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **浏览器 guest：侧边栏浏览器的 8 条命令接上，页面能真的嵌一个外来网页（#220 能力补齐，旧壳 `desktop/src-tauri/src/ui/browser_guests/` 的等价物）**：
+  - **为什么不用 Electrobun 自带的 `<electrobun-webview>` 标签**：那套靠 DOM 树自己建视图（属性直写 partition/renderer），而 dsh 前端的 DOM 是固定的——它只知道 `desktop-browser-bridge.ts` 那套 `browser_guest_*` 契约，所以走「壳维护台账 + 推状态回页面」这条旧壳已经跑通的路。
+  - **guest 是宿主窗口上的一枚子视图**：`new BrowserView({..., sandbox: true, renderer: 'cef', partition: 'persist:ws-<workspace 派生>', frame: 屏幕外 1×1, windowId/hostWebviewId: 发起调用的那个窗口})`。`sandbox: true` = 不开 RPC、只保留事件（不可信内容）；partition 按 workspace 派生（`fnv64` 16 位十六进制）⇒ 各工作区的 cookie/存储天然隔离；窗口关了按宿主标签批量回收。
+  - **状态靠「推」不靠「拉」**：dsh 侧对 `<webview>` 的 `getURL/isLoading/canGoBack` 是**同步**读镜像，而壳↔页面 IPC 是异步的 ⇒ 壳在 `dom-ready`/`did-navigate`/`did-navigate-in-page`/`host-message` 后 eval 一条 `__dshShellBridgeImpl._receive(快照)`。注入 guest 的上报脚本反过来用内置 preload 的 `__electrobunSendToHost` 把 **title/加载态**报回来（CEF 没有标题回调），外加 30s 看门狗（旧壳同款）判加载失败。
+  - **导航策略**（旧壳 `policy.rs`）：只放行外部 http/https（禁带凭证 URL）与 `about:blank`；应用宿主（127.0.0.1 / ::1 / localhost / dshapp.localhost 等）一律拒；`file:`/`data:`/`javascript:` 全拒。被拒时拉回 `about:blank` 并记日志（原生已拦的不重复动作）。`new-window-open`（Cmd/中键、`window.open`）**不**在应用内开窗，而是推回 dsh 让它开新标签。
+  - **补了 Electrobun 封装层没暴露的两件东西**：`libElectrobunCore.dylib` 里其实导出了 `webviewGoBack/webviewGoForward/webviewReload/webviewSetHidden/resizeWebview`，但 `electrobun` 的公开 API 里既没有历史方法也没有 bounds setter ⇒ 新增 `native-webview.ts` 用 `bun:ffi` 自己 dlopen 核调这几个符号（找不到核就降级成一条日志：几何与历史按钮只影响体验，不影响创建/导航）。
+  - **`globalThis.dshDesktop` 载体（新增 `carrier.ts`，旧壳 `desktop_carrier_init_script` 的等价物）**：dsh 前端的 guest 桥只在载体存在时安装，而旧壳是注在 `dshapp://` 页面上的——新壳一直没注 ⇒ 桥从未装过。现在 preload document-start 写入 `dshDesktop = {protocolVersion:1, browser:{acquire,release,onOpenRequested}, keyboard, shortcuts}`（方法体惰性轮询 `__dshShellBridgeImpl`，旧壳同款 4s/30s 宽限）并写 `documentElement.dataset.platform`。
+  - **实机抓到的两个真问题（已修，都有回归测试）**：
+    1. **CEF 冷分区首次创建会抢跑**：某个 `persist:` 分区的第一次 `CreateBrowserSync` 会返回 null（浏览器对象建了但没挂到 webview、没有 `cef mapping` 行）⇒ 那个 guest 永远黑屏。做法：冷分区等一个就绪信号（`dom-ready`/`did-navigate`）最多 1.2s，等不到就丢掉重建一次；预热过的分区走快路径。
+    2. **`set_bounds` 的参数形状**：dsh 前端按旧壳命令签名发的是**平铺** `{lease,x,y,width,height}`，我一开始按 `{lease,rect}` 收 ⇒ 几何永远不生效。现在两种都认。
+  - **测试**：新增 `test/guest.test.ts`（34 例：策略/租约/partition/矩形/事件 detail 两种形态/推送脚本 U+2028 转义/上报脚本/原生核定位/管理器 12 例，含冷分区重建、看门狗超时、跨窗口拒接、`release_all`/`releaseHost`、原生核不可用降级、载体脚本关键串）；全量 `bun test` **458 pass / 0 fail**（27 文件、1613 expect）。
+  - **实机证据（dev 实例，隔离 home，CDP 在真 CEF 窗口里验）**：载体与桥都就位（`dshDesktop=object`、`__dshShellBridgeImpl=object`、`data-platform=darwin`、`protocolVersion=1`）；acquire 触发冷分区重建（日志 `CreateBrowserSync returned null for webview 3` → `分区 … 首次创建未就绪，重建视图` → `CEF Mapping: Registered browser 3 -> webview 4`）；`navigate https://example.com/` 后页面收到 `started → finished → state` 三条推送，`state` 回 `{url:'https://example.com/', title:'Example Domain', loading:false, canGoBack:true}`；`navigate http://127.0.0.1:6472/api` 被策略拒；`control back` 后 `canGoForward:true`；`release` 后旧租约报「不在」。
+  - **已知取舍**：guest 内下载一律拒（Electrobun 没有取消 API，只能记日志）；`clearHistory`/`stop` 由 client 层空实现；guest 的 view token 白名单（`log_console`/`log_diag`）已在位，但**发放方**（把外来网页也当一种窗口发 token）还没接。
+
 - **日志与诊断：有界轮转的壳日志 + 页面控制台镜像 + 一键导出诊断快照（#220 能力补齐）**：
   - **壳日志现在会轮转**：以前是一行行 append 到 `$DSH_HOME/shell.log`，从不轮转（长跑必然无限涨）。现在按旧壳的两个好习惯（**本地时区**时间戳、单份 10 MB）加**固定份数**（当前 + 4 份历史 = 上限 50 MB，超过删最旧）；旧壳用 `tauri-plugin-log` 的 `KeepAll`，实测那台机器堆了 **90+ 份 ≈900 MB**——这次把「不封顶」换掉。
   - **页面控制台现在真的进文件了（修了一个真 bug）**：客户端一直按 `{level, msg, pageUrl}` 调 `log_console`（`src/client/index.ts:63`），新壳却读 `message` ⇒ 字段对不上，**页面所有 console 都没落盘**（只写了一条 `(empty)`）。现在按旧壳 `desktop/src-tauri/src/commands.rs:139` 的契约实现：写 `$DSH_HOME/dsh-desktop-webview.log`，前缀逐字对齐（`[error]`/`[warn] `/`[info] `/`[debug]`/`[log]  `）、多行逐行加前缀、只有 warn/error 另镜像一份到壳日志（旧壳原话：控制台量大时不让壳日志噪声翻倍）。

@@ -20,7 +20,23 @@ export interface RpcRequest {
   args: Record<string, unknown>
 }
 
-export type RpcHandler = (args: Record<string, unknown>) => unknown | Promise<unknown>
+/**
+ * 调用方身份（每视图授权台账里的那一行）。
+ *
+ * 命令表里绝大多数命令不关心「是谁在调」，但 guest 那几条必须知道：guest 要挂在**发起调用的那个窗口**上，
+ * 关闭窗口/退出时也要按窗口批量回收。`grant` 为 null ＝ 该路径没开每视图校验（测试与旧调用点）。
+ */
+export interface RpcCaller {
+  kind: 'shell' | 'guest'
+  profile: string
+  label: string
+}
+
+export interface RpcContext {
+  caller?: RpcCaller
+}
+
+export type RpcHandler = (args: Record<string, unknown>, context?: RpcContext) => unknown | Promise<unknown>
 
 export type RpcRouter = Map<string, RpcHandler>
 
@@ -67,7 +83,7 @@ export function rpcCommands(router: RpcRouter): string[] {
  * 派发一次调用。**永不抛**：任何异常都变成 `ok:false`，让页面侧拿到可读原因
  * （Tauri 的 invoke 也是 reject 语义，插件里到处是 `.catch(...)`）。
  */
-export async function dispatchRpc(router: RpcRouter, raw: string): Promise<RpcResult> {
+export async function dispatchRpc(router: RpcRouter, raw: string, context: RpcContext = {}): Promise<RpcResult> {
   if (raw.length > MAX_RPC_BYTES) {
     return { status: 413, body: { ok: false, error: 'rpc payload too large' } }
   }
@@ -80,7 +96,7 @@ export async function dispatchRpc(router: RpcRouter, raw: string): Promise<RpcRe
     return { status: 200, body: { ok: false, error: `unsupported command: ${request.cmd}` } }
   }
   try {
-    const value = await handler(request.args)
+    const value = await handler(request.args, context)
     return { status: 200, body: { ok: true, value: value ?? null } }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

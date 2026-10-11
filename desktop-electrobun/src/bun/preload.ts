@@ -10,6 +10,7 @@
 // `/__shell__/boot`（宿主就绪前 503，页面会等）取回；把载体换成 Electrobun 的
 // 每视图 RPC 是后续增量，契约不变（官方用 IPC handle 返回同样两个字段）。
 
+import { carrierScript, type CarrierPlatform } from './carrier.ts'
 import { chromeScript, type ShellPlatform } from './chrome.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
@@ -20,6 +21,7 @@ export const BOOT_ENDPOINT = '/__shell__/boot'
 import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
 
 export function bootPreloadScript(locale: string, platform: ShellPlatform, selfOrigin: string, viewToken: string): string {
+  const carrier: CarrierPlatform = platform
   return [
     `const viewToken = ${JSON.stringify(viewToken)}`,
     // 视图 token 必须在最外层：下面的 dshDesktopBoot 在 try 块之外，拿不到 try 里的作用域。
@@ -38,6 +40,8 @@ export function bootPreloadScript(locale: string, platform: ShellPlatform, selfO
     '  }),',
     '  failed: (error) => { console.error("desktop boot failed", error) },',
     '}',
+    // 载体标记：dsh 前端只在 globalThis.dshDesktop 存在时才装浏览器 guest 桥（旧壳同款）
+    carrierScript(carrier),
     // 窗口 chrome（骨架期）：给 macOS 红绿灯让出顶部空间 + 打平台标记
     chromeScript(platform),
     // 外链（会话里的链接、侧边栏浏览器「在系统浏览器打开」）不把壳自己的窗口带走：

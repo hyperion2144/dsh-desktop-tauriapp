@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { startShellServer } from '../src/bun/shell-server.ts'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
-import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands } from '../src/bun/rpc.ts'
+import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands, type RpcContext } from '../src/bun/rpc.ts'
 import { defaultSettings, type DesktopSettings } from '../src/shared/settings.ts'
 import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
 
@@ -25,7 +25,7 @@ function tempHome(): string {
 function harness(overrides: Partial<CommandDeps> = {}): {
   deps: CommandDeps
   home: string
-  table: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>>
+  table: Record<string, (args: Record<string, unknown>, context?: RpcContext) => unknown | Promise<unknown>>
   calls: { log: string[]; external: string[]; restarts: number; closed: number; sounds: string[] }
   cleanup: () => void
 } {
@@ -254,8 +254,9 @@ describe('命令表', () => {
       const catalogValue = catalog.value as Record<string, unknown>
       expect(catalogValue.source).toBe('github')
       expect(catalogValue.catalog).toEqual([])
+      // 浏览器 guest 已接：未注入 guests 时也要报「壳未接」，而不是回到「尚未移植」
       const guest = await call('browser_guest_acquire')
-      expect(String(guest.error)).toContain('尚未移植')
+      expect(String(guest.error)).toContain('壳未接浏览器 guest')
       // 下载管理器也没接时：报清楚原因（接了就走真管理器，见 downloads.test.ts）
       const blob = await call('start_blob_download')
       expect(String(blob.error)).toContain('未接下载管理器')

@@ -3,7 +3,7 @@
 // 服务面（运行时就位、端口认领、起宿主、取 cookie、loopback 服务）在 service.ts 里，
 // 那一层不 import electrobun；这里只做「渲染器断言」和「窗口」两件事。
 
-import { ApplicationMenu, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
+import { ApplicationMenu, BrowserView, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { bootPreloadScript } from './preload.ts'
@@ -17,6 +17,9 @@ import { APP_NAME } from '../shared/app.ts'
 import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
 import { createViewRegistry } from '../shared/view-grant.ts'
+import { createGuestManager, type GuestViewLike } from './guest-manager.ts'
+import { loadNativeWebviewCore } from './native-webview.ts'
+import { GUEST_DEFAULT_URL, OFFSCREEN_GUEST_RECT } from '../shared/guest-policy.ts'
 import { resolveAppVersion } from './app-version.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
@@ -98,6 +101,49 @@ const instanceProfile = activeProfile(bootSettings, process.env)
 let tray: TrayHandle | null = null
 // 每视图授权台账（#220 决策 12）：每个窗口一枚 token，页面桥带回来，壳按视图种类放行命令。
 const views = createViewRegistry()
+// 浏览器 guest（#118/#134）：侧边栏浏览器 / 远程窗口的子 webview。
+// 历史（canGoBack/goBack…）与几何（bounds）走框架原生核：公开的 BrowserView API 里没有这两样。
+const nativeCore = await loadNativeWebviewCore({
+  execPath: process.execPath,
+  importDir: import.meta.dir,
+  env: process.env,
+})
+console.log(
+  nativeCore.core === null
+    ? `[guest] 原生核不可用：${nativeCore.error ?? '未知原因'}`
+    : `[guest] 原生核就绪：${nativeCore.libPath}`
+)
+const guests = createGuestManager({
+  log: (line) => console.log(line),
+  core: nativeCore.core,
+  // guest 挂在发起调用的那个窗口上（多窗口下天然跟随宿主窗口）。
+  createView: ({ partition, caller }) => {
+    const hit = windows.get(caller.profile)
+    if (hit === undefined) return null
+    const view = new BrowserView({
+      url: GUEST_DEFAULT_URL,
+      renderer: 'cef',
+      partition,
+      frame: { ...OFFSCREEN_GUEST_RECT },
+      windowId: hit.window.id,
+      hostWebviewId: hit.window.webviewId,
+      // 不可信内容：不开 RPC，只保留事件（Electrobun 自己给远程 URL 的建议档位）
+      sandbox: true,
+      autoResize: false,
+    })
+    return view as unknown as GuestViewLike
+  },
+  // 状态推送：dsh 对 <webview> 是同步拉取，所以壳把快照 eval 回宿主页面（旧壳同款）。
+  pushToHost: (caller, script) => {
+    const hit = windows.get(caller.profile)
+    if (hit === undefined || !hit.ready) return
+    try {
+      hit.window.webview?.executeJavascript(script)
+    } catch (error) {
+      console.warn(`[guest] 状态推送失败：${error instanceof Error ? error.message : String(error)}`)
+    }
+  },
+})
 let windowVisible = false
 let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
@@ -300,6 +346,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
     views,
+    guests,
     appVersion: resolveAppVersion(),
     locale,
     pickSoundFile: pickSoundFileImpl,
@@ -413,6 +460,9 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     windows.delete(profile)
     // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
     views.revokeLabel(windowKey(profile))
+    // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
+    const released = guests.releaseHost(windowKey(profile))
+    if (released > 0) console.log(`[shell] 随窗口回收 guest：${released} 个（${profile}）`)
     if (focusedProfile === profile) focusedProfile = null
     refreshTray()
   })

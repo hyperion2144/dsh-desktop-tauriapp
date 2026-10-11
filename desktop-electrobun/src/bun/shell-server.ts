@@ -59,7 +59,7 @@ export interface ShellServerOptions {
    * 不传 `views` ⇒ 不做每视图校验（只在测试与旧调用点里出现）。
    */
   views?: ViewRegistry
-  onRpc?: (raw: string) => Promise<{ status: number; body: Record<string, unknown> }>
+  onRpc?: (raw: string, grant: ViewGrant | null) => Promise<{ status: number; body: Record<string, unknown> }>
   onLog?: (line: string) => void
 }
 
@@ -210,7 +210,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           const command = typeof parsed?.cmd === 'string' ? parsed.cmd : null
           const rpcAuth = authorize(request, command)
           if (rpcAuth.deny !== null) return rpcAuth.deny
-          const result = await options.onRpc(raw)
+          const result = await options.onRpc(raw, rpcAuth.grant)
           return Response.json(result.body, {
             status: result.status,
             headers: { 'cache-control': 'no-store' },

@@ -25,8 +25,37 @@ declare module 'electrobun/bun' {
     sandbox?: boolean
   }
 
+  /** 子 webview（guest）：Electrobun 的 `BrowserView`（旧壳 `add_child` 的等价物） */
+  export interface BrowserViewOptions {
+    url?: string | null
+    html?: string | null
+    preload?: string | null
+    renderer?: 'native' | 'cef'
+    partition?: string | null
+    frame?: { x: number; y: number; width: number; height: number }
+    windowId?: number
+    hostWebviewId?: number
+    autoResize?: boolean
+    navigationRules?: string | null
+    /** true＝不受信内容：不开 RPC，只保留事件 */
+    sandbox?: boolean
+  }
+
+  export class BrowserView {
+    constructor(options?: BrowserViewOptions)
+    readonly id: number
+    loadURL(url: string): void
+    executeJavascript(js: string): void
+    remove(): void
+    on(event: string, handler: (event: unknown) => void): void
+  }
+
   export class BrowserWindow {
     constructor(options: WindowOptions)
+    /** 窗口 id（原生核里的窗口句柄号；子视图要它） */
+    readonly id: number
+    /** 宿主 webview id（子视图的 hostWebviewId 用它） */
+    readonly webviewId: number
     close(): void
     on(event: string, handler: (...args: unknown[]) => void): void
     /** 窗口的 webview（重载页面、执行脚本） */

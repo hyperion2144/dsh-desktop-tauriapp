@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
+import type { RpcContext } from '../src/bun/rpc.ts'
 import { importSound, listSounds, systemDefaultSoundCommand } from '../src/bun/notifications.ts'
 import { SOUND_FORMATS, soundFormatMatches } from '../src/shared/notify-policy.ts'
 import {
@@ -23,7 +24,7 @@ import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-
 interface Harness {
   deps: CommandDeps
   home: string
-  table: Record<string, (args: Record<string, unknown>) => unknown | Promise<unknown>>
+  table: Record<string, (args: Record<string, unknown>, context?: RpcContext) => unknown | Promise<unknown>>
   calls: { logs: string[]; sounds: string[]; systemSounds: number; picked: () => string | null }
   cleanup: () => void
 }
