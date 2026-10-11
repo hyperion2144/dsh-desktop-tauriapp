@@ -35,8 +35,9 @@ hutch install --frozen-lockfile
 # 3) 隔离的 dsh home：避免动到日常那个 ~/.dsh
 #    需要：profiles/desktop/{package.json,cordis.patch.yml}、合并好的 node_modules、
 #    .credentials.yaml（否则模型调用会报 no API key）、storages/workspace.json（否则没有工作区可选）
-#    补丁文件必须放在 profile 目录里（bun-preload.mjs 以 import.meta.url 定位 node_modules），
-#    并把 node-pty / @deepseek-ai/dsh-ptc-runtime-node / dsh-win32-process / @xterm/headless 真拷贝一份
+#    补丁文件放哪都行：bun-preload.mjs 按 dirname(import.meta.url) + DSH_BUN_PRELOAD_TREES（冒号分隔的树根）
+#    + 入口脚本与 cwd 各向上 8 层找 node_modules，把每个存在的 node-pty / @xterm/headless 都补上（realpath 去重），
+#    退出时恢复原样；若崩溃残留，下次运行会先复原再重打（node-pty 是 dispatcher，Node 路径不受影响）。
 
 # 4) 跑
 cd spike-cef && SPIKE_PORT=6390 SPIKE_DSH_HOME=/tmp/spike-219/dsh-home hutch electrobun dev
@@ -90,13 +91,22 @@ cd spike-cef && SPIKE_PORT=6390 SPIKE_DSH_HOME=/tmp/spike-219/dsh-home hutch ele
    1.4.0 起完整 Host。Bun **没有** `module.registerHooks`，且 `Bun.plugin({onResolve})` 对 `node_modules` 内的
    import 不生效 ⇒ 官方 launcher 的 Node resolver hooks 装不上，profile 的 peer 依赖要靠合并 node_modules 树解决；
    Bun 默认会自动安装缺失包，必须 `--no-install`。
-5. **`bun-preload.mjs` 的定位语义**：补丁按 `dirname(import.meta.url)` 找 `node_modules` ⇒ 必须把补丁文件放进
-   profile 目录，并把被补丁的 4 个包（node-pty、dsh-ptc-runtime-node、dsh-win32-process、@xterm/headless）真拷贝一份。
-   这样未激活条目从 7 条降到 3 条（`desktop-product-telemetry`、`product-analytics`、`experimental-inspector`——
-   最后一条的栈在 `dsh-app-boot/lib/worker/profile-resolution-bootstrap.js`，即 **worker 上下文没被 Patch 2 覆盖**）。
+5. **`bun-preload.mjs` 的定位语义**：补丁目标不假设「补丁文件就在被补丁的树里」——按 `dirname(import.meta.url)`
+   → `DSH_BUN_PRELOAD_TREES`（冒号分隔的树根）→ 入口脚本与 cwd 各向上 8 层，收集所有存在的
+   `node_modules/<pkg>`，按 realpath 去重后逐个补（早期只补同级 `node_modules`，在「补丁文件随壳、运行时在外」的
+   真实布局下静默失效）。被补丁的文件在 `exit`/`SIGINT`/`SIGTERM` 恢复原样；node-pty 还额外改成 dispatcher
+   （`typeof Bun === "undefined"` → `index.original.js`，否则 `bun-shim.js`），所以崩溃残留也不会把 Node 路径带坏。
+   早期做法（把补丁文件与 4 个包真拷贝进 profile 目录）曾把未激活条目从 7 条降到 3 条（`desktop-product-telemetry`、
+   `product-analytics`、`experimental-inspector`——最后一条的栈在 `dsh-app-boot/lib/worker/profile-resolution-bootstrap.js`，
+   即 **worker 上下文没被 Patch 2 覆盖**）。
 6. **Electrobun 的 `preload` 支持内联 JS 源码**（经原生层作 C 字符串传入）⇒ 不需要额外的注入通道就能立起 `dshDesktopBoot`。
 7. 官方启动/取 cookie 的等价物：`runProfile({ args: ['--no-open','--host','127.0.0.1','--port','0'] })` →
    `ctx.connection.authenticatedUrl(base)` → 壳侧 `fetch(url, { redirect: 'manual' })` 期待 `303 + set-cookie`。
+8. **终端：node-pty 在 Bun 上必须换实现**。真 node-pty（N-API addon）在 Bun 1.4.0 下 `spawn` 成功、退出码正常，
+   但 `onData` 永不触发（实测 `/bin/echo hello`：Bun 0 块 / Node 1 块；`bash -i` 0 块 / 7 块）⇒ DSH 侧表现为
+   「进程已退出（1）」、终端点开即关，而宿主进程本身活着。`Bun.spawn({ terminal })` 走同一套字节流，垫片转发即可；
+   另外 DSH 的实现依赖 `onData`/`onExit` **返回 disposable**（`this.dataDisposable.dispose()`）与
+   `pause`/`resume`/`clear`，早期垫片这三处都缺。
    不需要（也不该）解析 stdout 里的 `?token=`——那是 Tauri 期的妥协。
 
 ## 未做 / 边界

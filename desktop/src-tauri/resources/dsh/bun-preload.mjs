@@ -5,12 +5,13 @@
  * 1. Intercept require("node-addon-require-builtin") → return stub (Bun lacks V8 context symbols)
  * 2. Provide stripTypeScriptTypes via Bun.Transpiler on node:module
  * 3. Set DSH_BUN_COMPAT_DISABLE_HMR=1 to skip Cordis HMR
+ * 4. Shim node-pty onto Bun.spawn({ terminal }) — the N-API addon spawns but never delivers output on Bun
  */
 import { Module } from "node:module";
 import { Transpiler } from "bun";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 
 // ── Helper: resolve bare specifier through node_modules with exports support ──
 function _resolveBare(specifier, parentURL) {
@@ -271,6 +272,7 @@ function patchFile(filePath, find, replace) {
 function restoreFiles() {
   for (const p of _patches) {
     try { writeFileSync(p.path, p.original); } catch {}
+    for (const extra of p.remove ?? []) { try { rmSync(extra, { force: true }); } catch {} }
   }
 }
 process.on('exit', restoreFiles);
@@ -298,74 +300,143 @@ patchFile(_win32Process,
 // Bun treats module.register as no-op, but some code may expect it to work.
 // We leave it as-is (Bun's no-op) and hope for the best.
 
-// ── Patch 7: node-pty shim using Bun.Terminal (built-in ConPTY) ──
-// node-pty N-API addon crashes on Bun (needs libnode.dll).
-// Bun.spawn({ terminal }) provides native ConPTY on Windows — no FFI needed.
-const _nodePty = join(_dshRoot, 'node_modules', 'node-pty', 'lib', 'index.js');
-if (existsSync(_nodePty)) {
-  const _ptyOriginal = readFileSync(_nodePty, 'utf8');
-  _patches.push({ path: _nodePty, original: _ptyOriginal });
-  writeFileSync(_nodePty, [
-    `// bun-preload: node-pty shim using Bun.spawn({ terminal }) for native ConPTY`,
-    `function spawnPty(file, args, options = {}) {`,
-    `  const cols = options.cols || 80;`,
-    `  const rows = options.rows || 24;`,
-    `  const env = { ...options.env, TERM: 'xterm-256color', LANG: 'en_US.UTF-8' };`,
-    `  let onDataCb = null, onExitCb = null;`,
-    `  const _td = new TextDecoder('utf-8');`,
-
-    `  const proc = Bun.spawn([file, ...args], {`,
-    `    cwd: options.cwd,`,
-    `    env,`,
-    `    windowsHide: true,`,
-    `    terminal: {`,
-    `      cols, rows,`,
-    `      name: 'xterm-256color',`,
-    `      data(term, data) {`,
-    `        const _raw = data instanceof Uint8Array ? data : Buffer.from(data);`,
-    `        const s = _td.decode(_raw, { stream: true });`,
-    `        if (s && onDataCb) {`,
-    `          onDataCb(s);`,
-    `        }`,
-    `      },`,
-    `      exit(term, exitCode) { if (onExitCb) onExitCb({ exitCode, signal: null }); },`,
-    `    },`,
-    `    onExit(proc, exitCode, signalCode) { if (onExitCb) onExitCb({ exitCode, signal: signalCode }); },`,
-    `  });`,
-    `  return {`,
-    `    pid: proc.pid,`,
-    `    process: proc,`,
-    `    write(data) { try { proc.terminal.write(data); } catch {} return true; },`,
-    `    onData(cb) { onDataCb = cb; },`,
-    `    onExit(cb) { onExitCb = cb; },`,
-    `    kill(signal) { try { proc.kill(signal); } catch {} },`,
-    `    resize(cols, rows) { try { proc.terminal.resize(cols, rows); } catch {} },`,
-    `  };`,
-    `}`,
-    `module.exports = { spawn: spawnPty };`
-  ].join('\n'));
+// ── Patch 7: node-pty shim over Bun.spawn({ terminal }) ──
+// The node-pty N-API addon spawns its child under Bun but never delivers the output
+// (measured on Bun 1.4.0/macOS: `/bin/echo hello` yields 0 chunks where Node yields 1),
+// so DSH sees a live process that never talks and reports the terminal as exited(1).
+// Bun.spawn({ terminal }) carries the same bytes, so node-pty is replaced by a shim.
+//
+// The shim has to land on the copy the *active* runtime resolves — a downloaded runtime
+// tree is not the tree this preload ships in, and patching only the latter silently
+// does nothing. The patched file becomes a dispatcher so a crash can never leave a
+// Bun-only shim in front of a Node run.
+const PTY_SHIM_SOURCE = [
+  '// bun-preload: node-pty shim over Bun.spawn({ terminal }); the N-API addon never delivers output on Bun.',
+  'function spawnPty(file, args, options = {}) {',
+  '  const cols = options.cols || 80;',
+  '  const rows = options.rows || 24;',
+  '  const name = options.name || "xterm-256color";',
+  '  const env = { ...options.env, TERM: name, LANG: "en_US.UTF-8" };',
+  '  let onDataCb = null, onExitCb = null, paused = false;',
+  '  const buffered = [];',
+  '  const decoder = new TextDecoder("utf-8");',
+  '  const proc = Bun.spawn([file, ...args], {',
+  '    cwd: options.cwd,',
+  '    env,',
+  '    windowsHide: true,',
+  '    terminal: {',
+  '      cols, rows, name,',
+  '      data(_term, data) {',
+  '        const text = decoder.decode(data instanceof Uint8Array ? data : Buffer.from(data), { stream: true });',
+  '        if (text === "") return;',
+  '        if (paused) { buffered.push(text); return; }',
+  '        if (onDataCb !== null) onDataCb(text);',
+  '      },',
+  '      exit(_term, exitCode) { if (onExitCb !== null) onExitCb({ exitCode, signal: null }); },',
+  '    },',
+  '    onExit(_proc, exitCode, signalCode) { if (onExitCb !== null) onExitCb({ exitCode, signal: signalCode }); },',
+  '  });',
+  '  return {',
+  '    pid: proc.pid,',
+  '    process: proc,',
+  '    write(data) { try { proc.terminal.write(data); } catch { return false; } return true; },',
+  '    onData(cb) { onDataCb = cb; return { dispose() { if (onDataCb === cb) onDataCb = null; } }; },',
+  '    onExit(cb) { onExitCb = cb; return { dispose() { if (onExitCb === cb) onExitCb = null; } }; },',
+  '    pause() { paused = true; },',
+  '    resume() {',
+  '      paused = false;',
+  '      for (const text of buffered.splice(0)) if (onDataCb !== null) onDataCb(text);',
+  '    },',
+  '    clear() {},',
+  '    kill(signal) { try { proc.kill(signal); } catch {} },',
+  '    resize(cols, rows) { try { proc.terminal.resize(cols, rows); } catch {} },',
+  '  };',
+  '}',
+  'module.exports = { spawn: spawnPty };',
+  ''
+].join('\n');
+const PTY_DISPATCHER_SOURCE = [
+  '// bun-preload: node-pty dispatcher — Bun gets the Bun.Terminal shim, every other runtime the real addon.',
+  'if (typeof Bun === "undefined") module.exports = require("./index.original.js");',
+  'else module.exports = require("./bun-shim.js");',
+  ''
+].join('\n');
+/**
+ * node_modules roots this process could resolve a patched package from: the tree this
+ * preload ships in, any tree named in DSH_BUN_PRELOAD_TREES, then upwards from the entry
+ * script and the working directory (a downloaded runtime is entered through its launcher).
+ */
+function nodeModulesRoots() {
+  const seen = new Set();
+  const roots = [];
+  const add = (dir) => {
+    const root = resolve(dir);
+    if (seen.has(root)) return;
+    seen.add(root);
+    roots.push(root);
+  };
+  add(join(_dshRoot, 'node_modules'));
+  for (const extra of (process.env.DSH_BUN_PRELOAD_TREES ?? '').split(':')) {
+    if (extra !== '') add(join(resolve(extra), 'node_modules'));
+  }
+  for (const start of [process.argv[1], process.cwd()]) {
+    if (start === undefined) continue;
+    let dir = dirname(resolve(start));
+    for (let depth = 0; depth < 8; depth += 1) {
+      add(join(dir, 'node_modules'));
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  return roots;
+}
+/** Every existing copy of `relativePath` under those roots. */
+function packageTargets(relativePath) {
+  const targets = [];
+  const seen = new Set();
+  for (const root of nodeModulesRoots()) {
+    const file = join(root, relativePath);
+    if (!existsSync(file)) continue;
+    // One file can be reachable by several roots (/tmp and /private/tmp are the same
+    // node_modules); patch it once, or it is patched twice in the same run.
+    let key = file;
+    try { key = realpathSync(file); } catch {}
+    if (seen.has(key)) continue;
+    seen.add(key);
+    targets.push(key);
+  }
+  return targets;
+}
+for (const target of packageTargets('node-pty/lib/index.js')) {
+  const directory = dirname(target);
+  const originalPath = join(directory, 'index.original.js');
+  const shimPath = join(directory, 'bun-shim.js');
+  // A dispatcher left behind by a crashed run still holds the real addon next to it.
+  const dispatched = existsSync(originalPath);
+  const original = readFileSync(dispatched ? originalPath : target, 'utf8');
+  _patches.push({ path: target, original, remove: [shimPath, originalPath] });
+  if (!dispatched) writeFileSync(originalPath, original);
+  writeFileSync(shimPath, PTY_SHIM_SOURCE);
+  writeFileSync(target, PTY_DISPATCHER_SOURCE);
+  console.log(`[bun-preload] Patch 7: node-pty shim applied to ${target}`);
 }
 
 // ── Patch 8: xterm.js headless sync write fix ──
 // xterm.js defers non-user-input writes via setTimeout(0), which on Bun may fire
 // after I/O events. DSH serializes the buffer before the setTimeout fires, seeing
 // empty data. Fix: replace setTimeout with synchronous _innerWrite() call.
-const _xtermHeadless = join(_dshRoot, 'node_modules', '@xterm', 'headless', 'lib-headless', 'xterm-headless.js');
-if (existsSync(_xtermHeadless)) {
-  const _xtermOriginal = readFileSync(_xtermHeadless, 'utf8');
-  _patches.push({ path: _xtermHeadless, original: _xtermOriginal });
-  // Replace: setTimeout(()=>this._innerWrite()) ... push data ... }
-  // With:    0 ... push data ... this._innerWrite() }
-  // This forces synchronous processing of terminal output writes.
-  const _xtermPatched = _xtermOriginal.replace(
-    'setTimeout((()=>this._innerWrite()))}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t)}_innerWrite',
-    '0}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t),this._innerWrite()}_innerWrite'
-  );
-  if (_xtermPatched !== _xtermOriginal) {
-    writeFileSync(_xtermHeadless, _xtermPatched);
-    console.log('[bun-preload] Patch 8: xterm.js sync write applied');
-  } else {
-    console.log('[bun-preload] Patch 8: xterm.js sync write pattern not found (may already be patched)');
+const XTERM_SYNC_WRITE_FROM = 'setTimeout((()=>this._innerWrite()))}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t)}_innerWrite';
+const XTERM_SYNC_WRITE_TO = '0}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t),this._innerWrite()}_innerWrite';
+for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless.js')) {
+  const source = readFileSync(target, 'utf8');
+  const patched = source.replace(XTERM_SYNC_WRITE_FROM, XTERM_SYNC_WRITE_TO);
+  if (patched === source) {
+    console.log(`[bun-preload] Patch 8: xterm.js sync write pattern not found in ${target} (may already be patched)`);
+    continue;
   }
+  _patches.push({ path: target, original: source });
+  writeFileSync(target, patched);
+  console.log(`[bun-preload] Patch 8: xterm.js sync write applied to ${target}`);
 }
 console.log("[bun-preload] Patches applied: stripTypeScriptTypes, node-addon-require-builtin stub, HMR disable, Bun.Terminal PTY");
