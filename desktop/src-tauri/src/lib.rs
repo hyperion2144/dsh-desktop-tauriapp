@@ -366,8 +366,14 @@ pub fn run() {
                 }
             })
             .build();
-            if let Err(e) = main_window {
-                log::error!("[main] 主窗口创建失败：{e}");
+            match main_window {
+                Ok(w) => {
+                    // #161：Windows 上「最小化 → 还原」后 WebView2 不重绘（整片黑屏），
+                    // 实现见 ui::window_recovery（两拍尺寸微调强行唤醒合成器）。
+                    // 主窗的 on_window_event 已挤满页签，这里单独挂一个只关心 Resized/Focused 的监听。
+                    crate::ui::window_recovery::attach(app.handle(), &w);
+                }
+                Err(e) => log::error!("[main] 主窗口创建失败：{e}"),
             }
             // #154：壳内 loopback origin 服务（本地资产 + 反代 + WS 透传）。
             // 必需在主窗导航之前就绪——导航目标就是它的页面 URL。

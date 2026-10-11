@@ -55,6 +55,9 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 # #118 浏览器 guest：WebView2 COM 历史读控（GoBack/GoForward/CanGoBack/CanGoForward）
 webview2-com = "0.38"
 windows-core = "0.61"
+# #161 窗口还原重绘恢复：用 IsZoomed 读真实最大化态（tao 的标记在最小化那拍会被清掉）
+# （windows 0.61 与 tauri 2.11 依赖同一份，HWND 类型是同一个、不引入新 crate）
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # #118 浏览器 guest：WKWebView 历史读控（msg_send goBack/goForward/canGoBack/canGoForward）

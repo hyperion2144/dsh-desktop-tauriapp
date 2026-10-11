@@ -22,7 +22,10 @@ jobs:
           - platform: macos-latest
             test: true
           - platform: windows-latest
-            test: false
+            # 2026-10-10（#161）：本项从 false 改为 true —— 此前 Windows 只跑 cargo check，
+            # 而 cargo check **不编译 `#[cfg(test)]`**，于是测试代码在 Windows 上连一次编译都没发生过。
+            # 启用后 Windows 才真正纳入回归（本仓唯一给 Windows 编译把关的地方，见 #154）。
+            test: true
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout
@@ -58,6 +61,11 @@ jobs:
       - name: cargo check
         working-directory: desktop/src-tauri
         run: cargo check --locked
+      # 测试代码的编译面必须每个平台都过一遍：cargo check 不编译 `#[cfg(test)]`，
+      # 所以上面那步并不能证明测试在 Windows 上可编译（#161）。真正的用例执行仍留给下面那步。
+      - name: cargo test（仅编译测试目标）
+        working-directory: desktop/src-tauri
+        run: cargo test --locked --no-run
       - name: cargo test
         if: matrix.test
         working-directory: desktop/src-tauri

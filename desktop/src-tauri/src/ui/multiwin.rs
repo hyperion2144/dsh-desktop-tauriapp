@@ -243,7 +243,11 @@ fn build_profile_window(app: &AppHandle, profile: &str, label: &str) -> Result<(
                 tauri::webview::NewWindowResponse::Deny
             }
         });
-    build.build().map(|_| ())
+    let window = build.build()?;
+    // #161：Windows 上「最小化 → 还原」后 WebView2 不重绘（整片黑屏）——主窗与次窗同病，
+    // 修法在 ui::window_recovery（两拍尺寸微调）；非 Windows 平台上这个函数什么都不做。
+    crate::ui::window_recovery::attach(app, &window);
+    Ok(())
 }
 
 /// 绑定 + 标题栏形态（建窗成功后的公共收尾）。
