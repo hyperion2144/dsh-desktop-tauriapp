@@ -28,12 +28,19 @@ export interface StartHostInput {
 
 export interface HostHandle {
   ready: HostReady
-  stop: () => void
+  /** 优雅停止：SIGTERM → 宽限期 → SIGKILL，并等到真的退出（不留孤儿） */
+  stop: () => Promise<void>
   pid: number
+  /** 宿主退出（含守护器观察到的异常退出）；解析为退出码 */
+  exited: Promise<number>
 }
 
 const READY_PREFIX = 'HOST-READY '
 const DEFAULT_TIMEOUT_MS = 120_000
+/** 优雅退出等待：SIGTERM 后多久升级到 SIGKILL（壳退出不能拖住进程） */
+const STOP_GRACE_MS = 5_000
+/** 升级后最多再等多久 */
+const STOP_KILL_WAIT_MS = 2_000
 
 export async function startHost(input: StartHostInput): Promise<HostHandle> {
   const { layout } = input
@@ -48,6 +55,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     profileDir: `${layout.home}/profiles/${profile}`,
     preloadTrees: layout.runtimeDir,
     nodePath: `${layout.runtimeDir}/node_modules`,
+    parentPid: process.pid,
   })
   assertChildEnv(env)
 
@@ -67,6 +75,12 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     env,
     stdout: 'pipe',
     stderr: 'pipe',
+  })
+
+  // 退出信号：守护器（supervisor）与 stop() 都盯着它；这里只记一条日志。
+  const exited = child.exited.then((code) => {
+    onLog(`[shell] 宿主退出：pid = ${String(child.pid)} code = ${String(code)}`)
+    return code
   })
 
   const stderrPump = (async () => {
@@ -112,11 +126,29 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
   return {
     ready,
     pid: child.pid,
-    stop: () => {
+    exited,
+    stop: async () => {
+      if (child.exitCode !== null) return
       try {
         child.kill('SIGTERM')
       } catch {}
-      void stderrPump
+      const escalation = setTimeout(() => {
+        onLog(`[shell] 宿主 ${String(STOP_GRACE_MS)}ms 未退出，升级 SIGKILL`)
+        try {
+          child.kill('SIGKILL')
+        } catch {}
+      }, STOP_GRACE_MS)
+      try {
+        await Promise.race([exited, Bun.sleep(STOP_GRACE_MS + STOP_KILL_WAIT_MS)])
+      } finally {
+        clearTimeout(escalation)
+      }
+      if (child.exitCode === null) {
+        try {
+          child.kill('SIGKILL')
+        } catch {}
+      }
+      await stderrPump.catch(() => {})
     },
   }
 }

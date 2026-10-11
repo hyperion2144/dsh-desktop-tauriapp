@@ -12,6 +12,9 @@ export const CLIENT_VERSION_KEY = 'DSH_CLIENT_VERSION'
 export const REQUIRED_ENV_KEYS = [CLIENT_VERSION_KEY, 'DSH_PROFILE', 'DSH_HOME'] as const
 export const OPTIONAL_ENV_KEYS = ['DSH_PROFILE_DIR', 'DSH_BUN_PRELOAD_TREES', 'NODE_PATH'] as const
 
+/** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
+export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID'] as const
+
 /** 除环境变量外的资源条件（缝 ①/② 各有用例；这里显式写出来，避免只活在别人脑子里）。 */
 export const CHILD_RESOURCE_CONDITIONS = {
   /** GUI 启动时 cwd 不是家目录，必须显式设成 DSH_HOME */
@@ -31,6 +34,8 @@ export interface ChildEnvInput {
   preloadTrees?: string | undefined
   /** 插件解析回退：运行时树的 node_modules（Bun 下装不了 Node resolver hooks，见 #209） */
   nodePath?: string | undefined
+  /** 看门狗用的父 pid（壳自己的 pid）：壳崩溃/被 SIGKILL 后宿主能自己退出，不留孤儿 */
+  parentPid?: number | undefined
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -47,6 +52,8 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   else delete env.DSH_BUN_PRELOAD_TREES
   if (input.nodePath !== undefined) env.NODE_PATH = input.nodePath
   else delete env.NODE_PATH
+  if (input.parentPid !== undefined) env.DSH_SHELL_PARENT_PID = String(input.parentPid)
+  else delete env.DSH_SHELL_PARENT_PID
   return env
 }
 

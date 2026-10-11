@@ -14,6 +14,8 @@ import { APP_NAME } from '../shared/app.ts'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
 const CLIENT_VERSION = '0.1.0'
+/** 退出时等宿主与 CEF 子进程收尾的上限（超过就交给框架的优雅退出） */
+const SHELL_STOP_DEADLINE_MS = 8_000
 
 function fail(message: string, code: number): never {
   console.error(`[shell] ${message}`)
@@ -55,6 +57,14 @@ const service = await startService({
     console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
     ContextMenu.showContextMenu(items as unknown[])
   },
+  onHostRestart: (state) => {
+    // 宿主被守护器拉起来了：把窗口刷回同一个页面 origin（token/端口都没变）
+    console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)
+    mainWindow?.webview?.loadURL(state.pageUrl)
+  },
+  onHostGiveUp: (state, reason) => {
+    console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
+  },
 })
 console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
 
@@ -90,21 +100,25 @@ if (!noWindow) {
 }
 
 let stopping = false
-const shutdown = (): void => {
+const shutdown = async (): Promise<void> => {
   if (stopping) return
   stopping = true
   try {
-    service.stop()
-  } catch {}
+    // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
+    // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。
+    await Promise.race([service.stop(), Bun.sleep(SHELL_STOP_DEADLINE_MS)])
+  } catch (error) {
+    console.error(`[shell] 停止服务面失败：${String(error)}`)
+  }
   Utils.quit()
 }
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => void shutdown())
+process.on('SIGTERM', () => void shutdown())
 process.on('exit', () => {
   if (!stopping) {
     stopping = true
     try {
-      service.stop()
+      void service.stop()
     } catch {}
   }
 })

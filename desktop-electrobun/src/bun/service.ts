@@ -10,7 +10,9 @@ import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import { reconcileProfileTree } from './profile-tree.ts'
 import { layout, type ShellLayout } from './runtime.ts'
-import { startShellServer, type BootPayload, type ShellServer } from './shell-server.ts'
+import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
+import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
+import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 
 export interface ServiceOptions {
@@ -22,6 +24,10 @@ export interface ServiceOptions {
   onOpenExternal?: (url: string) => void
   /** 页面右键菜单（主进程实现） */
   onContextMenu?: (request: ContextMenuRequest) => void
+  /** 宿主被守护器重启成功（主进程用它把页面刷回来） */
+  onHostRestart?: (state: ShellState) => void
+  /** 宿主反复退出，守护器放弃（不再重启） */
+  onHostGiveUp?: (state: ShellState, reason: string) => void
   onLog?: (line: string) => void
 }
 
@@ -42,7 +48,10 @@ export interface ShellService {
   state: ShellState
   paths: ShellLayout
   server: ShellServer
-  stop: () => void
+  /** 停止：摘服务、SIGTERM→SIGKILL 停宿主、上台账与端口回收 */
+  stop: () => Promise<void>
+  /** 手动重启宿主（守护器会接住退出并把服务面切到新宿主） */
+  restartHost: () => Promise<void>
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -111,6 +120,14 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
 
+  // ---- 启动清扫：上一次壳留下的孤儿宿主 ----
+  // 本次壳起的宿主有看门狗（runtime/parent-watch.mjs）兜底；上一次壳被 SIGKILL/崩溃后留下的
+  // 孤儿只能靠台账在启动时清掉——它会一直占着会话（实机复现过）。
+  const hostRegistryFile = env.DSH_SHELL_HOST_REGISTRY ?? join(home, 'shell-hosts.json')
+  const swept = sweepStaleHosts({ file: hostRegistryFile, log })
+  if (swept.killed.length > 0 || swept.pruned.length > 0) {
+    log(`宿主台账清扫：杀掉孤儿 ${String(swept.killed.length)} 个、清理过期条目 ${String(swept.pruned.length)} 个`)
+  }
   // ---- 宿主：Bun 起 dsh，自己拿端口并上报 { url, injections } ----
   // GUI（Finder/LaunchServices）启动只继承 launchd 的最小 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
   // 于是 dsh 子进程里 gh / bun / node / pnpm 全部找不到。官方 Electron 桌面为此读回登录 shell
@@ -124,47 +141,53 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const childEnv = loginShell.environment
 
   const hostMode = env.DSH_SHELL_PROFILE_MODE === 'fresh' ? 'fresh' : 'existing'
-  let host: Awaited<ReturnType<typeof startHost>>
-  try {
-    host = await startHost({
-      layout: paths,
-      clientVersion: options.clientVersion,
-      mode: hostMode,
-      env: childEnv,
-      onLog: log,
-    })
-  } catch (error) {
-    // 首次启动：dsh 刚把 profile 脚手架（cordis.yml/package.json）落盘，但依赖树还是空的，
-    // 插件会整片 failed to import。摊平 profile 树后按 existing 重试一次——只在首启发生。
-    if (hostMode !== 'fresh' || !existsSync(`${profileDir}/package.json`)) throw error
-    log('首次启动：profile 已建立但依赖树为空，摊平 profile 树后重试')
-    reconcileProfile()
-    host = await startHost({
-      layout: paths,
-      clientVersion: options.clientVersion,
-      mode: 'existing',
-      env: childEnv,
-      onLog: log,
-    })
-  }
-  log(`host ready | dsh = ${new URL(host.ready.url).origin} | injections = ${host.ready.injections.length}`)
+  let host!: Awaited<ReturnType<typeof startHost>>
+  let cookie = ''
+  // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
+  const connect = async (): Promise<void> => {
+    try {
+      host = await startHost({
+        layout: paths,
+        clientVersion: options.clientVersion,
+        mode: hostMode,
+        env: childEnv,
+        onLog: log,
+      })
+    } catch (error) {
+      // 首次启动：dsh 刚把 profile 脚手架（cordis.yml/package.json）落盘，但依赖树还是空的，
+      // 插件会整片 failed to import。摊平 profile 树后按 existing 重试一次——只在首启发生。
+      if (hostMode !== 'fresh' || !existsSync(`${profileDir}/package.json`)) throw error
+      log('首次启动：profile 已建立但依赖树为空，摊平 profile 树后重试')
+      reconcileProfile()
+      host = await startHost({
+        layout: paths,
+        clientVersion: options.clientVersion,
+        mode: 'existing',
+        env: childEnv,
+        onLog: log,
+      })
+    }
+    log(`host ready | dsh = ${new URL(host.ready.url).origin} | injections = ${String(host.ready.injections.length)}`)
 
-  // ---- 取 cookie：303 + set-cookie（官方 authenticateWebHost 语义，不解析 stdout 的 token 行）----
-  const auth = await fetch(host.ready.url, { redirect: 'manual' })
-  const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
-  const cookie = setCookies[0]?.split(';')[0] ?? ''
-  log(`auth: ${String(auth.status)} ${auth.headers.get('location') ?? ''} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
-  if (cookie === '') {
-    host.stop()
-    throw new Error('没拿到 dsh 会话 cookie（303 + set-cookie 流程失败）')
+    // ---- 取 cookie：303 + set-cookie（官方 authenticateWebHost 语义，不解析 stdout 的 token 行）----
+    const auth = await fetch(host.ready.url, { redirect: 'manual' })
+    const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
+    cookie = setCookies[0]?.split(';')[0] ?? ''
+    log(`auth: ${String(auth.status)} ${auth.headers.get('location') ?? ''} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
+    if (cookie === '') {
+      await host.stop()
+      throw new Error('没拿到 dsh 会话 cookie（303 + set-cookie 流程失败）')
+    }
   }
+  await connect()
 
   // ---- loopback 服务 ----
-  const bootPayload: BootPayload = {
-    injections: host.ready.injections,
+  // boot 载荷与上游可换：守护器重启宿主后要指向新的 url/cookie（同一个 options 对象）。
+  let bootPayload: BootPayload = {
+    injections: [],
     streamBaseUrl: `http://127.0.0.1:${String(pagePort)}`,
   }
-  const server = startShellServer({
+  const serverOptions: ShellServerOptions = {
     distDir: paths.distDir,
     token,
     cookie,
@@ -174,7 +197,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onOpenExternal: options.onOpenExternal,
     onContextMenu: options.onContextMenu,
     onLog: log,
-  })
+  }
+  const server = startShellServer(serverOptions)
+  bootPayload.injections = host.ready.injections
   const pageUrl = `${server.origin}/${token}/`
 
   claims = upsertClaim(claims, {
@@ -198,18 +223,83 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     noWindow: options.noWindow ?? false,
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+
+  // ---- 宿主守护器：异常退出就退避重启，并把服务面切到新宿主（页面不再停在转发失败） ----
+  const ledger = createRestartLedger()
+  let stopping = false
+  const registerHost = (): void => {
+    const records = upsertHostRecord(readHostRecords(hostRegistryFile), {
+      hostPid: host.pid,
+      shellPid: process.pid,
+      profile: paths.profile,
+      startedAt: new Date().toISOString(),
+    })
+    writeHostRecords(hostRegistryFile, records)
+  }
+  const forgetHosts = (): void => {
+    writeHostRecords(
+      hostRegistryFile,
+      readHostRecords(hostRegistryFile).filter((entry) => entry.shellPid !== process.pid),
+    )
+  }
+  const applyHost = (): void => {
+    bootPayload.injections = host.ready.injections
+    serverOptions.cookie = cookie
+    serverOptions.upstreamOrigin = new URL(host.ready.url).origin
+    state.hostPid = host.pid
+    state.injections = bootPayload.injections.length
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+  }
+  const supervise = async (): Promise<void> => {
+    registerHost()
+    const code = await host.exited
+    if (stopping) return
+    const decision = ledger.decide(Date.now())
+    log(`宿主 ${String(host.pid)} 意外退出（code = ${String(code)}）：${decision.reason}`)
+    if (!decision.restart) {
+      options.onHostGiveUp?.(state, decision.reason)
+      return
+    }
+    ledger.record(Date.now())
+    await Bun.sleep(decision.delayMs)
+    if (stopping) return
+    try {
+      await connect()
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      log(`守护器重启宿主失败：${reason}`)
+      options.onHostGiveUp?.(state, reason)
+      return
+    }
+    applyHost()
+    log(`守护器已重启宿主：pid = ${String(host.pid)} | injections = ${String(bootPayload.injections.length)}`)
+    options.onHostRestart?.(state)
+    void supervise()
+  }
+  registerHost()
+  void supervise()
   log(`端口台账：${JSON.stringify(claims)}`)
 
   return {
     state,
     paths,
     server,
-    stop: () => {
+    restartHost: async () => {
+      if (stopping) return
+      // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
+      await host.stop()
+    },
+    stop: async () => {
+      stopping = true
+      ledger.reset()
       server.stop()
-      host.stop()
+      try {
+        await host.stop()
+      } catch {}
+      forgetHosts()
       const next = releaseClaim(parseClaims(JSON.stringify(claims)), paths.profile)
       try {
-        Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
+        await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
       } catch {}
     },
   }

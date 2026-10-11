@@ -14,13 +14,16 @@ const service = await startService({ clientVersion, noWindow: true })
 console.log(`SHELL-READY ${JSON.stringify(service.state)}`)
 
 let stopping = false
-const shutdown = (): void => {
+const shutdown = async (): Promise<void> => {
   if (stopping) return
   stopping = true
   try {
-    service.stop()
-  } catch {}
+    // 与 index.ts 同语义：等宿主真的退出再走，否则它会变成占着会话的孤儿。
+    await service.stop()
+  } catch (error) {
+    console.error(`[shell] 停止服务面失败：${String(error)}`)
+  }
   process.exit(0)
 }
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGINT', () => void shutdown())
+process.on('SIGTERM', () => void shutdown())

@@ -13,6 +13,7 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { watchParent } from './parent-watch.mjs'
 
 const [libDir, profileName = 'desktop', mode = 'existing'] = process.argv.slice(2)
 if (libDir === undefined) {
@@ -39,6 +40,16 @@ const application = runProfile({
   args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
 })
 
+// 父进程看门狗：壳崩溃/被 SIGKILL/退出后，我们会变成孤儿继续占着会话——
+// 所以由子进程反过来盯着壳（DSH_SHELL_PARENT_PID 由壳注入）。
+watchParent({
+  parentPid: Number(process.env.DSH_SHELL_PARENT_PID ?? '0'),
+  onDead: (reason) => {
+    console.error(`[host] 壳已不在（${reason}），宿主随之退出`)
+    shutdown('parent-gone')
+  },
+})
+
 const { ctx } = await application
 
 const base = `${ctx.webServer.protocol}//127.0.0.1:${String(ctx.webServer.port)}`
@@ -47,8 +58,13 @@ const injections = ctx.webServer.collectIndexInjections()
 console.log(`[host] webServer.port = ${String(ctx.webServer.port)} | injections = ${String(injections.length)}`)
 console.log(`HOST-READY ${JSON.stringify({ type: 'ready', url, injections })}`)
 
-// 壳要求退出时，把关闭交给运行时（对齐官方 shutdown 语义）
-const shutdown = () => {
+// 壳要求退出时，把关闭交给运行时（对齐官方 shutdown 语义）。
+// 用函数声明（会提升）：父进程看门狗可能在 await 之前就触发。
+let disposed = false
+function shutdown(reason = 'signal') {
+  if (disposed) return
+  disposed = true
+  console.log(`[host] 退出（${reason}）`)
   try {
     application.dispose?.()
   } catch {}

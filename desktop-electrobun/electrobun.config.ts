@@ -24,6 +24,7 @@ export default {
     // 与 runtime.ts 的 packagedRoot() 约定一致。
     copy: {
       'runtime/dsh-host.mjs': 'runtime/dsh-host.mjs',
+      'runtime/parent-watch.mjs': 'runtime/parent-watch.mjs',
       'runtime/bun-preload.mjs': 'runtime/bun-preload.mjs',
     },
   },
