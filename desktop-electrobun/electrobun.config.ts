@@ -1,5 +1,6 @@
 import type { ElectrobunConfig } from 'electrobun'
 import { APP_NAME } from './src/shared/app.ts'
+import { DEFAULT_UPDATE_BASE_URL } from './src/shared/update.ts'
 
 export default {
   app: {
@@ -36,5 +37,15 @@ export default {
     // 没有托盘时（Linux 某些桌面环境）隐藏后就再也叫不回来了，所以 index.ts
     // 会在没有托盘时把「关窗」当成真退出处理。
     runtime: { exitOnLastWindowClosed: false },
+  },
+  // 应用更新（#220 决策 11）：Electrobun 按 `<baseUrl>/<buildEnvironment>-<os>-<arch>-update.json`
+  // 取清单，再按「补丁链优先、失败回落整包」换掉整个 `.app`。这里指到 GitHub Releases
+  // 的 `latest/download` 别名（资产名稳定指向最新一版）。
+  // 注意：`release` 是**顶层**字段（ElectrobunConfig.ts:642），不是 `build` 的子项——
+  // 放错层会被静默忽略（实测构建日志会打 “no release.baseUrl configured; skipping delta patch”）。
+  release: {
+    baseUrl: DEFAULT_UPDATE_BASE_URL,
+    // 我们还没发过 Electrobun 版，补丁链没有可比对的上一版 ⇒ 先关掉补丁生成，只出整包
+    generatePatch: false,
   },
 } satisfies ElectrobunConfig

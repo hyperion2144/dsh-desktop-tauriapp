@@ -10,7 +10,7 @@
     "prepare:bundle": "bun run scripts/prepare-bundle.mjs",
     "build:native": "bun run scripts/build-native.mjs",
     "build": "bun run build:native && bun run prepare:bundle && hutch electrobun build --env=stable && bun run scripts/sign-app.mjs",
-    "sign:app": "bun run scripts/sign-app.mjs",
+    "sign:app": "bun run scripts/sign-app.mjs"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0"

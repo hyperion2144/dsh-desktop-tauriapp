@@ -16,6 +16,7 @@ import { listSounds, type Notifier } from './notifications.ts'
 import { permissionHint, type NotifyPermission } from '../shared/notify-permission.ts'
 import type { PortClaim } from '../shared/ports.ts'
 import { startupAction, validProfileName, type MigrationStatus, type StartupHealth } from '../shared/profile-ops.ts'
+import type { ShellUpdater } from './updater.ts'
 
 export interface CommandDeps {
   home: string
@@ -102,6 +103,8 @@ export interface CommandDeps {
   guests?: GuestCommands
   /** TCP 连一次代理，返回耗时 ms（旧壳 test_proxy_connectivity） */
   testProxy?: (url: string) => Promise<number>
+  /** 应用更新（`src/bun/updater.ts` 包住的框架 Updater）；无窗口单测可以不接 */
+  updater?: ShellUpdater
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -631,6 +634,30 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const guests = deps.guests
       if (guests === undefined) throw new Error('browser_guest_release_all：壳未接浏览器 guest')
       return guests.releaseAll(args, callerOf(context, deps))
+    },
+
+    // ---- 应用更新（#220 决策 11：旧壳没有这个能力，是新增件）----
+    // 拿不到更新源（dev 构建、没配 release.baseUrl）时不报错，而是回一个带 reason 的视图：
+    // 面板把「为什么不能点」直接显示出来，比一个永远转圈的按钮好。
+    get_update_state: () => {
+      const updater = deps.updater
+      if (updater === undefined) throw new Error('get_update_state：壳未接应用更新')
+      return updater.snapshot()
+    },
+    check_update: async () => {
+      const updater = deps.updater
+      if (updater === undefined) throw new Error('check_update：壳未接应用更新')
+      return updater.check()
+    },
+    download_update: async () => {
+      const updater = deps.updater
+      if (updater === undefined) throw new Error('download_update：壳未接应用更新')
+      return updater.download()
+    },
+    apply_update: async () => {
+      const updater = deps.updater
+      if (updater === undefined) throw new Error('apply_update：壳未接应用更新')
+      return updater.apply()
     },
   }
 

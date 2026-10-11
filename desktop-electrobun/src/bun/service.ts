@@ -25,6 +25,7 @@ import { createNotifier, importSound as importSoundFile, systemDefaultSoundComma
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
 import type { ViewRegistry } from '../shared/view-grant.ts'
 import type { GuestCommands } from './guest-manager.ts'
+import { createUpdater, type ShellUpdater } from './updater.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
@@ -84,6 +85,8 @@ export interface ServiceOptions {
   onLog?: (line: string) => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
+  /** 应用更新（index.ts 可注入同一个实例；缺省自建；单测可注入假实现） */
+  updater?: ShellUpdater
   settings?: DesktopSettings
   /** 通知器（index.ts 注入 Electrobun 原生通道；缺省走命令行兜底） */
   notifier?: Notifier
@@ -427,6 +430,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     announce()
     setTimeout(announce, 1_500).unref?.()
   }
+  // ②b 应用更新（#220 决策 11）：旧壳没有这个能力，是新增件——包住框架 Updater。
+  // 拿不到更新源（dev 构建 / 未配 release.baseUrl）时只记日志，面板里显示「为什么不可用」。
+  const updater = options.updater ?? createUpdater({ log, env })
+  updater.start()
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
     home,
@@ -812,6 +819,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       keepAwake.stop()
       arbiter.clear()
       downloads.stop()
+      updater.stop()
       try {
         await host.stop()
       } catch {}
@@ -937,6 +945,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       migrationStatus: () => taskTracker.migrationStatus(),
       testProxy: (url) => testProxyConnectivity(url),
       guests: options.guests,
+      updater,
     }),
   )
   return service

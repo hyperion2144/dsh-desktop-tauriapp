@@ -3,6 +3,14 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **应用更新：接上 Electrobun 自带的 Updater（#220 决策 11——旧 Tauri 壳没有这个能力，是新增件）**：
+  - **为什么不是「搬旧壳」**：`desktop/src-tauri/Cargo.toml` 里没有 `tauri-plugin-updater`，`src/client` 里也没有任何 update 命令 ⇒ 这是纯新增。框架那套更新器自带事务、回滚、补丁链与 Windows 计划任务，重写没有意义，我们只做接线与「把状态翻译成人话」。
+  - **接线**：`electrobun.config.ts` 的**顶层** `release.baseUrl` 指向 GitHub Releases 的 `latest/download` 别名（每个资产名稳定指向最新一版）；`src/shared/update.ts` 是纯逻辑（29 个框架状态 → 9 个壳阶段、版本比较、进度/字节、按钮可点性），`src/bun/updater.ts` 包住框架 Updater 且**任何失败都不抛**；命令表新增 `get_update_state` / `check_update` / `download_update` / `apply_update`；设置面板「桌面设置」新增「应用更新」卡（当前版本 · 阶段 · 进度 · 检查/下载/重启并安装）。
+  - **踩到的坑**：`release` 是配置的**顶层**字段（`ElectrobunConfig.ts:642`），放在 `build` 里会被**静默忽略**——构建日志只会打一句 `no release.baseUrl configured; skipping delta patch`，装出来的 app 里 `version.json` 的 `baseUrl` 是空串，更新永远不可用。这条已写进配置注释。
+  - **不静默降级**：拿不到更新源（dev 构建、没配 baseUrl、`DSH_SHELL_DISABLE_UPDATER=1`、框架 import 失败）时，卡片直接写「为什么不可用」，而不是留一个永远转圈的按钮；`DSH_SHELL_UPDATE_BASE_URL` 可把清单源指到本地，不进版本也能把整条链路走一遍。
+  - **实机证据**（dev 实例，隔离 home，本地喂一份 `dev-macos-arm64-update.json`）：启动日志 `[update] 更新源就绪：0.1.0（channel=dev）→ http://127.0.0.1:8899/（由 DSH_SHELL_UPDATE_BASE_URL 覆盖）`；页面里 `get_update_state` 回 `available:true`、`feedUrl=http://127.0.0.1:8899/dev-macos-arm64-update.json`（前缀按 version.json 的 channel 推，不是硬编码 stable）；`check_update` 真打到框架，回 `no-update` + 框架原话 `Dev channel - updates disabled`，卡片显示「当前版本 0.1.0（dev） · 已是最新」，三个按钮的可点性跟状态一致。
+  - **测试**：新增 `test/update.test.ts` 28 例（版本比较含预发布段、状态映射、进度与字节、视图合成、按钮可点性、IO 外壳的六种不可用/失败路径、channel 推前缀）；全量 `bun test` **487 pass / 0 fail**（28 文件、1729 expect）。
+  - **已知边界**：dev 构建框架自己拒绝更新（`Dev channel - updates disabled`）⇒「有新版本 → 下载 → 安装」这条只在单测与将来的 stable 发布上验证；首个 Electrobun 版本发布前 `latest/download` 上没有清单文件，检查会以框架报错收场（卡片会显示错误，不会假装「已是最新」）。
 - **浏览器 guest：侧边栏浏览器的 8 条命令接上，页面能真的嵌一个外来网页（#220 能力补齐，旧壳 `desktop/src-tauri/src/ui/browser_guests/` 的等价物）**：
   - **为什么不用 Electrobun 自带的 `<electrobun-webview>` 标签**：那套靠 DOM 树自己建视图（属性直写 partition/renderer），而 dsh 前端的 DOM 是固定的——它只知道 `desktop-browser-bridge.ts` 那套 `browser_guest_*` 契约，所以走「壳维护台账 + 推状态回页面」这条旧壳已经跑通的路。
   - **guest 是宿主窗口上的一枚子视图**：`new BrowserView({..., sandbox: true, renderer: 'cef', partition: 'persist:ws-<workspace 派生>', frame: 屏幕外 1×1, windowId/hostWebviewId: 发起调用的那个窗口})`。`sandbox: true` = 不开 RPC、只保留事件（不可信内容）；partition 按 workspace 派生（`fnv64` 16 位十六进制）⇒ 各工作区的 cookie/存储天然隔离；窗口关了按宿主标签批量回收。

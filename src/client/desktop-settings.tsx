@@ -90,6 +90,38 @@ interface RuntimeCatalog {
   running?: { kind: string; version: string | null; dir: string | null } | null
 }
 
+/** 应用更新（#220 决策 11）：壳把框架 Updater 的状态机翻成这个视图，客户端只负责渲染 */
+interface UpdateSnapshotLike {
+  available: boolean
+  reason: string
+  view: {
+    phase: string
+    label: string
+    message: string
+    current: string
+    latest: string
+    channel: string
+    progress: number | null
+    bytesDownloaded: number | null
+    totalBytes: number | null
+    error: string
+    updateReady: boolean
+  }
+  actions: { canCheck: boolean; canDownload: boolean; canApply: boolean; hint: string }
+}
+
+function fmtBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
 interface MigrationStatus {
   running: boolean
   copied: number
@@ -410,6 +442,41 @@ function DesktopSettingsPanel(): React.ReactElement {
   const [diagSummary, setDiagSummary] = useState<string | null>(null)
   const [diagLogPath, setDiagLogPath] = useState<string | null>(null)
   const [diagExport, setDiagExport] = useState<string | null>(null)
+  // 应用更新（#220 决策 11，壳的新增能力）：挂载读一次，检查/下载/安装期间 1s 轮询
+  const [updateState, setUpdateState] = useState<UpdateSnapshotLike | null>(null)
+  const updateBusy =
+    updateState !== null &&
+    (updateState.view.phase === 'checking' ||
+      updateState.view.phase === 'downloading' ||
+      updateState.view.phase === 'preparing')
+  const runUpdate = (cmd: 'check_update' | 'download_update' | 'apply_update'): void => {
+    void invoke<UpdateSnapshotLike>(cmd)
+      .then((snapshot) => {
+        setUpdateState(snapshot)
+        showToast(snapshot.view.label, snapshot.view.phase !== 'error')
+      })
+      .catch((e: unknown) => showToast(`更新失败：${String(e)}`, false))
+  }
+  useEffect(() => {
+    let cancelled = false
+    void invoke<UpdateSnapshotLike>('get_update_state')
+      .then((snapshot) => {
+        if (!cancelled) setUpdateState(snapshot)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (!updateBusy) return
+    const timer = setInterval(() => {
+      void invoke<UpdateSnapshotLike>('get_update_state')
+        .then(setUpdateState)
+        .catch(() => {})
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [updateBusy])
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
   const [dlProgress, setDlProgress] = useState<{
     version: string
@@ -1289,6 +1356,60 @@ function DesktopSettingsPanel(): React.ReactElement {
           </PfBtn>
         </div>
         {diagExport !== null && <div style={NOTE_STYLE}>上次导出：{diagExport}</div>}
+      </SectionBox>
+
+      {/* ── 应用更新（#220 决策 11）：旧 Tauri 壳没这个能力，是新增件；走框架自带的 Updater ── */}
+      <SectionBox title="应用更新">
+        <div style={NOTE_STYLE}>
+          {updateState === null
+            ? '读取中…'
+            : `当前版本 ${updateState.view.current || '未知'}${
+                updateState.view.channel ? `（${updateState.view.channel}）` : ''
+              } · ${updateState.view.label}`}
+        </div>
+        {updateState !== null && updateState.view.message !== '' && (
+          <div style={NOTE_STYLE}>{updateState.view.message}</div>
+        )}
+        {updateState !== null && updateState.actions.hint !== '' && (
+          <div style={NOTE_STYLE}>{updateState.actions.hint}</div>
+        )}
+        {updateState !== null && !updateState.available && updateState.reason !== '' && (
+          <div style={NOTE_STYLE}>{updateState.reason}</div>
+        )}
+        {updateState !== null && updateState.view.error !== '' && (
+          <div style={DANGER_NOTE_STYLE}>{updateState.view.error}</div>
+        )}
+        {updateBusy && updateState !== null && updateState.view.progress !== null && (
+          <div style={NOTE_STYLE}>
+            进度 {updateState.view.progress}%
+            {updateState.view.totalBytes !== null
+              ? `（${fmtBytes(updateState.view.bytesDownloaded)} / ${fmtBytes(
+                  updateState.view.totalBytes
+                )}）`
+              : ''}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <PfBtn
+            variant="ghost"
+            disabled={updateState === null || !updateState.actions.canCheck}
+            onClick={() => runUpdate('check_update')}
+          >
+            检查更新
+          </PfBtn>
+          <PfBtn
+            disabled={updateState === null || !updateState.actions.canDownload}
+            onClick={() => runUpdate('download_update')}
+          >
+            下载更新
+          </PfBtn>
+          <PfBtn
+            disabled={updateState === null || !updateState.actions.canApply}
+            onClick={() => runUpdate('apply_update')}
+          >
+            重启并安装
+          </PfBtn>
+        </div>
       </SectionBox>
 
       <SectionBox title="dsh 运行时（版本下载 / 切换）">
