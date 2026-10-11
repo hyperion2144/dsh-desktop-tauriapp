@@ -10,6 +10,7 @@ import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.t
 import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcHandler } from './rpc.ts'
 import { listSounds, type Notifier } from './notifications.ts'
+import type { PortClaim } from '../shared/ports.ts'
 
 export interface CommandDeps {
   home: string
@@ -28,6 +29,10 @@ export interface CommandDeps {
   status?: () => Record<string, unknown>
   /** 壳当前占用的端口（`list_profile_ports` 用） */
   ports?: () => { port: number; lanePort: number } | undefined
+  /** 共享端口台账（多窗口：每份 profile 的服务面都往同一个文件里记自己那行） */
+  portClaims?: () => Promise<PortClaim[]>
+  /** 磁盘上已知的 profile 名（`list_profile_ports` 的行来源之一） */
+  profiles?: () => string[]
   /** dsh 服务状态码（旧壳 get_dsh_status 的 0..7 枚举；缺省当作「运行中」） */
   dshStatus?: () => number
   /** 运行中的 dsh 版本（内置＝运行时目录名，外部＝CLI 版本） */
@@ -69,6 +74,8 @@ export interface RuntimeSnapshot {
   activeVersion: string | null
   /** override | external | installed | builtin */
   activeKind: string
+  /** 当前生效运行时目录（面板显示「运行中」时用得上） */
+  activeDir: string | null
   /** 面板 select 的当前值：设置里的 dshRuntime（外部模式下不生效） */
   selected: string | null
   installed: InstalledRuntime[]
@@ -101,6 +108,16 @@ const NOT_PORTED: Record<string, string> = {
 /** profile 可以是静态值（单测）或取值函数（壳里跟着托盘切 profile 变） */
 function profileOf(deps: CommandDeps): string {
   return typeof deps.profile === 'function' ? deps.profile() : deps.profile
+}
+
+/** 台账里的 pid 还活着吗（权限不足也算活着：`EPERM` 说明进程存在） */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return pid === process.pid
+  }
 }
 
 export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler> {
@@ -201,6 +218,13 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         // 外部 CLI 不占本地运行时树：此时「当前使用」不指向任何已下载版本（旧壳 #135）
         selected: (snapshot?.mode ?? 'builtin') === 'external' ? null : (snapshot?.selected ?? null),
         installed: snapshot?.installed ?? [],
+        // 当前真正在跑的那棵树：面板要能把它标成「运行中」，
+        // 并且不再把正在跑的版本当成「可下载」（dev 用 DSH_SHELL_RUNTIME_DIR 时内置树可能压根不在）
+        running: {
+          kind: snapshot?.activeKind ?? 'builtin',
+          version: snapshot?.activeVersion ?? null,
+          dir: snapshot?.activeDir ?? null,
+        },
         catalog: fetched.entries,
       }
       if (fetched.error !== undefined) body.error = fetched.error
@@ -246,17 +270,43 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return {}
     },
 
-    list_profile_ports: () => {
+    // 多窗口：设置面板每份窗口各问一次壳，但端口表要覆盖所有 profile。
+    // 行来源＝磁盘上已知的 profile 名 ∪ 共享台账里的行；自己那行用本份服务面的活值。
+    list_profile_ports: async () => {
+      const local = profileOf(deps)
       const ports = deps.ports?.()
-      const settings = deps.settings()
-      return [
-        {
-          profile: profileOf(deps),
-          port: ports?.port ?? 0,
-          lane_port: ports?.lanePort ?? 0,
-          running: true,
-        },
-      ]
+      const claims = (await deps.portClaims?.()) ?? []
+      const names = deps.profiles?.() ?? [local]
+      const rows = new Map<string, { profile: string; port: number; lane_port: number; running: boolean }>()
+      for (const profile of names) rows.set(profile, { profile, port: 0, lane_port: 0, running: false })
+      for (const claim of claims) {
+        const alive = pidAlive(claim.pid)
+        const existing = rows.get(claim.profile)
+        if (existing === undefined) {
+          rows.set(claim.profile, {
+            profile: claim.profile,
+            port: claim.port,
+            lane_port: claim.lanePort ?? 0,
+            running: alive,
+          })
+        } else {
+          existing.port = claim.port
+          existing.lane_port = claim.lanePort ?? 0
+          existing.running = alive
+        }
+      }
+      const own = rows.get(local)
+      if (own !== undefined) {
+        own.port = ports?.port ?? own.port
+        own.lane_port = ports?.lanePort ?? own.lane_port
+        own.running = true
+      }
+      // 本 profile 最靠前，其余按名字：面板里一眼能看出自己与兄弟窗口
+      return [...rows.values()].sort((left, right) => {
+        if (left.profile === local) return -1
+        if (right.profile === local) return 1
+        return left.profile.localeCompare(right.profile)
+      })
     },
 
     list_profile_dependency_status: () => {

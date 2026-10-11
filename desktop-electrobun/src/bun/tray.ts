@@ -40,7 +40,6 @@ export function createTray(options: CreateTrayOptions): TrayHandle | null {
 
   const apply = (state: TrayState): void => {
     try {
-      tray.setTitle(trayTitle(state))
       tray.setMenu(trayMenu(state))
     } catch (error) {
       log(`[shell] 托盘菜单更新失败：${String(error)}`)

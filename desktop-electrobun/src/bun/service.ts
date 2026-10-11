@@ -28,6 +28,7 @@ import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
+import { listProfiles } from './profiles.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import {
@@ -49,6 +50,8 @@ export interface ServiceOptions {
   /** 页面请求关窗（`close_current_window` / `exit_window_instance`） */
   onCloseWindow?: () => void
   clientVersion: string
+  /** 这个服务面负责哪个 profile（多窗口下每 profile 一份；缺省按 DSH_PROFILE > 设置 > 默认） */
+  profile?: string
   /** 覆盖 DSH_HOME 等；默认读 process.env */
   env?: Record<string, string | undefined>
   noWindow?: boolean
@@ -104,8 +107,8 @@ export interface ShellService {
   stop: () => Promise<void>
   /** 手动重启宿主（守护器会接住退出并把服务面切到新宿主） */
   restartHost: () => Promise<void>
-  /** 就地按另一个 profile 重启 dsh：页面 origin 不变（旧壳 `switch-profile-<name>` 语义） */
-  switchProfile: (profile: string) => Promise<void>
+  // 每份服务面只服务一个 profile：profile 由 ServiceOptions.profile 在启动时给定，
+  // 切换 profile ＝ 打开那份 profile 的窗口（多窗口，见 src/bun/index.ts 的 openProfileWindow）。
   /** 当前生效设置（托盘这类壳侧调用方读它） */
   settings: () => DesktopSettings
   /** 改设置：与命令表同一条写盘路径（落盘 + 刷新状态文件） */
@@ -152,7 +155,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 旧壳的 DSH_MODE / DSH_SHELL_RUNTIME_DIR 覆盖仍在 layout 内部处理。
   let paths = layout({
     env,
-    profile: activeProfile(settings, env),
+    profile: options.profile ?? activeProfile(settings, env),
     mode: settings.dshMode,
     preferred: settings.dshRuntime,
   })
@@ -228,24 +231,32 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       return '[]'
     }
   }
+  // 空闲判定必须同时试 127.0.0.1 与 0.0.0.0：手机访问插件绑的是通配地址，
+  // 而 macOS 上「别人占着 *:P」时绑 127.0.0.1:P 仍会成功（实测），只试 loopback 会
+  // 把已被占用的 lane 端口判成空闲，第二份服务面的宿主直接 EADDRINUSE 退出（多窗口实测）。
   const portFree = (port: number): boolean => {
-    try {
-      const probe = Bun.listen({ hostname: '127.0.0.1', port, socket: { data() {}, open() {}, close() {} } })
-      probe.stop(true)
-      return true
-    } catch {
-      return false
+    for (const hostname of ['127.0.0.1', '0.0.0.0']) {
+      try {
+        const probe = Bun.listen({ hostname, port, socket: { data() {}, open() {}, close() {} } })
+        probe.stop(true)
+      } catch {
+        return false
+      }
     }
+    return true
   }
 
-  let claims = pruneClaims(parseClaims(await readClaims()), (pid) => {
+  // 台账是多个服务面共享的文件（每份 profile 一份服务面）：写入前重读并合并，
+  // 否则后启动的那份会把先启动那份的条目当成脏数据覆盖掉。
+  const isAlivePid = (pid: number): boolean => {
     try {
       process.kill(pid, 0)
       return true
     } catch {
       return pid === process.pid
     }
-  })
+  }
+  let claims = pruneClaims(parseClaims(await readClaims()), isAlivePid)
   const previous = claimFor(claims, paths.profile)
   // 页面 origin 的认定 key：切 profile 不换 origin（localStorage 的隔离键就是它）
   const claimProfile = paths.profile
@@ -258,7 +269,18 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 上游 dsh 端口（旧壳 `port_for_profile` + `DSH_DESKTOP_PORT`）：手机访问插件靠它找上游；
   // 固定端口而不是 `--port 0`，与旧壳一致（3080 web / 3081 desktop），被占就顺延并在日志里说清楚。
   // lane 端口先算：上游顺延时不能顺手把手机 lane 要占的端口抢走（两个都绑 127.0.0.1）
-  let lanePort = profileLanePort(settings, paths.profile, env)
+  // lane 端口先算：上游顺延时不能顺手把手机 lane 要占的端口抢走（两个都绑 127.0.0.1）；
+  // 多窗口下同一个 env 覆盖会让两份服务面抢同一个 lane 端口，所以也要顺延（实测 EADDRINUSE）。
+  const intendedLane = profileLanePort(settings, paths.profile, env)
+  const laneFree = (port: number): boolean => port !== pagePort && portFree(port)
+  const pickedLane = laneFree(intendedLane)
+    ? intendedLane
+    : choosePort({ requested: intendedLane, base: intendedLane + 1, span: 20, isFree: laneFree })
+  if (pickedLane === null) throw new Error('手机 lane 端口池已耗尽')
+  const lanePort: number = pickedLane
+  if (lanePort !== intendedLane) {
+    log(`手机 lane 端口 ${String(intendedLane)} 被占用，顺延到 ${String(lanePort)}`)
+  }
   const intendedUpstream = profilePort(settings, paths.profile, env)
   const upstreamFree = (port: number): boolean => port !== lanePort && portFree(port)
   const pickedUpstream = upstreamFree(intendedUpstream)
@@ -437,6 +459,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       builtinVersion: builtinDir === null ? null : readRuntimeVersion(builtinDir),
       activeVersion: paths.runtimeVersion,
       activeKind: paths.runtimeKind,
+      activeDir: paths.runtimeDir,
       selected: liveSettings.dshRuntime ?? null,
       installed: listInstalledRuntimes(paths.appSupport),
       externalPath: externalBin,
@@ -464,13 +487,20 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   bootPayload.injections = host.ready.injections
   const pageUrl = `${server.origin}/${token}/`
 
-  claims = upsertClaim(claims, {
-    profile: claimProfile,
-    port: pagePort,
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-  })
-  await Bun.write(claimsFile, `${JSON.stringify(claims, null, 2)}\n`)
+  // 写入前重读磁盘：多窗口下台账被所有服务面共享，内存副本可能是旧的（否则会覆盖掉别人的行）。
+  const writeClaim = async (): Promise<void> => {
+    const onDisk = pruneClaims(parseClaims(await readClaims()), isAlivePid)
+    const merged = upsertClaim(onDisk, {
+      profile: claimProfile,
+      port: pagePort,
+      lanePort,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    })
+    claims = merged
+    await Bun.write(claimsFile, `${JSON.stringify(merged, null, 2)}\n`)
+  }
+  await writeClaim()
   // 底部状态条轮询的 dsh 服务状态码（旧壳 0..7：2 运行中 / 4 重启中 / 5 服务异常 / 6 服务下线）。
   // 页面重载后状态条要能立刻显示真值，所以每个阶段都得维护它。
   let dshStatusCode = 2
@@ -601,60 +631,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
       await host.stop()
     },
-    // 就地换 profile：新 profile 的脚手架/依赖树/注入清单/端口全部重算，然后杀宿主，
-    // 守护器带着新 profile 重启；页面 origin 不变（同一个 token 与端口，localStorage 不换桶）。
-    switchProfile: async (profile) => {
-      if (stopping) return
-      const target = profile.trim()
-      if (target === '' || target === paths.profile) return
-      log(`切换 profile：${paths.profile} → ${target}`)
-      // 落盘键名按旧壳：active_profile（normalizeSettings 同时认驼峰与下划线）
-      liveSettings = saveSettings({ active_profile: target })
-      Object.assign(
-        paths,
-        layout({
-          env,
-          profile: target,
-          mode: liveSettings.dshMode,
-          preferred: liveSettings.dshRuntime,
-        })
-      )
-      serverOptions.distDir = paths.distDir
-      const scaffold = scaffoldProfile(home, target)
-      if (scaffold.created.length > 0) {
-        log(`profile 脚手架：写入 ${scaffold.created.join('、')}（${target}）`)
-      }
-      reconcileProfileFor(target)
-      const staged = stagePlugins({
-        home,
-        profile: target,
-        appSupport: paths.appSupport,
-        paths: { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir },
-        ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
-        muxHeartbeatMs: liveSettings.muxHeartbeatMs,
-        desktopLayoutOnPhones: liveSettings.desktopLayoutOnPhones,
-        env,
-        log,
-      })
-      patchFiles = [staged.injectFile]
-      const nextLane = profileLanePort(liveSettings, target, env)
-      const intended = profilePort(liveSettings, target, env)
-      const free = (port: number): boolean => port !== nextLane && portFree(port)
-      const nextUpstream = free(intended)
-        ? intended
-        : choosePort({ requested: intended, base: intended + 1, span: 20, isFree: free })
-      if (nextUpstream === null) throw new Error('dsh 上游端口池已耗尽')
-      upstreamPort = nextUpstream
-      lanePort = nextLane
-      state.profile = paths.profile
-      state.runtimeDir = paths.runtimeDir
-      state.distDir = paths.distDir
-      state.upstreamPort = upstreamPort
-      state.lanePort = lanePort
-      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-      log(`新 profile 端口：dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
-      await host.stop()
-    },
+    // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
       stopping = true
       dshStatusCode = 6
@@ -667,7 +644,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         await host.stop()
       } catch {}
       forgetHosts()
-      const next = releaseClaim(parseClaims(JSON.stringify(claims)), claimProfile)
+      // 同样先重读：退出时只能摘掉自己那一行，别人的行要留着
+      const next = releaseClaim(parseClaims(await readClaims()), claimProfile)
       try {
         await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
       } catch {}
@@ -685,6 +663,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       restartService: () => service.restartHost(),
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, lanePort }),
+      // 设置面板的 Profile 端口表要看到所有 profile（多窗口）：行来自共享台账 + 磁盘 profile 目录
+      portClaims: async () => pruneClaims(parseClaims(await readClaims()), isAlivePid),
+      profiles: () => listProfiles(home, paths.profile),
       openExternal: options.onOpenExternal,
       closeWindow: options.onCloseWindow,
       playSound: (name) => {

@@ -332,6 +332,63 @@ describe('命令表', () => {
   })
 })
 
+
+describe('多窗口的数据面（列表类命令要看到别的 profile / 正在跑的运行时）', () => {
+  test('list_profile_ports：行来自磁盘 profile ∪ 共享台账，自己那行用活值且排最前', async () => {
+    const h = harness({
+      ports: () => ({ port: 6393, lanePort: 6397 }),
+      profiles: () => ['desktop', 'mobile', 'web'],
+      portClaims: async () => [
+        { profile: 'desktop', port: 6391, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
+        { profile: 'web', port: 6391, lanePort: 6398, pid: process.pid, startedAt: '2026-10-11T00:00:00.000Z' },
+        { profile: 'ghost', port: 6500, lanePort: 6501, pid: 999_999, startedAt: '2026-10-11T00:00:00.000Z' },
+      ],
+    })
+    try {
+      const rows = (await h.table.list_profile_ports?.({})) as Array<Record<string, unknown>>
+      // 自己（desktop）在最前，且端口用本份服务面的活值，不是台账里的旧值
+      expect(rows[0]).toEqual({ profile: 'desktop', port: 6393, lane_port: 6397, running: true })
+      // 兄弟 profile 从台账里读，还活着 ⇒ running（顺序按名字，所以按 profile 查而不是按位置）
+      const web = rows.find((row) => row.profile === 'web')
+      expect(web).toEqual({ profile: 'web', port: 6391, lane_port: 6398, running: true })
+      // 线程目录里没有的 profile 也要能被选中
+      expect(rows.map((row) => row.profile)).toContain('mobile')
+      // 台账里 pid 已死的照样列出来，但标成没在跑
+      const ghost = rows.find((row) => row.profile === 'ghost')
+      expect(ghost?.running).toBe(false)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('list_runtime_catalog：带上正在跑的那棵树，面板才能标「运行中」', async () => {
+    const h = harness({
+      runtime: () => ({
+        mode: 'builtin',
+        builtinVersion: null,
+        activeVersion: '0.2.1-alpha.2',
+        activeKind: 'override',
+        activeDir: '/tmp/spike-rt/0.2.1-alpha.2',
+        selected: null,
+        installed: [],
+        externalPath: null,
+        externalVersion: null,
+      }),
+    })
+    try {
+      const value = (await h.table.list_runtime_catalog?.({})) as Record<string, unknown>
+      expect(value.selected).toBeNull()
+      expect(value.builtin).toBeNull()
+      expect(value.running).toEqual({
+        kind: 'override',
+        version: '0.2.1-alpha.2',
+        dir: '/tmp/spike-rt/0.2.1-alpha.2',
+      })
+    } finally {
+      h.cleanup()
+    }
+  })
+})
 describe('/__shell__/rpc 端点', () => {
   /**
    * 拿两个互不相同的空闲端口：一个当上游（起完就放掉，保持不可达），一个给壳。

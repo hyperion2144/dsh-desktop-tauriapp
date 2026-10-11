@@ -86,6 +86,8 @@ interface RuntimeCatalog {
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
    mode?: 'builtin' | 'external'
   error?: string
+  /** 当前真正在跑的那棵树（override | external | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
+  running?: { kind: string; version: string | null; dir: string | null } | null
 }
 
 interface MigrationStatus {
@@ -1269,7 +1271,9 @@ function DesktopSettingsPanel(): React.ReactElement {
                       }`
                     : runtimeCatalog.builtin
                       ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
-                      : '当前无可用 dsh'}
+                      : runtimeCatalog.running?.version
+                        ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
+                        : '当前无可用 dsh'}
               </div>
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
@@ -1309,7 +1313,14 @@ function DesktopSettingsPanel(): React.ReactElement {
                       const installed = runtimeCatalog.installed.some((i) => i.version === c.version)
                       // #113：内置随包分发（不在 installed 数组）——可切换、标「内置」、不显示下载
                       const isBuiltin = runtimeCatalog.builtin === c.version
-                      const available = installed || isBuiltin
+                      // 运行中的那棵树（多为 dev 用 DSH_SHELL_RUNTIME_DIR 指着的树）：它不是「可下载」的东西，
+                      // 也不该显示下载按钮（用户报：内置正在用的版本还能下载）
+                      const isRunning =
+                        runtimeCatalog.mode !== 'external' &&
+                        runtimeCatalog.running?.version !== null &&
+                        runtimeCatalog.running?.version !== undefined &&
+                        runtimeCatalog.running.version === c.version
+                      const available = installed || isBuiltin || isRunning
                       // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
                       // 当前使用：仅来源=内置时按号匹配（selected 空 = 内置兜底行）；
                       // 外部 CLI 模式下没有哪个下载版本「使用中」（#135，卸载不再被锁死）
@@ -1318,11 +1329,12 @@ function DesktopSettingsPanel(): React.ReactElement {
                           ? false
                           : runtimeCatalog.selected
                             ? runtimeCatalog.selected === c.version
-                            : isBuiltin
+                            : isBuiltin || isRunning
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
                       if (isBuiltin) tags.push('内置')
                       else if (installed) tags.push('已下载')
+                      if (isRunning) tags.push('运行中')
                       const downloadState = runtimeDownloading[c.version]
                       const failedReason = typeof downloadState === 'object' ? downloadState.failed : ''
                       const pct =
@@ -1364,13 +1376,20 @@ function DesktopSettingsPanel(): React.ReactElement {
                                 </PfBtn>
                                 <PfBtn
                                   variant="danger"
-                                  disabled={removingVersion !== null || runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
+                                  disabled={
+                                    removingVersion !== null ||
+                                    isRunning ||
+                                    runtimeCatalog.selected === c.version ||
+                                    c.version === runtimeCatalog.builtin
+                                  }
                                   title={
-                                    runtimeCatalog.selected === c.version
-                                      ? '使用中的版本不可卸载，请先切换'
-                                      : c.version === runtimeCatalog.builtin
-                                        ? '内置版本随应用分发，不可卸载'
-                                        : '删除本地已下载的运行时'
+                                    isRunning
+                                      ? '正在运行的版本不可卸载'
+                                      : runtimeCatalog.selected === c.version
+                                        ? '使用中的版本不可卸载，请先切换'
+                                        : c.version === runtimeCatalog.builtin
+                                          ? '内置版本随应用分发，不可卸载'
+                                          : '删除本地已下载的运行时'
                                   }
                                   onClick={() => handleRemoveRuntime(c.version)}
                                 >

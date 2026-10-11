@@ -7,7 +7,7 @@ import { ApplicationMenu, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { bootPreloadScript } from './preload.ts'
-import { startService } from './service.ts'
+import { startService, type ServiceOptions, type ShellService } from './service.ts'
 import type { RuntimeSnapshot } from './commands.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
@@ -31,6 +31,7 @@ import {
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
+import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import { join } from 'node:path'
@@ -68,6 +69,18 @@ if (platform === 'darwin') installApplicationMenu(ApplicationMenu, APP_NAME)
 const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
 // 回调注册在窗口之前，闭包里的 mainWindow 在窗口建好后才有值。
+/** 每个 profile 一份窗口 + 一份服务面（旧壳 `desktop/src-tauri/src/ui/multiwin.rs` 的等价物：
+ *  每 profile 至多一窗；关窗只销毁 UI、实例继续跑；主窗关窗回托盘）。 */
+interface ProfileWindow {
+  profile: string
+  window: BrowserWindow
+  /** 该窗的 CEF 浏览器就绪（dom-ready 之前 loadURL/executeJavascript 会打到空 ref） */
+  ready: boolean
+}
+const windows = new Map<string, ProfileWindow>()
+const services = new Map<string, ShellService>()
+/** 最近聚焦的窗口 profile；托盘「显示/隐藏窗口」作用在它身上（旧壳 focused_window_label）。 */
+let focusedProfile: string | null = null
 let mainWindow: BrowserWindow | null = null
 /** 主窗的 CEF 浏览器就绪（dom-ready）之前，`loadURL` 与 `executeJavascript` 都会打到空 ref 上 */
 let mainWindowReady = false
@@ -126,8 +139,8 @@ function ensureCatalog(): void {
   if (catalogPending) return
   if (catalogCache !== null && Date.now() - catalogCache.at < TRAY_CATALOG_TTL_MS) return
   catalogPending = true
-  void service
-    .fetchCatalog(service.settings().runtimeSource ?? 'github')
+  void uiService()
+    .fetchCatalog(uiService().settings().runtimeSource ?? 'github')
     .then((result) => {
       if (result.error === undefined) catalogCache = { at: Date.now(), entries: result.entries }
       else console.warn(`[shell] 拉运行时版本目录失败：${result.error}`)
@@ -144,7 +157,7 @@ function ensureCatalog(): void {
 /** 下载状态在运行时管理器里；壳侧只读它——取不到就当作不在下载。 */
 function downloadStatusSafe(): RuntimeDownloadStatus {
   try {
-    return service.downloadStatus()
+    return uiService().downloadStatus()
   } catch {
     return { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }
   }
@@ -161,19 +174,28 @@ function runtimeLabelOf(snapshot: RuntimeSnapshot): string {
   return snapshot.activeVersion === null ? '内置（版本未知）' : `内置 ${snapshot.activeVersion}`
 }
 
+/** 面向托盘与设置面板的那份服务面：最近聚焦窗口的；没有就退回启动 profile 的。 */
+function uiService(): ShellService {
+  const focused = focusedProfile === null ? undefined : services.get(focusedProfile)
+  return focused ?? service
+}
+
 function trayState(): TrayState {
-  const settings = service.settings()
-  const snapshot = service.runtime()
+  const settings = uiService().settings()
+  const snapshot = uiService().runtime()
   const download = downloadStatusSafe()
   return {
-    windowVisible,
-    profile: service.paths.profile,
-    // 多 profile：菜单按 home 下的 profile 目录列，点了就地切（旧壳 `切换 Profile（本窗口）`）
-    profiles: listProfiles(dshHome(), service.paths.profile),
-    hostRunning: service.state.hostPid > 0,
+    // 可见性是「当前那个窗口」的：多窗口下托盘的显示/隐藏只动一个
+    windowVisible: focusedWindow()?.isVisible() ?? windowVisible,
+    profile: uiService().paths.profile,
+    // 多 profile：菜单按 home 下的 profile 目录列，点了开/聚焦那一份窗口
+    profiles: listProfiles(dshHome(), instanceProfile),
+    openWindows: [...windows.keys()],
+    hostRunning: uiService().state.hostPid > 0,
     runtimeLabel: runtimeLabelOf(snapshot),
     mode: settings.dshMode ?? 'builtin',
     builtinVersion: snapshot.builtinVersion,
+    runningVersion: snapshot.activeVersion,
     selected: settings.dshRuntime ?? null,
     installed: snapshot.installed.map((entry) => entry.version),
     catalog: catalogCache?.entries ?? [],
@@ -190,47 +212,218 @@ function refreshTray(): void {
 }
 
 function showMainWindow(): void {
-  if (mainWindow === null) return
-  mainWindow.unminimize()
-  mainWindow.show()
-  mainWindow.activate()
+  const win = focusedWindow()
+  if (win === null) return
+  win.unminimize()
+  win.show()
+  win.activate()
   windowVisible = true
   refreshTray()
 }
 
 function hideMainWindow(): void {
-  if (mainWindow === null) return
-  mainWindow.hide()
+  const win = focusedWindow()
+  if (win === null) return
+  win.hide()
   windowVisible = false
   refreshTray()
+}
+
+// ---- 多窗口：每 profile 一份服务面 + 一个窗口（旧壳 `ui/multiwin.rs` 的等价物）----
+
+/** 当前那个窗口：最近聚焦的；没焦点记录就回主窗。 */
+function focusedWindow(): BrowserWindow | null {
+  if (focusedProfile !== null) {
+    const hit = windows.get(focusedProfile)
+    if (hit !== undefined) return hit.window
+  }
+  return mainWindow
+}
+
+/** 起/profile 复用一份服务面：每份服务面 = 一个 dsh 宿主 + 一个 loopback origin。 */
+async function ensureService(profile: string): Promise<ShellService> {
+  const existing = services.get(profile)
+  if (existing !== undefined) return existing
+  console.log(`[shell] 起服务面：profile = ${profile}`)
+  const started = await startService(serviceOptionsFor(profile))
+  services.set(profile, started)
+  return started
+}
+
+/** 服务面选项：除了 profile 与状态文件，其余回调全是壳侧共用的那几个。 */
+function serviceOptionsFor(profile: string): ServiceOptions {
+  const home = dshHome()
+  return {
+    profile,
+    clientVersion: CLIENT_VERSION,
+    noWindow,
+    // 一个 profile 一份状态文件（诊断脚本按 profile 找）；启动 profile 保留旧路径
+    env:
+      profile === instanceProfile
+        ? process.env
+        : { ...process.env, DSH_SHELL_STATE_FILE: join(home, `shell-state-${profile}.json`) },
+    onOpenExternal: (url) => {
+      if (!Utils.openExternal(url)) console.warn(`[shell] 系统浏览器没接住外链：${url}`)
+    },
+    onContextMenu: (request) => {
+      const linkIsExternal =
+        request.linkUrl !== null && isExternalUrl(request.linkUrl, originOf(profile))
+      const items = contextMenuItems(request, linkIsExternal)
+      // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
+      console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
+      ContextMenu.showContextMenu(items as unknown[])
+    },
+    onStage: (stage) => {
+      lastStage = stage
+      console.log(`[shell] 启动阶段：${stageLabel(stage)}（${String(stagePercent(stage))}%）`)
+      pushStage()
+    },
+    onActivate: () => {
+      // 第二个壳点了一次图标：把当前窗口带到前台（恢复最小化、显示、抢焦点）
+      console.log('[shell] 收到激活请求：窗口带到前台')
+      showMainWindow()
+    },
+    onHostRestart: (state) => {
+      // 宿主被守护器拉起来了：把对应窗口刷回同一个页面 origin（token/端口都没变）
+      console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)
+      reloadWindow(state.profile, state.pageUrl)
+    },
+    onHostGiveUp: (state, reason) => {
+      console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
+    },
+    notifier,
+    pickSoundFile: pickSoundFileImpl,
+    // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口
+    onCloseWindow: () => {
+      windows.get(profile)?.window.close()
+    },
+  }
+}
+
+function originOf(profile: string): string {
+  return services.get(profile)?.state.origin ?? ''
+}
+
+/** 「桌面通知」tab 的「自定义文件…」：Electrobun 原生文件选择器（旧壳 tauri-plugin-dialog 的等价物）。 */
+async function pickSoundFileImpl(): Promise<string | null> {
+  const picked = await Utils.openFileDialog({
+    startingFolder: '~/',
+    allowedFileTypes: 'wav,mp3,ogg',
+    canChooseFiles: true,
+    canChooseDirectory: false,
+    allowsMultipleSelection: false,
+  })
+  return picked[0] ?? null
+}
+
+/** 宿主重启后把对应窗口刷回同一个页面 origin。 */
+function reloadWindow(profile: string, url: string): void {
+  const hit = windows.get(profile)
+  if (hit === undefined || !hit.ready) return
+  hit.window.webview?.loadURL(url)
+}
+
+/** 建一个 profile 窗口并接上壳侧语义（关窗、聚焦、几何）；DOM 事件与旧单窗实现同一套。 */
+function createProfileWindow(profile: string, svc: ShellService): BrowserWindow {
+  const isBoot = profile === instanceProfile
+  const index = windows.size
+  const frame = index === 0 ? restoreWindowFrame() : offsetFrame(restoreWindowFrame(), index)
+  const win = new BrowserWindow({
+    title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}` ,
+    url: svc.state.pageUrl,
+    renderer: 'cef',
+    preload: bootPreloadScript(locale, platform, svc.state.origin),
+    titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    frame,
+  })
+  windows.set(profile, { profile, window: win, ready: false })
+  focusedProfile = profile
+  if (isBoot) mainWindow = win
+  console.log(`[shell] 建窗：${windowKey(profile)}（${svc.state.pageUrl}）`)
+  win.on('dom-ready', () => {
+    const hit = windows.get(profile)
+    if (hit !== undefined) hit.ready = true
+    if (isBoot) {
+      // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
+      try {
+        splash?.close()
+      } catch {}
+      splash = null
+      mainWindowReady = true
+    }
+    windowVisible = true
+    refreshTray()
+  })
+  win.on('focus', () => {
+    focusedProfile = profile
+    refreshTray()
+  })
+  // 关窗回托盘：原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）。
+  // 没有托盘时不能隐藏（隐藏后没有入口再叫回来），直接走真退出（仅主窗）。
+  win.on('will-close', (event) => {
+    if (quitting) return
+    if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
+      ;(event as { response?: unknown }).response = { allow: false }
+      console.log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
+      win.hide()
+      windowVisible = false
+      refreshTray()
+      return
+    }
+    if (!closeToTray() && profile === instanceProfile) {
+      console.log('[shell] 关窗（无托盘）：直接退出')
+      void shutdown()
+      return
+    }
+    console.log(`[shell] 关窗（${profile}）：只销毁窗口，实例继续跑`)
+  })
+  win.on('close', () => {
+    windows.delete(profile)
+    if (focusedProfile === profile) focusedProfile = null
+    refreshTray()
+  })
+  // 位置/尺寸记忆只记主窗（多窗口共用一份 window.json；按 profile 各记一份是另一件事）
+  if (isBoot) {
+    win.on('resize', () => scheduleFrameSave(win))
+    win.on('move', () => scheduleFrameSave(win))
+  }
+  return win
+}
+
+/** 托盘「PROFILE 窗口」：已开就聚焦，没开就起一份服务面再开窗（旧壳 open_profile_window）。 */
+async function openProfileWindow(profile: string): Promise<void> {
+  const existing = windows.get(profile)
+  if (existing !== undefined && planWindowOpen(profile, [...windows.keys()]) === 'focus') {
+    existing.window.unminimize()
+    existing.window.show()
+    existing.window.activate()
+    focusedProfile = profile
+    refreshTray()
+    return
+  }
+  console.log(`[shell] 打开 profile 窗口：${profile}`)
+  try {
+    const svc = await ensureService(profile)
+    createProfileWindow(profile, svc)
+    refreshTray()
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[shell] 打开 profile 窗口失败（${profile}）：${message}`)
+    notifier.notify(SCENARIO.INSTANCE_LIFECYCLE, `打开 ${profile} 窗口失败：${message}`)
+  }
 }
 
 /** 托盘「重启 dsh 服务」：杀掉宿主，守护器带着同一份运行时把它拉起来。 */
 async function restartServiceFromTray(): Promise<void> {
   console.log('[shell] 托盘：重启 dsh 服务')
   try {
-    await service.restartHost()
+    await uiService().restartHost()
   } catch (error) {
     console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
   }
   refreshTray()
 }
 
-/** 托盘「切换 Profile」：就地按新 profile 重启 dsh（页面 origin 不变，localStorage 不换桶）。 */
-async function switchProfileFromTray(profile: string): Promise<void> {
-  if (profile === service.paths.profile) {
-    showMainWindow()
-    return
-  }
-  console.log(`[shell] 托盘：切换 profile ${service.paths.profile} → ${profile}`)
-  try {
-    await service.switchProfile(profile)
-  } catch (error) {
-    console.error(`[shell] 切换 profile 失败：${String(error)}`)
-    notifier.notify(SCENARIO.STARTUP_ERROR, `切换 profile ${profile} 失败`)
-  }
-  refreshTray()
-}
 
 /** 托盘「运行时版本」：内置 / 外部 dsh / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
 async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
@@ -241,10 +434,19 @@ async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
         ? { dsh_mode: 'builtin', dsh_runtime: null }
         : { dsh_mode: 'builtin', dsh_runtime: action.version }
   console.log(`[shell] 托盘：切换运行时 ${JSON.stringify(patch)}`)
-  service.save(patch)
+  uiService().save(patch)
   refreshTray()
   try {
-    await service.restartHost()
+    // 运行时是壳级设置：把所有已起的服务面都重启一遍（各自守护器带走新运行时）
+    await Promise.all(
+      [...services.values()].map(async (svc) => {
+        try {
+          await svc.restartHost()
+        } catch (error) {
+          console.error(`[shell] 重启服务面失败（${svc.paths.profile}）：${String(error)}`)
+        }
+      })
+    )
   } catch (error) {
     console.error(`[shell] 切换运行时失败：${String(error)}`)
   }
@@ -270,7 +472,7 @@ async function downloadRuntimeFromTray(version: string): Promise<void> {
   console.log(`[shell] 托盘：下载运行时 ${version}`)
   pollDownload()
   try {
-    await service.download(version, service.settings().runtimeSource ?? 'github')
+    await uiService().download(version, uiService().settings().runtimeSource ?? 'github')
   } catch (error) {
     console.error(`[shell] 下载运行时 ${version} 失败：${String(error)}`)
     notifier.notify(SCENARIO.STARTUP_ERROR, `下载运行时 ${version} 失败`)
@@ -296,8 +498,8 @@ function onTrayAction(action: TrayAction): void {
     case 'restart-service':
       void restartServiceFromTray()
       return
-    case 'select-profile':
-      if (action.profile !== undefined) void switchProfileFromTray(action.profile)
+    case 'open-window':
+      if (action.profile !== undefined) void openProfileWindow(action.profile)
       return
     case 'switch-runtime':
       void switchRuntimeFromTray(action)
@@ -369,60 +571,9 @@ const notifier: Notifier = createNotifier({
   isFullscreen: () => mainWindow?.isFullScreen() ?? false,
   onLog: (line) => console.log(line),
 })
-let service: Awaited<ReturnType<typeof startService>>
+let service: ShellService
 try {
-  service = await startService({
-  clientVersion: CLIENT_VERSION,
-  noWindow,
-  onOpenExternal: (url) => {
-    if (!Utils.openExternal(url)) console.warn(`[shell] 系统浏览器没接住外链：${url}`)
-  },
-  onContextMenu: (request) => {
-    const linkIsExternal = request.linkUrl !== null && isExternalUrl(request.linkUrl, service.state.origin)
-    const items = contextMenuItems(request, linkIsExternal)
-    // 「挂不上也要出声」：菜单内容进日志，实机排查时能看出是哪一档
-    console.log(`[shell] 右键菜单：${items.map((item) => item.label ?? item.role ?? item.type ?? '?').join(' | ')}`)
-    ContextMenu.showContextMenu(items as unknown[])
-  },
-  onStage: (stage) => {
-    lastStage = stage
-    console.log(`[shell] 启动阶段：${stageLabel(stage)}（${String(stagePercent(stage))}%）`)
-    pushStage()
-  },
-  onActivate: () => {
-    // 第二个壳点了一次图标：把已有窗口带到前台（恢复最小化、显示、抢焦点）
-    console.log('[shell] 收到激活请求：窗口带到前台')
-    if (mainWindow !== null) {
-      mainWindow.unminimize()
-      mainWindow.show()
-      mainWindow.activate()
-    }
-  },
-  onHostRestart: (state) => {
-    // 宿主被守护器拉起来了：把窗口刷回同一个页面 origin（token/端口都没变）
-    console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)
-    if (mainWindowReady) mainWindow?.webview?.loadURL(state.pageUrl)
-  },
-  onHostGiveUp: (state, reason) => {
-    console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
-  },
-  notifier,
-  // 「桌面通知」tab 的「自定义文件…」：Electrobun 原生文件选择器（旧壳 tauri-plugin-dialog 的等价物）
-  pickSoundFile: async () => {
-    const picked = await Utils.openFileDialog({
-      startingFolder: '~/',
-      allowedFileTypes: 'wav,mp3,ogg',
-      canChooseFiles: true,
-      canChooseDirectory: false,
-      allowsMultipleSelection: false,
-    })
-    return picked[0] ?? null
-  },
-  // 页面请求关窗（`close_current_window` / `exit_window_instance`）：走窗口自己的关闭流程
-  onCloseWindow: () => {
-    mainWindow?.close()
-  },
-  })
+  service = await ensureService(instanceProfile)
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[shell] 启动失败：${message}`)
@@ -444,48 +595,15 @@ updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUr
 if (!noWindow) {
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
-  const win = new BrowserWindow({
-    title: APP_NAME,
-    url: service.state.pageUrl,
-    renderer: 'cef',
-    preload: bootPreloadScript(locale, platform, service.state.origin),
-    titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
-    frame: restoreWindowFrame(),
-  })
-  mainWindow = win
-  // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
-  win.on('dom-ready', () => {
-    try {
-      splash?.close()
-    } catch {}
-    splash = null
-    windowVisible = true
-    refreshTray()
-    mainWindowReady = true
-  })
-  // 关窗回托盘：原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）。
-  // 没有托盘时不能隐藏（隐藏后没有入口再叫回来），直接走真退出。
-  win.on('will-close', (event) => {
-    if (quitting) return
-    if (!closeToTray()) {
-      console.log('[shell] 关窗（无托盘）：直接退出')
-      void shutdown()
-      return
-    }
-    ;(event as { response?: unknown }).response = { allow: false }
-    console.log('[shell] 关窗回托盘（窗口隐藏，进程继续）')
-    hideMainWindow()
-  })
-  // 位置/尺寸记忆：拖动与缩放都会触发，合并落盘（旧 Tauri 壳是 tauri-plugin-window-state）
-  win.on('resize', () => scheduleFrameSave(win))
-  win.on('move', () => scheduleFrameSave(win))
-  // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）
+  createProfileWindow(instanceProfile, service)
+  // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
+  // 多窗口下作用在「最近聚焦」那个窗口上。
   ContextMenu.on('context-menu-clicked', (event) => {
     const detail = (event as { data?: { action?: string; data?: { url?: string } } }).data
     const action = detail?.action ?? ''
     const url = detail?.data?.url
     if (action === SHELL_MENU_ACTIONS.reload) {
-      win.webview?.loadURL(service.state.pageUrl)
+      focusedWindow()?.webview?.loadURL(uiService().state.pageUrl)
       return
     }
     if (action === SHELL_MENU_ACTIONS.openExternal && url !== undefined) {
@@ -496,6 +614,12 @@ if (!noWindow) {
       Utils.clipboardWriteText(url)
     }
   })
+  // 测试钩子：启动时把这些 profile 的窗口一并开出来（多窗口的实机/CI 验证用，逗号分隔）
+  const extraProfiles = (process.env.DSH_SHELL_OPEN_PROFILES ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '' && entry !== instanceProfile)
+  for (const profile of extraProfiles) void openProfileWindow(profile)
 }
 
 // ---- 托盘：显示/隐藏、profile、运行时来源、退出 ----
@@ -530,7 +654,14 @@ const shutdown = async (): Promise<void> => {
   try {
     // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
     // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。
-    await Promise.race([service.stop(), Bun.sleep(SHELL_STOP_DEADLINE_MS)])
+    const stops = [...services.values()].map(async (svc) => {
+      try {
+        await svc.stop()
+      } catch (error) {
+        console.error(`[shell] 停止服务面失败（${svc.paths.profile}）：${String(error)}`)
+      }
+    })
+    await Promise.race([Promise.all(stops), Bun.sleep(SHELL_STOP_DEADLINE_MS)])
   } catch (error) {
     console.error(`[shell] 停止服务面失败：${String(error)}`)
   }
@@ -543,7 +674,9 @@ process.on('exit', () => {
   if (!stopping) {
     stopping = true
     try {
-      void service.stop()
+      for (const svc of services.values()) {
+        void svc.stop()
+      }
     } catch {}
   }
 })

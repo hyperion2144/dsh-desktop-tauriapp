@@ -10,7 +10,7 @@ import {
   type TrayState,
   orderedProfiles,
   parseTrayAction,
-  profileAction,
+  windowAction,
   runtimeMenuItems,
   trayMenu,
   trayTitle,
@@ -45,10 +45,12 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   windowVisible: true,
   profile: 'desktop',
   profiles: ['desktop'],
+  openWindows: [],
   hostRunning: true,
   runtimeLabel: '内置 0.2.1-alpha.2',
   mode: 'builtin',
   builtinVersion: '0.2.1-alpha.2',
+  runningVersion: '0.2.1-alpha.2',
   selected: null,
   installed: [],
   catalog: [],
@@ -65,20 +67,21 @@ describe('trayMenu', () => {
     expect(hidden[0]).toBe('显示窗口')
   })
 
-  test('单个 profile 时不给子菜单，只给禁用的当前 profile 行', () => {
-    const items = trayMenu(baseState())
-    const profile = findItem(items, 'Profile：desktop')
-    expect(profile).toBeDefined()
-    expect(profile?.enabled).toBe(false)
-    expect(profile?.submenu).toBeUndefined()
+  test('PROFILE 窗口子菜单：已开窗的标「已开窗」，当前 profile 打勾', () => {
+    const items = trayMenu(baseState({ openWindows: ['desktop'] }))
+    const submenu = findItem(items, 'PROFILE 窗口')?.submenu
+    expect(labels(submenu ?? [])).toEqual(['✓ desktop（已开窗）'])
+    expect(findItem(submenu ?? [], 'desktop（已开窗）')?.action).toBe(windowAction('desktop'))
   })
 
-  test('多个 profile 时给子菜单，当前项打勾且排在第一位', () => {
-    const items = trayMenu(baseState({ profile: 'web', profiles: ['desktop', 'web', 'mobile'] }))
-    const submenu = findItem(items, '切换 Profile（当前 web）')?.submenu
+  test('多个 profile：当前项打勾且排第一位，没开窗的不带后缀', () => {
+    const items = trayMenu(
+      baseState({ profile: 'web', profiles: ['desktop', 'web', 'mobile'], openWindows: ['web'] })
+    )
+    const submenu = findItem(items, 'PROFILE 窗口')?.submenu
     expect(submenu !== undefined).toBe(true)
-    expect(labels(submenu ?? [])).toEqual(['✓ web', 'desktop', 'mobile'])
-    expect(findItem(submenu ?? [], 'desktop')?.action).toBe(profileAction('desktop'))
+    expect(labels(submenu ?? [])).toEqual(['✓ web（已开窗）', 'desktop', 'mobile'])
+    expect(findItem(submenu ?? [], 'desktop')?.action).toBe(windowAction('desktop'))
   })
 
   test('运行时与宿主状态是只读行，退出永远在最后', () => {
@@ -124,7 +127,7 @@ describe('parseTrayAction', () => {
       kind: 'download-runtime',
       version: '0.2.0-rc.2',
     })
-    expect(parseTrayAction(profileAction('web'))).toEqual({ kind: 'select-profile', profile: 'web' })
+    expect(parseTrayAction(windowAction('web'))).toEqual({ kind: 'open-window', profile: 'web' })
   })
 })
 
@@ -154,9 +157,32 @@ describe('runtimeMenuItems（托盘里的运行时来源切换）', () => {
     expect(labels(runtimeMenuItems(baseState()))).toEqual(['✓ 内置 0.2.1-alpha.2（随安装包）'])
   })
 
-  test('内置版本未知时文案退成「版本未知」', () => {
+  test('内置版本拿不到时，退成「正在跑的版本」（不再显示版本未知）', () => {
     const items = runtimeMenuItems(baseState({ builtinVersion: null }))
+    expect(findItem(items, '内置 0.2.1-alpha.2（随安装包）')?.checked).toBe(true)
+  })
+
+  test('内置版本与正在跑的版本都拿不到时；才写「版本未知」', () => {
+    const items = runtimeMenuItems(baseState({ builtinVersion: null, runningVersion: null }))
     expect(findItem(items, '内置（随安装包，版本未知）')?.checked).toBe(true)
+  })
+
+  test('目录里与正在跑同号的版本不再列成「下载并切换」', () => {
+    const catalog = [
+      { version: '0.2.1-alpha.2', channel: 'alpha' },
+      { version: '0.2.1-alpha.1', channel: 'alpha' },
+    ]
+    const items = runtimeMenuItems(baseState({ builtinVersion: null, catalog }))
+    expect(labels(items).filter((label) => label.startsWith('↓ 下载并切换'))).toEqual([
+      '↓ 下载并切换 0.2.1-alpha.1（alpha）',
+    ])
+  })
+
+  test('已装版本与正在跑的不一致时，那一行标「（当前运行）」', () => {
+    const items = runtimeMenuItems(
+      baseState({ installed: ['0.2.1-alpha.1'], runningVersion: '0.2.1-alpha.1' })
+    )
+    expect(labels(items)).toContain('0.2.1-alpha.1（当前运行）')
   })
 
   test('外部 dsh 只在系统里真能找到时才列', () => {
@@ -183,7 +209,11 @@ describe('runtimeMenuItems（托盘里的运行时来源切换）', () => {
 
   test('选中已下载版本：那一行打勾、内置不再打勾', () => {
     const items = runtimeMenuItems(
-      baseState({ installed: ['0.2.1-alpha.1'], selected: '0.2.1-alpha.1' })
+      baseState({
+        installed: ['0.2.1-alpha.1'],
+        selected: '0.2.1-alpha.1',
+        runningVersion: '0.2.1-alpha.1',
+      })
     )
     expect(findItem(items, '0.2.1-alpha.1')?.checked).toBe(true)
     expect(findItem(items, '内置 0.2.1-alpha.2（随安装包）')?.checked).toBe(false)

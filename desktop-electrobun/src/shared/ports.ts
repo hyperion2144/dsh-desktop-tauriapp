@@ -17,6 +17,8 @@ export interface PortClaim {
   port: number
   /** 数据面/反代监听端口（随机即可，仅供诊断） */
   dataPort?: number
+  /** 手机访问 lane 端口（同一 profile 的上游/页面端口互不重复） */
+  lanePort?: number
   pid: number
   startedAt: string
 }
