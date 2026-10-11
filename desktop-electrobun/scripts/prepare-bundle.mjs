@@ -45,3 +45,17 @@ if (existsSync(iconSource)) {
 } else {
   console.warn(`[prepare-bundle] 找不到图标来源：${iconSource}，本次构建将使用默认图标`)
 }
+
+// ── 3. 托盘图标 ───────────────────────────────────────────────────────────────
+// 旧的 Tauri 壳用同一份 32x32.png 做托盘；这里拷成 resources/tray.png，
+// 再由 build.copy 落进包内 runtime/tray.png（runtime.ts 的 trayImagePath 按这两处找）。
+const traySource = resolve(repoRoot, 'desktop', 'src-tauri', 'icons', '32x32.png')
+const trayTarget = join(projectRoot, 'resources', 'tray.png')
+if (existsSync(traySource)) {
+  mkdirSync(dirname(trayTarget), { recursive: true })
+  copyFileSync(traySource, trayTarget)
+  console.log(`[prepare-bundle] ${traySource}`)
+  console.log(`            → ${trayTarget}`)
+} else {
+  console.warn(`[prepare-bundle] 找不到托盘图标：${traySource}，本次构建不建托盘`)
+}

@@ -67,7 +67,48 @@ declare module 'electrobun/bun' {
     clipboardWriteText(text: string): void
   }
 
-  export const Tray: unknown
+  export interface TrayOptions {
+    title?: string
+    /** 图标文件路径（views:// 或绝对路径） */
+    image?: string
+    /** macOS 模板图（跟随亮/暗色自动反色） */
+    template?: boolean
+    width?: number
+    height?: number
+  }
+
+  export class Tray {
+    constructor(options?: TrayOptions)
+    readonly id: number
+    /** 原生层没建成时为 false（此时 setMenu 是空操作） */
+    readonly visible: boolean
+    setTitle(title: string): void
+    setImage(image: string): void
+    setMenu(menu: unknown[]): void
+    setVisible(visible: boolean): void
+    getBounds(): { x: number; y: number; width: number; height: number }
+    remove(): void
+    on(name: 'tray-clicked', handler: (event: unknown) => void): void
+  }
+
+  export interface Display {
+    id: number
+    bounds: { x: number; y: number; width: number; height: number }
+    workArea: { x: number; y: number; width: number; height: number }
+    scaleFactor: number
+    isPrimary: boolean
+  }
+
+  export const Screen: {
+    getPrimaryDisplay(): Display
+    getAllDisplays(): Display[]
+  }
+
+  /** 应用级事件（reopen = Dock 图标被点；beforeQuit 可接 response.allow=false 否决） */
+  export const app: {
+    on(name: string, handler: (payload: unknown) => void): () => void
+    quit(): void
+  }
 
   export const ApplicationMenu: {
     setApplicationMenu(items: unknown[]): void

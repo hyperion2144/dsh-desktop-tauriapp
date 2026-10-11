@@ -45,6 +45,27 @@ export function appSupportDir(env: Record<string, string | undefined> = process.
   return join(homedir(), APP_SUPPORT)
 }
 
+/**
+ * 托盘图标：仓内单一来源是 `desktop/src-tauri/icons/32x32.png`，构建期（prepare-bundle）
+ * 拷成 `desktop-electrobun/resources/tray.png`，打包时再由 build.copy 落进包内 `runtime/tray.png`。
+ * 三处都找不到就返回 null——没有图标就不建托盘，别用默认图标骗人。
+ */
+export function trayImagePath(env: Record<string, string | undefined> = process.env): string | null {
+  const explicit = env.DSH_SHELL_TRAY_IMAGE
+  if (explicit !== undefined && explicit !== '') return explicit
+  const projectRoot =
+    env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
+  const candidates = [
+    join(projectRoot, 'resources', 'tray.png'),
+    join(projectRoot, 'runtime', 'tray.png'),
+    join(resolve(projectRoot, '..'), 'desktop', 'src-tauri', 'icons', '32x32.png'),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
 /** 生效运行时的判定：显式 DSH_SHELL_RUNTIME_DIR > app support 下按版本名排序的最大者。 */
 export function resolveRuntimeDir(input: LayoutInput = {}): string {
   const env = input.env ?? process.env

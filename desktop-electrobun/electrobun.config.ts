@@ -26,6 +26,12 @@ export default {
       'runtime/dsh-host.mjs': 'runtime/dsh-host.mjs',
       'runtime/parent-watch.mjs': 'runtime/parent-watch.mjs',
       'runtime/bun-preload.mjs': 'runtime/bun-preload.mjs',
+      // 托盘图标：prepare:bundle 把旧的 32x32.png 拷到 resources/tray.png，再落进包内 runtime/
+      'resources/tray.png': 'runtime/tray.png',
     },
+    // 关窗不退出：托盘在的时候，关掉最后一个窗口只是隐藏（与旧 Tauri 壳同行为）。
+    // 没有托盘时（Linux 某些桌面环境）隐藏后就再也叫不回来了，所以 index.ts
+    // 会在没有托盘时把「关窗」当成真退出处理。
+    runtime: { exitOnLastWindowClosed: false },
   },
 } satisfies ElectrobunConfig

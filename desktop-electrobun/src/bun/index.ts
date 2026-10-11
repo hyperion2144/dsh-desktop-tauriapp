@@ -3,7 +3,7 @@
 // 服务面（运行时就位、端口认领、起宿主、取 cookie、loopback 服务）在 service.ts 里，
 // 那一层不 import electrobun；这里只做「渲染器断言」和「窗口」两件事。
 
-import { ApplicationMenu, BrowserWindow, BuildConfig, ContextMenu, Utils } from 'electrobun/bun'
+import { ApplicationMenu, BrowserWindow, BuildConfig, ContextMenu, Screen, Utils, app } from 'electrobun/bun'
 import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { bootPreloadScript } from './preload.ts'
@@ -11,10 +11,22 @@ import { startService } from './service.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
-import { appSupportDir } from './runtime.ts'
+import { appSupportDir, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
+import { createTray, type TrayHandle } from './tray.ts'
+import { trayMenu, type TrayAction, type TrayState } from './tray-menu.ts'
+import { listProfiles, runtimeLabel } from './profiles.ts'
+import {
+  DEFAULT_WINDOW_HEIGHT,
+  DEFAULT_WINDOW_WIDTH,
+  readWindowFrame,
+  sanitizeFrame,
+  writeWindowFrame,
+  type DisplayBounds,
+  type WindowFrame,
+} from './window-state.ts'
 import { join } from 'node:path'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
@@ -51,6 +63,95 @@ const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
 // 回调注册在窗口之前，闭包里的 mainWindow 在窗口建好后才有值。
 let mainWindow: BrowserWindow | null = null
+/** 主窗的 CEF 浏览器就绪（dom-ready）之前，`loadURL` 与 `executeJavascript` 都会打到空 ref 上 */
+let mainWindowReady = false
+
+// ---- 托盘 + 窗口几何：关窗回托盘、Dock 再激活、位置尺寸记忆 ----
+// 旧 Tauri 壳用 tauri-plugin-window-state + tauri-plugin-single-instance；Electrobun 两样都没有。
+const windowStateFile = join(appSupportDir(), 'window.json')
+const instanceProfile = process.env.DSH_PROFILE ?? 'desktop'
+let tray: TrayHandle | null = null
+let windowVisible = false
+let quitting = false
+/** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
+const closeToTray = (): boolean => tray !== null
+
+function displayBounds(): DisplayBounds[] {
+  try {
+    return Screen.getAllDisplays().map((display) => display.bounds)
+  } catch (error) {
+    console.warn(`[shell] 取显示器信息失败，窗口用默认尺寸：${String(error)}`)
+    return []
+  }
+}
+
+/** 落盘几何 → 可用几何；越界/太小/坏数据一律回默认（外接屏拔掉后不能把窗口丢在屏幕外）。 */
+function restoreWindowFrame(): WindowFrame {
+  const saved = sanitizeFrame(readWindowFrame(windowStateFile), displayBounds())
+  if (saved === null) return { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT, x: 0, y: 0 }
+  console.log(`[shell] 还原窗口位置：${String(saved.x)},${String(saved.y)} ${String(saved.width)}×${String(saved.height)}`)
+  return saved
+}
+
+/** 拖动/缩放会连续触发：合并 400ms 只写一次。 */
+let saveFrameTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleFrameSave(win: BrowserWindow): void {
+  if (saveFrameTimer !== null) clearTimeout(saveFrameTimer)
+  saveFrameTimer = setTimeout(() => {
+    saveFrameTimer = null
+    try {
+      const frame = win.getFrame()
+      writeWindowFrame(windowStateFile, { x: Math.round(frame.x), y: Math.round(frame.y), width: Math.round(frame.width), height: Math.round(frame.height) })
+    } catch (error) {
+      console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
+    }
+  }, 400)
+}
+
+function trayState(): TrayState {
+  return {
+    windowVisible,
+    profile: instanceProfile,
+    // 多 profile 窗口还没做：菜单只列当前这一个，别摆一个点了不切的子菜单
+    profiles: [instanceProfile],
+    hostRunning: service !== null,
+    runtimeLabel: runtimeLabel(service?.state.runtimeDir ?? ''),
+  }
+}
+
+function refreshTray(): void {
+  tray?.setState(trayState())
+}
+
+function showMainWindow(): void {
+  if (mainWindow === null) return
+  mainWindow.unminimize()
+  mainWindow.show()
+  mainWindow.activate()
+  windowVisible = true
+  refreshTray()
+}
+
+function hideMainWindow(): void {
+  if (mainWindow === null) return
+  mainWindow.hide()
+  windowVisible = false
+  refreshTray()
+}
+
+function onTrayAction(action: TrayAction): void {
+  if (action.kind === 'toggle-window') {
+    if (windowVisible) hideMainWindow()
+    else showMainWindow()
+    return
+  }
+  if (action.kind === 'quit') {
+    console.log('[shell] 托盘：退出')
+    void shutdown()
+    return
+  }
+  console.log(`[shell] 托盘请求切换 profile：${String(action.profile)}（多 profile 窗口未实现，本轮不切）`)
+}
 
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
 // （Electrobun 2.0.2 没有单实例 API，旧 Tauri 壳用的是 tauri-plugin-single-instance）
@@ -74,13 +175,21 @@ if (!instance.acquired) {
 
 // ---- 启动界面：起宿主那几十秒里给用户看的东西（无窗口模式跳过）----
 let splash: BrowserWindow | null = null
+/**
+ * 启动界面的 CEF 浏览器要到 `dom-ready` 才真存在。在那之前调 `executeJavascript` 会打到
+ * 空的 `scoped_refptr<CefBrowser>` 上，**原生层直接 FATAL 记账退出**（实测：`Check failed: ptr_.`
+ * in `cef_scoped_refptr.h`，栈在 `-[CEFWebViewImpl evaluateJavaScriptWithNoCompletion:]`）——
+ * 那是 abort，JS 的 try/catch 拦不住。所以先只记阶段，等 dom-ready 再补推。
+ */
+let splashReady = false
 let lastStage: ShellStage = 'instance'
 const pushStage = (): void => {
-  if (splash === null) return
+  if (splash === null || !splashReady) return
   try {
     splash.webview?.executeJavascript(splashStageScript(lastStage))
   } catch {}
 }
+
 if (!noWindow) {
   splash = new BrowserWindow({
     title: APP_NAME,
@@ -89,8 +198,11 @@ if (!noWindow) {
     titleBarStyle: 'hidden',
     frame: { width: SPLASH_WIDTH, height: SPLASH_HEIGHT },
   })
-  // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次
-  splash.on('dom-ready', () => pushStage())
+  // 页面还没加载完时推阶段会被丢掉：dom-ready 之后再补推一次（也是浏览器对象可用的信号）
+  splash.on('dom-ready', () => {
+    splashReady = true
+    pushStage()
+  })
 }
 let service: Awaited<ReturnType<typeof startService>>
 try {
@@ -124,7 +236,7 @@ try {
   onHostRestart: (state) => {
     // 宿主被守护器拉起来了：把窗口刷回同一个页面 origin（token/端口都没变）
     console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)
-    mainWindow?.webview?.loadURL(state.pageUrl)
+    if (mainWindowReady) mainWindow?.webview?.loadURL(state.pageUrl)
   },
   onHostGiveUp: (state, reason) => {
     console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
@@ -134,7 +246,8 @@ try {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[shell] 启动失败：${message}`)
   // 无窗口模式（CI/黑盒）把失败原样抛出去；有启动界面就留在屏幕上让人看见原因
-  if (splash === null) throw error
+  // 启动界面还没到 dom-ready 时不能推 JS（原生层会 FATAL）：那就只留日志
+  if (splash === null || !splashReady) throw error
   try {
     splash.webview?.executeJavascript(splashFailScript(message))
   } catch {}
@@ -155,7 +268,7 @@ if (!noWindow) {
     renderer: 'cef',
     preload: bootPreloadScript(locale, platform, service.state.origin),
     titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
-    frame: { width: 1280, height: 860 },
+    frame: restoreWindowFrame(),
   })
   mainWindow = win
   // 主窗已出画面：拆掉启动界面（页面自己也等 __DSH_BOOT_READY__，这里只负责别让两个窗口并存）
@@ -164,7 +277,26 @@ if (!noWindow) {
       splash?.close()
     } catch {}
     splash = null
+    windowVisible = true
+    refreshTray()
+    mainWindowReady = true
   })
+  // 关窗回托盘：原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）。
+  // 没有托盘时不能隐藏（隐藏后没有入口再叫回来），直接走真退出。
+  win.on('will-close', (event) => {
+    if (quitting) return
+    if (!closeToTray()) {
+      console.log('[shell] 关窗（无托盘）：直接退出')
+      void shutdown()
+      return
+    }
+    ;(event as { response?: unknown }).response = { allow: false }
+    console.log('[shell] 关窗回托盘（窗口隐藏，进程继续）')
+    hideMainWindow()
+  })
+  // 位置/尺寸记忆：拖动与缩放都会触发，合并落盘（旧 Tauri 壳是 tauri-plugin-window-state）
+  win.on('resize', () => scheduleFrameSave(win))
+  win.on('move', () => scheduleFrameSave(win))
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）
   ContextMenu.on('context-menu-clicked', (event) => {
     const detail = (event as { data?: { action?: string; data?: { url?: string } } }).data
@@ -184,10 +316,35 @@ if (!noWindow) {
   })
 }
 
+// ---- 托盘：显示/隐藏、profile、运行时来源、退出 ----
+// 无窗口模式（CI/黑盒）不建托盘——那里没有窗口可隐藏，托盘只会碍事。
+if (!noWindow) {
+  const image = trayImagePath()
+  if (image === null) {
+    console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
+  } else {
+    tray = createTray({ image, state: trayState(), onAction: onTrayAction, log: (line) => console.log(line) })
+    refreshTray()
+  }
+  // macOS Dock 图标被点（无可见窗口时）：把主窗带回来
+  app.on('reopen', () => {
+    console.log('[shell] Dock 再激活：显示主窗')
+    showMainWindow()
+  })
+}
+
 let stopping = false
 const shutdown = async (): Promise<void> => {
   if (stopping) return
   stopping = true
+  quitting = true
+  // 托盘先摘：否则退出过程中它还会响菜单（点了就是另一个 shutdown）
+  tray?.destroy()
+  tray = null
+  if (saveFrameTimer !== null) {
+    clearTimeout(saveFrameTimer)
+    saveFrameTimer = null
+  }
   try {
     // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
     // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。
@@ -195,7 +352,7 @@ const shutdown = async (): Promise<void> => {
   } catch (error) {
     console.error(`[shell] 停止服务面失败：${String(error)}`)
   }
-    releaseInstance(instanceFile, process.pid)
+  releaseInstance(instanceFile, process.pid)
   Utils.quit()
 }
 process.on('SIGINT', () => void shutdown())
