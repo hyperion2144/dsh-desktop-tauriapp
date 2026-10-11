@@ -255,9 +255,9 @@ describe('命令表', () => {
       expect(catalogValue.catalog).toEqual([])
       const guest = await call('browser_guest_acquire')
       expect(String(guest.error)).toContain('尚未移植')
+      // 下载管理器也没接时：报清楚原因（接了就走真管理器，见 downloads.test.ts）
       const blob = await call('start_blob_download')
-      expect(String(blob.error)).toContain('尚未移植')
-      // 下载列表先给空数组：tab 不该因为管理器未移植而炸
+      expect(String(blob.error)).toContain('未接下载管理器')
       const downloads = await call('list_downloads')
       expect(downloads).toEqual({ ok: true, value: [] })
     } finally {

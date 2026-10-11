@@ -293,6 +293,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     },
     notifier,
     pickSoundFile: pickSoundFileImpl,
+    chooseDownloadDir: pickDownloadDirImpl,
     // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口
     onCloseWindow: () => {
       windows.get(profile)?.window.close()
@@ -302,6 +303,22 @@ function serviceOptionsFor(profile: string): ServiceOptions {
 
 function originOf(profile: string): string {
   return services.get(profile)?.state.origin ?? ''
+}
+
+/**
+ * 下载的「保存位置」：Electrobun 只暴露 openFileDialog（没有 NSSavePanel 封装），所以让用户选**目录**、
+ * 文件名由壳按建议名自动起（撞车时退成 `名字 (1).ext`）——与旧壳的保存框语义等价，只是不能连带改名。
+ */
+async function pickDownloadDirImpl(start: string): Promise<string | null> {
+  const picked = await Utils.openFileDialog({
+    startingFolder: start,
+    allowedFileTypes: '*',
+    canChooseFiles: false,
+    canChooseDirectory: true,
+    allowsMultipleSelection: false,
+  })
+  const dir = picked[0] ?? null
+  return dir === '' ? null : dir
 }
 
 /** 「桌面通知」tab 的「自定义文件…」：Electrobun 原生文件选择器（旧壳 tauri-plugin-dialog 的等价物）。 */

@@ -32,10 +32,28 @@ interface InterceptTask {
   status: string
 }
 
-/** 拦截判定（纯函数，供测试）：仅 blob:/data: 协议的 a[download] 点击才接管。 */
+export type InterceptKind = 'blob' | 'url'
+
+/**
+ * 拦截判定（纯函数，供测试）：
+ *   · `blob:` / `data:` 的 a[download] 一律接管（内容在页面内存里，原生层拿不到）；
+ *   · `http(s)`（含相对链接，会解析到页面 origin）带 download 属性时也接管——旧壳靠 wry 的
+ *     `on_download` 把它转给 Rust 下载管理器；Electrobun 虽然会发 4 个下载事件，但不给目的地、
+ *     暂停与进度控制，所以新壳统一用页面拦截 + `start_url_download`，保住「选位置 + 暂停恢复 + Range 续传」。
+ *   · 其它协议（mailto:/tel: 等）不碰。
+ */
+export function interceptKind(href: string | null, hasDownloadAttr: boolean): InterceptKind | null {
+  if (!hasDownloadAttr || href === null) return null
+  const trimmed = href.trim()
+  if (trimmed === '') return null
+  if (/^blob:/i.test(trimmed) || /^data:/i.test(trimmed)) return 'blob'
+  if (/^[a-z][a-z0-9+.-]*:/i.test(trimmed) && !/^https?:/i.test(trimmed)) return null
+  return 'url'
+}
+
+/** 兼容旧名：是否接管这次点击。 */
 export function shouldIntercept(href: string | null, hasDownloadAttr: boolean): boolean {
-  if (!hasDownloadAttr || href === null) return false
-  return /^blob:/i.test(href) || /^data:/i.test(href)
+  return interceptKind(href, hasDownloadAttr) !== null
 }
 
 /** 从拦截的 anchor 推断文件名：download 属性优先，回退 URL 尾段。 */
@@ -100,11 +118,16 @@ export function installDownloadInterceptor(): void {
       const anchor = target.closest('a')
       if (anchor === null) return
       const href = anchor.getAttribute('href')
-      if (!shouldIntercept(href, anchor.hasAttribute('download'))) return
+      const kind = interceptKind(href, anchor.hasAttribute('download'))
+      if (kind === null) return
       ev.preventDefault()
       ev.stopPropagation()
       const filename = filenameFromAnchor(anchor.getAttribute('download'), href ?? '')
-      void transferBlobToShell(href ?? '', filename)
+      if (kind === 'blob') {
+        void transferBlobToShell(href ?? '', filename)
+      } else {
+        void transferUrlToShell(href ?? '', filename)
+      }
     },
     true,
   )
@@ -129,5 +152,19 @@ async function transferBlobToShell(href: string, filename: string): Promise<void
     await invoke<boolean>('finish_blob_download', { id })
   } catch (err) {
     console.warn('[dsh-desktop] blob 下载转交失败：', err)
+  }
+}
+
+/**
+ * http(s)/同源直链 → 交给壳的下载管理器（`start_url_download`）。壳自己拉流写盘：
+ * 能选位置、能暂停恢复、断点接着下（Range/If-Range），也会进右侧「下载」tab。
+ * 这里只负责把绝对 URL 递过去，不碰任何字节。
+ */
+async function transferUrlToShell(href: string, filename: string): Promise<void> {
+  try {
+    const url = new URL(href, typeof location !== 'undefined' ? location.href : undefined).href
+    await invoke<number | null>('start_url_download', { url, filename })
+  } catch (err) {
+    console.warn('[dsh-desktop] URL 下载转交失败：', err)
   }
 }

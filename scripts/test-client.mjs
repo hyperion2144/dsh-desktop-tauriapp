@@ -25,17 +25,26 @@ await build({
   logLevel: 'silent',
 })
 
-const { shouldIntercept, filenameFromAnchor } = await import(join(tmp, 'download-intercept.mjs'))
+const { shouldIntercept, interceptKind, filenameFromAnchor } = await import(join(tmp, 'download-intercept.mjs'))
 
-// ── shouldIntercept：仅 blob:/data: 协议的 a[download] 才接管 ──
-assert.equal(shouldIntercept('blob:http://127.0.0.1:3080/uuid', true), true, 'blob 链接应拦截')
-assert.equal(shouldIntercept('data:text/plain;base64,SGk=', true), true, 'data 链接应拦截')
-assert.equal(shouldIntercept('BLOB:https://h/x', true), true, '协议前缀大小写不敏感')
-assert.equal(shouldIntercept('http://127.0.0.1:3080/api/session.export?sessionId=s1', true), false, 'http 直链走 on_download 转交，不拦')
-assert.equal(shouldIntercept('https://example.com/f.zip', true), false, 'https 直链不拦')
-assert.equal(shouldIntercept('blob:http://h/x', false), false, '无 download 属性不拦（普通导航）')
-assert.equal(shouldIntercept(null, true), false, '无 href 不拦')
-assert.equal(shouldIntercept(null, false), false, '都缺不拦')
+// ── interceptKind：blob:/data: 一律接管；http(s)/同源相对链接仅带 download 属性才接管 ──
+assert.equal(interceptKind('blob:http://127.0.0.1:3080/uuid', true), 'blob', 'blob 链接拦截（页面分块交壳）')
+assert.equal(interceptKind('data:text/plain;base64,SGk=', true), 'blob', 'data 链接拦截')
+assert.equal(interceptKind('BLOB:https://h/x', true), 'blob', '协议前缀大小写不敏感')
+assert.equal(
+  interceptKind('http://127.0.0.1:3080/api/session.export?sessionId=s1', true),
+  'url',
+  'http 直链转交壳的下载管理器（新壳没有 wry 的 on_download）'
+)
+assert.equal(interceptKind('https://example.com/f.zip', true), 'url', 'https 直链同样转交')
+assert.equal(interceptKind('/api/session.export', true), 'url', '同源相对链接也转交（解析到页面 origin）')
+assert.equal(interceptKind('mailto:a@b.c', true), null, '其它协议不碰')
+assert.equal(interceptKind('blob:http://h/x', false), null, '无 download 属性不拦（普通导航）')
+assert.equal(interceptKind(null, true), null, '无 href 不拦')
+assert.equal(interceptKind(null, false), null, '都缺不拦')
+assert.equal(shouldIntercept('blob:x', true), true, 'shouldIntercept 缩略判定仍好用')
+assert.equal(shouldIntercept('https://example.com/f.zip', true), true, 'http 直链现在也算接管')
+assert.equal(shouldIntercept('https://example.com/f.zip', false), false, '无 download 属性不接管')
 
 // ── filenameFromAnchor：download 属性优先，回退 URL 尾段 ──
 assert.equal(filenameFromAnchor('report.zip', 'blob:http://h/uuid'), 'report.zip', 'download 属性优先')

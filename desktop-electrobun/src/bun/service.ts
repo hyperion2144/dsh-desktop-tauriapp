@@ -29,6 +29,7 @@ import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { listProfiles } from './profiles.ts'
+import { createDownloadManager } from './downloads.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import {
@@ -74,6 +75,8 @@ export interface ServiceOptions {
   notifier?: Notifier
   /** 弹原生文件选择器选音频（index.ts 注入；缺省返回 null） */
   pickSoundFile?: () => Promise<string | null>
+  /** 弹目录选择器选下载位置（index.ts 注入 Electrobun 的 openFileDialog；缺省落 ~/Downloads） */
+  chooseDownloadDir?: (start: string) => Promise<string | null>
 }
 
 export interface ShellState {
@@ -445,6 +448,30 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let rpcRouter: RpcRouter | null = null
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值
   let liveSettings = settings
+  // 下载管理器（旧壳 `download/{manager,transfer}.rs`）：URL 直链与页面 blob 两条管线共用一份任务表。
+  // cookie 只在「下载目标就是壳对接的那个 dsh 实例」时带（旧壳 transfer.rs 同语义）；
+  // 页面 origin 的请求由壳自己的反代补 cookie，所以它不需要这里带。
+  const downloads = createDownloadManager({
+    home,
+    log,
+    notify: (filename) => notifier.notify(SCENARIO.DOWNLOAD_COMPLETE, filename, '下载完成'),
+    chooseDirectory: options.chooseDownloadDir,
+    concurrency: liveSettings.downloadConcurrency,
+    saveConcurrency: (value) => {
+      liveSettings = updateSettings(home, { download_concurrency: value }, log)
+    },
+    cookieFor: (url) => {
+      if (serverOptions.cookie === undefined || serverOptions.cookie === '') return null
+      try {
+        const origin = new URL(url).origin
+        if (origin === serverOptions.upstreamOrigin) return serverOptions.cookie
+      } catch {
+        return null
+      }
+      return null
+    },
+    downloadDir: join(env.HOME ?? home, 'Downloads'),
+  })
   // 命令表要的运行时快照：设置里的来源 + 当前生效的运行时 + 已装列表 + 外部 dsh 定位。
   // 每次调用都重算（面板刷新时顺带发现新装/新删的版本；旧壳同样在命令里现查）。
   const runtimeSnapshot = (): RuntimeSnapshot => {
@@ -640,6 +667,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       notifyServer.stop()
       keepAwake.stop()
       arbiter.clear()
+      downloads.stop()
       try {
         await host.stop()
       } catch {}
@@ -698,6 +726,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       },
       downloadRuntime: (version, source) => downloader.start(version, source),
       downloadStatus: () => downloader.status(),
+      downloads,
+      downloadDir: join(env.HOME ?? home, 'Downloads'),
     }),
   )
   return service

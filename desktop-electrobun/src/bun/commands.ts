@@ -5,6 +5,7 @@
 // 命令实现全部只依赖注入的 deps，方便单测（不 import electrobun）。
 
 import type { DesktopSettings, DshMode, RuntimeSource } from '../shared/settings.ts'
+import type { DownloadManager } from './downloads.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
 import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
@@ -58,6 +59,10 @@ export interface CommandDeps {
   downloadRuntime?: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
   /** 下载进度（面板每 600ms 轮询；旧壳 runtime_download_status 同形状） */
   downloadStatus?: () => RuntimeDownloadStatus
+  /** 默认下载目录（`~/Downloads`；`get_download_settings.download_dir` 用） */
+  downloadDir?: string
+  /** 下载管理器（`src/bun/downloads.ts`）；无窗口单测可以不接 */
+  downloads?: DownloadManager | (() => DownloadManager | undefined)
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -110,6 +115,7 @@ function profileOf(deps: CommandDeps): string {
   return typeof deps.profile === 'function' ? deps.profile() : deps.profile
 }
 
+
 /** 台账里的 pid 还活着吗（权限不足也算活着：`EPERM` 说明进程存在） */
 function pidAlive(pid: number): boolean {
   try {
@@ -121,6 +127,10 @@ function pidAlive(pid: number): boolean {
 }
 
 export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler> {
+  /** 下载管理器（无窗口单测里可以不接） */
+  const downloads = (): DownloadManager | undefined =>
+    typeof deps.downloads === 'function' ? deps.downloads() : deps.downloads
+
   const handlers: Record<string, RpcHandler> = {
     // ---- 渲染环境：客户端插件的第一步；回 undefined 会让整片桌面 chrome 不激活 ----
     get_desktop_client_environment: () => {
@@ -313,17 +323,74 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return [{ profile: profileOf(deps), ready: true, note: '依赖树来自当前运行时（#209 reconcile）' }]
     },
 
-    // ---- 下载 tab：管理器本体还没移植，但先给空列表而不是报错 ----
-    list_downloads: () => [],
+    // ---- 下载 tab（管理器在 src/bun/downloads.ts；旧壳 download/{manager,transfer}.rs 的等价物）----
+    list_downloads: () => downloads()?.list() ?? [],
     get_download_settings: () => ({
-      concurrency: deps.settings().downloadConcurrency ?? 3,
-      download_dir: deps.home,
+      concurrency: downloads()?.concurrency() ?? deps.settings().downloadConcurrency ?? 3,
+      download_dir: deps.downloadDir ?? deps.home,
     }),
     set_download_concurrency: (args) => {
       const value = argNumber(args, 'value')
       if (value === undefined) throw new Error('set_download_concurrency: value 必须是数字')
-      deps.save({ download_concurrency: value })
+      // 管理器在时由它夹取并回写设置；不在时（无窗口单测）退回直接写设置
+      const manager = downloads()
+      if (manager === undefined) {
+        deps.save({ download_concurrency: value })
+        return {}
+      }
+      return { concurrency: manager.setConcurrency(value) }
+    },
+    pause_download: (args) => {
+      const id = argNumber(args, 'id')
+      if (id === undefined) throw new Error('pause_download: id 必须是数字')
+      downloads()?.pause(id)
       return {}
+    },
+    resume_download: (args) => {
+      const id = argNumber(args, 'id')
+      if (id === undefined) throw new Error('resume_download: id 必须是数字')
+      downloads()?.resume(id)
+      return {}
+    },
+    cancel_download: (args) => {
+      const id = argNumber(args, 'id')
+      if (id === undefined) throw new Error('cancel_download: id 必须是数字')
+      downloads()?.cancel(id)
+      return {}
+    },
+    clear_finished_downloads: () => ({ removed: downloads()?.clearFinished() ?? 0 }),
+    reveal_download: (args) => {
+      const id = argNumber(args, 'id')
+      if (id === undefined) return false
+      return downloads()?.reveal(id) ?? false
+    },
+    // 页面拦截到 blob:/data: 下载后的三步（旧壳 start_blob_download / save_blob_chunk / finish_blob_download）
+    start_blob_download: async (args) => {
+      const manager = downloads()
+      if (manager === undefined) throw new Error('start_blob_download: 壳未接下载管理器')
+      const filename = argString(args, 'filename', 'download')
+      const total = argNumber(args, 'total') ?? null
+      return await manager.startBlob(filename, total)
+    },
+    save_blob_chunk: (args) => {
+      const id = argNumber(args, 'id')
+      const chunk = argString(args, 'chunk')
+      if (id === undefined || chunk === '') return false
+      return downloads()?.saveChunk(id, chunk) ?? false
+    },
+    finish_blob_download: (args) => {
+      const id = argNumber(args, 'id')
+      if (id === undefined) return false
+      return downloads()?.finishBlob(id) ?? false
+    },
+    // http(s) 直链：旧壳靠 wry 的 on_download 转交，新壳由页面拦截后调这条（见 download-intercept.ts）
+    start_url_download: async (args) => {
+      const manager = downloads()
+      if (manager === undefined) throw new Error('start_url_download: 壳未接下载管理器')
+      const url = argString(args, 'url')
+      if (url === '') throw new Error('start_url_download: url 不能为空')
+      const filename = argString(args, 'filename')
+      return await manager.startUrl(url, filename)
     },
 
     // ---- 通知 tab ----
