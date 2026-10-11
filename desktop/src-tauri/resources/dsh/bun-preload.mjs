@@ -325,8 +325,6 @@ if (existsSync(_nodePty)) {
     `        const _raw = data instanceof Uint8Array ? data : Buffer.from(data);`,
     `        const s = _td.decode(_raw, { stream: true });`,
     `        if (s && onDataCb) {`,
-    `          const _cp = [...s].slice(0,20).map(c => c.codePointAt(0)).map(cp => cp > 0x7F ? 'U+'+cp.toString(16).toUpperCase() : String.fromCharCode(cp)).join('');`,
-    `          try { require('fs').appendFileSync('C:/Users/hyperion2144/bun-pty-debug.log', _cp + '\\n'); } catch {}`,
     `          onDataCb(s);`,
     `        }`,
     `      },`,
