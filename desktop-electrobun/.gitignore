@@ -1,4 +1,6 @@
 node_modules/
+runtime/bun-preload.mjs
+icon.iconset/
 build/
 artifacts/
 .hutch/

@@ -339,6 +339,12 @@ for (const target of packageTargets('@deepseek-ai/dsh-ptc-runtime-node/lib/index
   }
   const src = readFileSync(target, 'utf8');
   if (!src.includes(PTC_IMPORT_FROM)) {
+    // 已经是我们写过的形态（只是 rev 指纹陈旧）⇒ 刷新指纹，不要误报「上游版本不符」
+    if (src.includes('const stripTypeScriptTypes = Module.stripTypeScriptTypes;')) {
+      writePatch(target, src.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+      console.log(`[bun-preload] Patch 5: ${REV_MARK} 已就位（刷新指纹）${target}`);
+      continue;
+    }
     console.warn(`[bun-preload] Patch 5: 上游版本不符（找不到具名导入）：${target}`);
     continue;
   }
@@ -358,6 +364,12 @@ for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js
   }
   const src = readFileSync(target, 'utf8');
   if (!src.includes(KOFFI_GUARD_FROM)) {
+    // 同上：已是打过补丁的形态，只刷新 rev 指纹
+    if (src.includes('koffi not available on Bun runtime')) {
+      writePatch(target, src.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+      console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位（刷新指纹）${target}`);
+      continue;
+    }
     console.warn(`[bun-preload] Patch 6: 上游版本不符（找不到 loadWin32ProcessBindings）：${target}`);
     continue;
   }

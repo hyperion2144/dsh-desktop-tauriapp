@@ -73,6 +73,15 @@ function findProjectRoot(startDir: string): string | null {
   return null
 }
 
+/** 打包后的包内资源根：主进程在 <app>/Contents/Resources/app/bun/index.js，构建期把
+ *  runtime/{dsh-host.mjs,bun-preload.mjs} 拷到 <app>/Contents/Resources/app/runtime/。 */
+function packagedRoot(startDir: string): string | null {
+  for (const candidate of [resolve(startDir, '..'), startDir, resolve(startDir, '..', '..')]) {
+    if (existsSync(join(candidate, 'runtime', 'dsh-host.mjs'))) return candidate
+  }
+  return null
+}
+
 export function layout(input: LayoutInput = {}): ShellLayout {
   const env = input.env ?? process.env
   const home = dshHome(env)
@@ -81,12 +90,15 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const dshLibDir = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib')
   const distDir = env.DSH_SHELL_DIST ?? join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
   // 项目根：开发时是 desktop-electrobun/（源码里的 import.meta.dir 往上找）；
-  // dev 包在 build/dev-macos-arm64/… 里，往上也能找到同一标记。打包后的包找不到时必须用 env 指定。
-  const projectRoot = env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
+  // 打包后是包内 <app>/Contents/Resources/app（主进程在 app/bun/index.js），
+  // 那里由构建期 build.copy 放一份 runtime/{dsh-host.mjs,bun-preload.mjs}。
+  const projectRoot = env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
   const repoRoot = resolve(projectRoot, '..')
-  // Bun 兼容层是仓内单一来源（desktop/src-tauri/resources/dsh/bun-preload.mjs）；
-  // 打包时由构建期物化进包内，开发与 CI 直接用仓库路径（见 README）。
-  const preloadFile = env.DSH_SHELL_PRELOAD ?? join(repoRoot, 'desktop', 'src-tauri', 'resources', 'dsh', 'bun-preload.mjs')
+  // Bun 兼容层是仓内单一来源（desktop/src-tauri/resources/dsh/bun-preload.mjs）：
+  // 开发与 CI 直接用仓库路径；打包后仓库不在身边，改用构建期物化进包内的副本。
+  const repoPreload = join(repoRoot, 'desktop', 'src-tauri', 'resources', 'dsh', 'bun-preload.mjs')
+  const bundledPreload = join(projectRoot, 'runtime', 'bun-preload.mjs')
+  const preloadFile = env.DSH_SHELL_PRELOAD ?? (existsSync(repoPreload) ? repoPreload : bundledPreload)
   const hostScript = env.DSH_SHELL_HOST_SCRIPT ?? join(projectRoot, 'runtime', 'dsh-host.mjs')
   const result: ShellLayout = { home, profile, appSupport: appSupportDir(env), runtimeDir, dshLibDir, distDir, preloadFile, hostScript }
   const missing = [
