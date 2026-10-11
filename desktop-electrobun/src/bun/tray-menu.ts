@@ -19,6 +19,7 @@ export const TRAY_MENU_ACTIONS = {
   runtimeExternal: 'tray:runtime:external',
   runtimeVersionPrefix: 'tray:runtime:version:',
   runtimeFetchPrefix: 'tray:runtime:fetch:',
+  registerCli: 'tray:register-cli',
 } as const
 
 export type TrayActionKind =
@@ -28,6 +29,7 @@ export type TrayActionKind =
   | 'open-window'
   | 'switch-runtime'
   | 'download-runtime'
+  | 'register-cli'
 
 export interface TrayAction {
   kind: TrayActionKind
@@ -69,6 +71,8 @@ export interface TrayState {
   externalAvailable: boolean
   /** 正在下载的版本；非 null 时那条标「（下载中…）」 */
   downloading: string | null
+  /** 「注册 dsh 命令」项的文案；null = 已注册或还没探出 ⇒ 不摆这一项（旧壳 #175 三态） */
+  registerLabel: string | null
 }
 
 /** 版本目录里的一项（与 shared/runtime-catalog.ts 的 CatalogEntry 同名，这里只取菜单要用的两个字段）。 */
@@ -103,6 +107,7 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     if (profile === '') return null
     return { kind: 'open-window', profile }
   }
+  if (action === TRAY_MENU_ACTIONS.registerCli) return { kind: 'register-cli' }
   if (action === TRAY_MENU_ACTIONS.restartService) return { kind: 'restart-service' }
   if (action === TRAY_MENU_ACTIONS.runtimeBuiltin) return { kind: 'switch-runtime', mode: 'builtin' }
   if (action === TRAY_MENU_ACTIONS.runtimeExternal) return { kind: 'switch-runtime', mode: 'external' }
@@ -243,6 +248,16 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
       enabled: false,
     },
     { type: 'normal', label: '重启 dsh 服务', action: TRAY_MENU_ACTIONS.restartService },
+    // 「注册 dsh 命令」（旧壳 #175 条件项）：只在未注册/冲突时出现，已注册或还没探出就不摆
+    ...(state.registerLabel === null
+      ? []
+      : [
+          {
+            type: 'normal' as const,
+            label: state.registerLabel,
+            action: TRAY_MENU_ACTIONS.registerCli,
+          },
+        ]),
     { type: 'divider' },
     { type: 'normal', label: '退出', action: TRAY_MENU_ACTIONS.quit },
   )

@@ -41,6 +41,8 @@ import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/w
 import { createNotifier, type Notifier } from './notifications.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import { join } from 'node:path'
+import { createRegisterCli } from './register-cli.ts'
+import { registerTrayLabel } from '../shared/register-cli.ts'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
 const CLIENT_VERSION = '0.1.0'
@@ -252,6 +254,7 @@ function trayState(): TrayState {
     catalog: catalogCache?.entries ?? [],
     externalAvailable: snapshot.externalPath !== null,
     downloading: download.active && download.version !== '' ? download.version : null,
+    registerLabel: registerTrayLabel(registerCli.cached()),
   }
 }
 
@@ -260,6 +263,10 @@ function refreshTray(): void {
   tray.setState(trayState())
   // 顺带把「有哪些版本可下载」拿回来（有缓存/正在拉就跳过，不阻塞窗口操作）
   ensureCatalog()
+  // 注册状态同理：TTL 内直接用缓存，绝不在菜单构建里同步 spawn 登录 shell
+  void registerCli.refresh().then(() => {
+    if (tray !== null) tray.setState(trayState())
+  })
 }
 
 function showMainWindow(): void {
@@ -591,7 +598,18 @@ function onTrayAction(action: TrayAction): void {
     case 'download-runtime':
       void downloadRuntimeFromTray(action.version ?? '')
       return
+    case 'register-cli':
+      void registerDshCliFromTray()
+      return
   }
+}
+
+/** 托盘「注册 dsh 命令」：冲突态直接强制覆盖（那一行的文案里已经写了冲突目标）。 */
+async function registerDshCliFromTray(): Promise<void> {
+  const state = registerCli.cached()
+  const result = await registerCli.register({ force: state.kind === 'conflict' })
+  console.log(`[register] ${result.ok ? '注册成功' : '注册未完成'}：${result.message}`)
+  refreshTray()
 }
 
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
@@ -645,6 +663,17 @@ if (!noWindow) {
     pushStage()
   })
 }
+
+// dsh 系统命令注册（旧壳 `register/`）：shim 指向当前运行时，探测走用户真实登录 shell，
+// 状态缓存起来供托盘用（菜单重建很频繁，**绝不在这里同步 spawn shell**）。
+const registerCli = createRegisterCli({
+  log: (message) => console.log(message),
+  appSupport: appSupportDir(),
+  shellCommand: () => {
+    const paths = uiService().paths
+    return [process.execPath, '--no-install', '--preload', paths.preloadFile, join(paths.dshLibDir, 'bin.js')]
+  },
+})
 
 // 通知：决策在壳里（notify-policy）；macOS 上投递走我们自己的 UN 桥（旧壳 `notify_un.rs` 的路子：
 // 进程自己就有 bundle 身份、状态可查、授权可申请），桥不可用或投递失败再退回 Electrobun 的原生通道。

@@ -3,6 +3,14 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **dsh 系统命令注册（旧壳 `register/` 的等价物；#220 第 8 条点名的「注册 dsh 命令」自写项）**：
+  - **三态检测**：拿用户**真实登录 shell** 解析 `dsh`（macOS 先问 `dscl` 拿 UserShell，回落 `$SHELL` → `/bin/zsh`；`-ilc 'command -v dsh'` + `DISABLE_AUTO_UPDATE=true` + 8s 超时——GUI 进程的 PATH 不等于终端 PATH），与本壳 shim 比 realpath：命中 = 已注册、解析到别人 = 冲突（记下目标）、解析不到或 shim 未物化 = 未注册；超时/失败 = 没探出，保持旧结论。
+  - **shim 维护**：`<appSupport>/runtime/bin-dsh/dsh[.cmd]`，内容＝`exec '<bun>' --no-install --preload '<preload>' '<dshLibDir>/bin.js' "$@"`（跟着当前运行时走）；**别人放的同名文件不覆盖**（判词 ours / stale / foreign / absent）。
+  - **异步缓存**：`CACHE_TTL_MS=30s` + in-flight 去重；托盘菜单构建只用缓存，绝不同步 spawn 登录 shell；状态变了才打日志。
+  - **注册执行**：macOS 走 `osascript … with administrator privileges` 提权 `ln -sfn`（幂等；冲突非 force 时打标记退出、force 时带时间戳备份；用户在授权框点取消＝中性结果，不改系统）；非 macOS 明确回「还没接，shim 在这里，可手动加 PATH」。
+  - **托盘条件项**（旧壳 #175 口径）：未注册显示「注册 dsh 为系统命令」，冲突显示「…（检测到冲突：<path>）」并直接强制覆盖；已注册/未探出不摆这一项。
+  - **测试**：新增 `test/register-cli.test.ts` 20 例（shim 内容与判词、ANSI/末行清洗、dscl 解析、三态判定与路径比较、提权脚本与 rc 修正、IO 外壳六条路径，全部注入 run/文件系统 ⇒ 不 spawn 真 shell、不碰真实 PATH）；全量 `bun test` **507 pass / 0 fail**（29 文件、1796 expect）。
+  - **已知边界**：Linux/Windows 的注册执行还没接（shim 已物化）；冲突走强制覆盖，没有旧壳那种二次确认弹窗。
 - **三平台 CI 出包（Electrobun 壳）**：新增 `.github/workflows/shell-electrobun.yml`（macOS arm64 / Windows x64 / Linux x64 三平台矩阵，与 Tauri 壳的 `ci.yml`/`release.yml` 并存到切换完成）：`bun install --frozen-lockfile` → `bun run typecheck` → `bun test` → 原生通知桥 + 包内资源 → `hutch electrobun build --env=stable` → **产物断言** → 上传产物。`desktop-electrobun` 自带 `typescript` devDep 与 `typecheck` 脚本（CI 不再依赖仓根 `node_modules`）。
   - **新增产物断言 `scripts/assert-artifact.mjs`（`bun run assert:artifact`）**：打开包内 payload 归档，断言 CEF 运行时标志齐全（mac `Chromium Embedded Framework.framework/Chromium Embedded Framework` + `libcef_sandbox.dylib`；win `libcef.dll` + `chrome_elf.dll`；linux `libcef.so` + `chrome-sandbox`）、`Resources/version.json` 的版本与 channel 非空、**stable 包必须带更新源**。为什么非要这道门：Electrobun 的 `renderer: 'cef'` 在没打 CEF 时会**静默回落系统 webview**（`nativeWrapper.mm:8359` 等），界面上看不出异常，但 #200 那族 JavaScriptCore 崩溃会原样回来。
   - **本地实证**：对真 stable 构建 `bun run assert:artifact` → `version=0.1.0 channel=stable baseUrl=https://github.com/hyperion2144/dsh-desktop-tauriapp/releases/latest/download`，exit 0；负例（CEF 齐全但 `baseUrl` 空的手造包 `/tmp/gate-test/caseA`）只报 `stable 包没有 baseUrl（release.baseUrl 配错层了？）` 并 exit 1（判别有效）。不带 `DSH_SHELL_TEST_RUNTIME` 跑 `bun test` = **475 pass / 14 skip / 0 fail**（需真 dsh 运行时树的黑盒缝 ① 自行跳过，其余全跑）。

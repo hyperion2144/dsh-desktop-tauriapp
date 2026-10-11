@@ -56,10 +56,23 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   catalog: [],
   externalAvailable: false,
   downloading: null,
+  registerLabel: null,
   ...overrides,
 })
 
 describe('trayMenu', () => {
+
+  test('「注册 dsh 命令」条件项：未注册/冲突时出现，已注册或未探出就不摆', () => {
+    expect(labels(trayMenu(baseState()).slice(-4))).toContain('重启 dsh 服务')
+    expect(findItem(trayMenu(baseState()), '注册 dsh 为系统命令')).toBeUndefined()
+
+    const missing = trayMenu(baseState({ registerLabel: '注册 dsh 为系统命令' }))
+    expect(findItem(missing, '注册 dsh 为系统命令')?.action).toBe('tray:register-cli')
+
+    const conflict = trayMenu(baseState({ registerLabel: '注册 dsh 为系统命令（检测到冲突：/opt/homebrew/bin/dsh）' }))
+    expect(findItem(conflict, '注册 dsh 为系统命令（检测到冲突：/opt/homebrew/bin/dsh）')).toBeDefined()
+  })
+
   test('窗口可见时给「隐藏窗口」，隐藏时给「显示窗口」', () => {
     const shown = labels(trayMenu(baseState({ windowVisible: true })))
     const hidden = labels(trayMenu(baseState({ windowVisible: false })))
