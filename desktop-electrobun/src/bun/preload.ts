@@ -10,9 +10,13 @@
 // `/__shell__/boot`（宿主就绪前 503，页面会等）取回；把载体换成 Electrobun 的
 // 每视图 RPC 是后续增量，契约不变（官方用 IPC handle 返回同样两个字段）。
 
+import { chromeScript, type ShellPlatform } from './chrome.ts'
+import { contextMenuScript } from './context-menu.ts'
+import { externalLinksScript } from './external.ts'
+
 export const BOOT_ENDPOINT = '/__shell__/boot'
 
-export function bootPreloadScript(locale: string): string {
+export function bootPreloadScript(locale: string, platform: ShellPlatform, selfOrigin: string): string {
   return [
     // 系统语言：旧壳（WKWebView）天然跟随系统，CEF 下默认 en-US，页面语言就跟着错了。
     // 这里把壳探到的系统 locale 摆在 navigator 上，页面按它选语言。
@@ -29,5 +33,12 @@ export function bootPreloadScript(locale: string): string {
     '  }),',
     '  failed: (error) => { console.error("desktop boot failed", error) },',
     '}',
+    // 窗口 chrome（骨架期）：给 macOS 红绿灯让出顶部空间 + 打平台标记
+    chromeScript(platform),
+    // 外链（会话里的链接、侧边栏浏览器「在系统浏览器打开」）不把壳自己的窗口带走：
+    // 上游契约是 window.open，CEF 下没人接，这里改发壳端点 → Utils.openExternal。
+    externalLinksScript(selfOrigin),
+    // 右键菜单：CEF 不弹菜单，页面把上下文报给主进程，由它弹原生菜单。
+    contextMenuScript(),
   ].join('\n')
 }

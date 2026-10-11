@@ -6,18 +6,35 @@
  * 2. Provide stripTypeScriptTypes via Bun.Transpiler on node:module
  * 3. Set DSH_BUN_COMPAT_DISABLE_HMR=1 to skip Cordis HMR
  * 4. Shim node-pty onto Bun.spawn({ terminal }) — the N-API addon spawns but never delivers output on Bun
+ * 5. Fix the stripTypeScriptTypes named import inside @deepseek-ai/dsh-ptc-runtime-node
+ * 6. Disable koffi bindings in @deepseek-ai/dsh-win32-process (Bun loads koffi but its N-API binding is broken)
+ * 7. node-pty dispatcher + Bun.Terminal shim (see Patch 7 below)
+ * 8. @xterm/headless synchronous write (Bun fires the deferred write after DSH serializes the buffer)
+ * 9. node-addon-require-builtin dispatcher — the stub must exist in worker contexts too (#205)
+ *
+ * 补丁落盘策略（#210）：物化后**不还原**，带 rev 指纹幂等——运行时树是被多个 dsh 进程共享的，
+ * 任何进程退出时回写原文件都会把别的进程正在用的补丁抹掉（实测会把终端与 inspector 打回失败态）。
  */
 import { Module } from "node:module";
 import { Transpiler } from "bun";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { readFileSync, writeFileSync, existsSync, realpathSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 
 // ── Helper: resolve bare specifier through node_modules with exports support ──
 function _resolveBare(specifier, parentURL, H) {
   const { join, dirname, resolve, fileURLToPath, pathToFileURL, existsSync, readFileSync } = H;
   // Try import.meta.resolve first
   try { return H.esmResolve(specifier); } catch {}
+  // 真正的 Node 语义优先：createRequire(parentURL).resolve 会读 exports 映射；
+  // Bun 下同样可用。缺了这一步，只有 exports['.'] 而没有 main 的包（billion-context）
+  // 会走下面的目录猜测，得到空模块或 MODULE_NOT_FOUND。
+  if (parentURL) {
+    try {
+      const viaNode = require("node:module").createRequire(parentURL).resolve(specifier);
+      return viaNode.startsWith("node:") ? viaNode : H.pathToFileURL(viaNode).href;
+    } catch {}
+  }
   // Parse bare specifier: @scope/name/subpath or name/subpath
   const m = specifier.match(/^(@[^/]+\/[^/]+|[^/]+)(\/.*)?$/);
   if (!m) return null;
@@ -180,6 +197,16 @@ function createAddonStub(origRequire, nodeModule, H) {
                   if (specifier && specifier.startsWith('.')) {
                     return await import(new URL(specifier, parentURL).href);
                   }
+                  // Bun 的 NODE_PATH 兜底对「有 exports['.'] 但没有 main」的包会把包根解析成
+                  // 空模块（实测 billion-context）⇒ cordis 拿到的插件没有 apply/name，entry 永远
+                  // 没有 fiber，dsh 只报 “failed to import”。所以先按 parentURL 做一次真正的
+                  // Node 解析（createRequire 会读 exports），失败再退回裸 import。
+                  if (parentURL) {
+                    try {
+                      const viaNode = origRequire("node:module").createRequire(parentURL).resolve(specifier);
+                      return await import(viaNode.startsWith("node:") ? viaNode : H.pathToFileURL(viaNode).href);
+                    } catch {}
+                  }
                   try { return await import(specifier); } catch {}
                   const resolved = _resolveBare(specifier, parentURL, H);
                   if (resolved) return await import(resolved);
@@ -276,40 +303,67 @@ process.env.DSH_BUN_COMPAT_DISABLE_HMR = "1";
 // ── Patch 5: Fix stripTypeScriptTypes named import in dsh-ptc-runtime-node ──
 // Bun doesn't export stripTypeScriptTypes from node:module as a named export.
 // Patch the file to use Module.stripTypeScriptTypes instead.
-const _patches = [];
-function patchFile(filePath, find, replace) {
-  if (!existsSync(filePath)) return;
-  const src = readFileSync(filePath, 'utf8');
-  if (!src.includes(find)) return;
-  _patches.push({ path: filePath, original: src });
-  writeFileSync(filePath, src.replace(find, replace));
+// ── 补丁落盘策略（#210 决策）：物化后不还原，带 rev 指纹幂等 ──
+// 早期版本在 exit/SIGINT/SIGTERM 上把文件写回原样。但运行时树被同一台机器上多个 dsh 进程
+// 共享（应用宿主 + 缝①黑盒测试的第二实例），任何一个进程退出都会把别的进程正在用的补丁
+// 抹掉——实测：黑盒测试宿主退出后，运行中的窗口终端立刻变回「进程已退出（1）」、inspector
+// 也起不来。改为「打上就不动」：目标文件是 dispatcher 形态（Bun 走 shim、其它运行时转
+// index.original.js），对 Node 无害；每条补丁带 rev 指纹，rev 变了才重写。
+const PATCH_REV = 6;
+const REV_MARK = `bun-preload-rev:${PATCH_REV}`;
+/** 已处理的文件，仅用于结尾汇总日志。 */
+const _patches = new Set();
+/** 幂等写入：内容一致就不动（多进程同跑时避免来回覆写）。 */
+function writePatch(filePath, content) {
+  try { if (existsSync(filePath) && readFileSync(filePath, 'utf8') === content) { _patches.add(filePath); return false; } } catch {}
+  writeFileSync(filePath, content);
+  _patches.add(filePath);
+  return true;
 }
-function restoreFiles() {
-  for (const p of _patches) {
-    try { writeFileSync(p.path, p.original); } catch {}
-    for (const extra of p.remove ?? []) { try { rmSync(extra, { force: true }); } catch {} }
-  }
+/** 该文件是否已经是当前 rev 的产物。 */
+function hasCurrentRev(filePath) {
+  try { return readFileSync(filePath, 'utf8').includes(REV_MARK); } catch { return false; }
 }
-process.on('exit', restoreFiles);
-process.on('SIGINT', () => { restoreFiles(); process.exit(130); });
-process.on('SIGTERM', () => { restoreFiles(); process.exit(143); });
 
 // Find DSH root from preload location
 const _dshRoot = resolve(dirname(fileURLToPath(import.meta.url)));
-const _ptcRuntime = join(_dshRoot, 'node_modules', '@deepseek-ai', 'dsh-ptc-runtime-node', 'lib', 'index.js');
-patchFile(_ptcRuntime,
-  'import { stripTypeScriptTypes } from "node:module";',
-  'import { Module } from "node:module"; const stripTypeScriptTypes = Module.stripTypeScriptTypes;'
-);
+// 和 Patch 7/9 一样按「所有可能被解析到的树」找目标：运行时树往往不是 preload 所在的树
+// （随包运行时、下载运行时、profile 树）。只打 preload 旁边那份 = 实际生效的那份没打上，
+// 实测后果就是 ptc-runtime 起不来 → workflow-ptc/tool-workflow 一直等它 → 新建会话失败。
+const PTC_IMPORT_FROM = 'import { stripTypeScriptTypes } from "node:module";';
+const PTC_IMPORT_TO = `// ${REV_MARK}\nimport { Module } from "node:module"; const stripTypeScriptTypes = Module.stripTypeScriptTypes;`;
+for (const target of packageTargets('@deepseek-ai/dsh-ptc-runtime-node/lib/index.js')) {
+  if (hasCurrentRev(target)) {
+    console.log(`[bun-preload] Patch 5: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  const src = readFileSync(target, 'utf8');
+  if (!src.includes(PTC_IMPORT_FROM)) {
+    console.warn(`[bun-preload] Patch 5: 上游版本不符（找不到具名导入）：${target}`);
+    continue;
+  }
+  writePatch(target, src.replace(PTC_IMPORT_FROM, PTC_IMPORT_TO));
+  console.log(`[bun-preload] Patch 5: stripTypeScriptTypes 具名导入改写 applied to ${target}`);
+}
 
 // ── Patch 6: Disable koffi (dsh-win32-process) on Bun ──
 // koffi loads but produces broken N-API bindings on Bun (JavaScriptCore, not V8).
 // Make loadWin32ProcessBindings throw → probeWindowsJob returns false → fallback to child_process.spawn.
-const _win32Process = join(_dshRoot, 'node_modules', '@deepseek-ai', 'dsh-win32-process', 'lib', 'index.js');
-patchFile(_win32Process,
-  'function loadWin32ProcessBindings() {',
-  'function loadWin32ProcessBindings() { if (typeof Bun !== \'undefined\') throw new Error(\'koffi not available on Bun runtime\');'
-);
+const KOFFI_GUARD_FROM = 'function loadWin32ProcessBindings() {';
+const KOFFI_GUARD_TO = `function loadWin32ProcessBindings() { if (typeof Bun !== 'undefined') throw new Error('koffi not available on Bun runtime'); // ${REV_MARK}`;
+for (const target of packageTargets('@deepseek-ai/dsh-win32-process/lib/index.js')) {
+  if (hasCurrentRev(target)) {
+    console.log(`[bun-preload] Patch 6: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  const src = readFileSync(target, 'utf8');
+  if (!src.includes(KOFFI_GUARD_FROM)) {
+    console.warn(`[bun-preload] Patch 6: 上游版本不符（找不到 loadWin32ProcessBindings）：${target}`);
+    continue;
+  }
+  writePatch(target, src.replace(KOFFI_GUARD_FROM, KOFFI_GUARD_TO));
+  console.log(`[bun-preload] Patch 6: koffi 禁用 applied to ${target}`);
+}
 
 // ── Patch 4: module.register no-op shim ──
 // Bun treats module.register as no-op, but some code may expect it to work.
@@ -326,7 +380,7 @@ patchFile(_win32Process,
 // does nothing. The patched file becomes a dispatcher so a crash can never leave a
 // Bun-only shim in front of a Node run.
 const PTY_SHIM_SOURCE = [
-  '// bun-preload: node-pty shim over Bun.spawn({ terminal }); the N-API addon never delivers output on Bun.',
+  `// bun-preload: node-pty shim over Bun.spawn({ terminal }); the N-API addon never delivers output on Bun. ${REV_MARK}`,
   'function spawnPty(file, args, options = {}) {',
   '  const cols = options.cols || 80;',
   '  const rows = options.rows || 24;',
@@ -371,7 +425,7 @@ const PTY_SHIM_SOURCE = [
   ''
 ].join('\n');
 const PTY_DISPATCHER_SOURCE = [
-  '// bun-preload: node-pty dispatcher — Bun gets the Bun.Terminal shim, every other runtime the real addon.',
+  `// bun-preload: node-pty dispatcher — Bun gets the Bun.Terminal shim, every other runtime the real addon. ${REV_MARK}`,
   'if (typeof Bun === "undefined") module.exports = require("./index.original.js");',
   'else module.exports = require("./bun-shim.js");',
   ''
@@ -427,13 +481,16 @@ for (const target of packageTargets('node-pty/lib/index.js')) {
   const directory = dirname(target);
   const originalPath = join(directory, 'index.original.js');
   const shimPath = join(directory, 'bun-shim.js');
-  // A dispatcher left behind by a crashed run still holds the real addon next to it.
+  if (hasCurrentRev(shimPath) && hasCurrentRev(target)) {
+    console.log(`[bun-preload] Patch 7: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  // A dispatcher left behind by an earlier run still holds the real addon next to it.
   const dispatched = existsSync(originalPath);
   const original = readFileSync(dispatched ? originalPath : target, 'utf8');
-  _patches.push({ path: target, original, remove: [shimPath, originalPath] });
-  if (!dispatched) writeFileSync(originalPath, original);
-  writeFileSync(shimPath, PTY_SHIM_SOURCE);
-  writeFileSync(target, PTY_DISPATCHER_SOURCE);
+  if (!dispatched) writePatch(originalPath, original);
+  writePatch(shimPath, PTY_SHIM_SOURCE);
+  writePatch(target, PTY_DISPATCHER_SOURCE);
   console.log(`[bun-preload] Patch 7: node-pty shim applied to ${target}`);
 }
 
@@ -444,14 +501,23 @@ for (const target of packageTargets('node-pty/lib/index.js')) {
 const XTERM_SYNC_WRITE_FROM = 'setTimeout((()=>this._innerWrite()))}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t)}_innerWrite';
 const XTERM_SYNC_WRITE_TO = '0}this._pendingData+=e.length,this._writeBuffer.push(e),this._callbacks.push(t),this._innerWrite()}_innerWrite';
 for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless.js')) {
+  if (hasCurrentRev(target)) {
+    console.log(`[bun-preload] Patch 8: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
   const source = readFileSync(target, 'utf8');
   const patched = source.replace(XTERM_SYNC_WRITE_FROM, XTERM_SYNC_WRITE_TO);
   if (patched === source) {
-    console.log(`[bun-preload] Patch 8: xterm.js sync write pattern not found in ${target} (may already be patched)`);
+    // 早期版本打过补丁但没留指纹（或者上游换了写法）：能认出已是补丁体就补写指纹
+    if (source.includes(XTERM_SYNC_WRITE_TO)) {
+      writePatch(target, `${source}\n/* ${REV_MARK} */\n`);
+      console.log(`[bun-preload] Patch 8: 已是同步写形态，补写 ${REV_MARK} 指纹 ${target}`);
+    } else {
+      console.warn(`[bun-preload] Patch 8: 目标里没有可替换的写入模式（上游版本变了？）${target}`);
+    }
     continue;
   }
-  _patches.push({ path: target, original: source });
-  writeFileSync(target, patched);
+  writePatch(target, `${patched}\n/* ${REV_MARK} */\n`);
   console.log(`[bun-preload] Patch 8: xterm.js sync write applied to ${target}`);
 }
 
@@ -464,6 +530,7 @@ for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless
 const ADDON_STUB_MODULE_SOURCE = [_resolveBare.toString(), createAddonStub.toString()].join('\n');
 const ADDON_DISPATCHER_SOURCE = [
   '"use strict";',
+  `// ${REV_MARK}`,
   'Object.defineProperty(exports, "__esModule", { value: true });',
   'const H = {',
   '  join: require("node:path").join,',
@@ -494,13 +561,149 @@ const ADDON_DISPATCHER_SOURCE = [
   ''
 ].join('\n');
 for (const target of packageTargets('node-addon-require-builtin/lib/index.js')) {
+  if (hasCurrentRev(target)) {
+    console.log(`[bun-preload] Patch 9: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
   const directory = dirname(target);
   const originalPath = join(directory, 'index.original.js');
   const dispatched = existsSync(originalPath);
   const original = readFileSync(dispatched ? originalPath : target, 'utf8');
-  _patches.push({ path: target, original, remove: [originalPath] });
-  if (!dispatched) writeFileSync(originalPath, original);
-  writeFileSync(target, ADDON_DISPATCHER_SOURCE);
+  if (!dispatched) writePatch(originalPath, original);
+  writePatch(target, ADDON_DISPATCHER_SOURCE);
   console.log(`[bun-preload] Patch 9: node-addon-require-builtin stub applied to ${target}`);
 }
-console.log("[bun-preload] Patches applied: stripTypeScriptTypes, node-addon-require-builtin stub, HMR disable, Bun.Terminal PTY");
+
+// ── Patch 10: 插件展示元数据（名称/描述/图标）在 Bun 下解析不到 ──
+// dsh 自带的插件页通过 dsh-app-boot 的 readPluginMeta 读每个插件的 locale/en.json、
+// package.json 与 icon，而 resolvePluginResource 走的是 Node 内部 ESM resolver
+// （ModuleLoader.fromInternal() + loader.resolveSync）。Bun 的这个入口对上述三个子路径
+// 一律答 MODULE_NOT_FOUND ⇒ readPluginMeta 返回 undefined ⇒ 插件页只剩裸包名+默认图标。
+// 这里补一层兜底：先试公共 resolver（createRequire），再按 Node 的查找顺序手查文件系统
+// （不看 exports 映射——元数据读取只读文件，从不 import 它们），都找不到时抛 MODULE_NOT_FOUND
+// 以保持 optionalResourcePath 的「缺失即 undefined」语义。
+const APP_BOOT_RESOLVER_FROM = [
+  '\tif (loader === void 0) throw new Error("Plugin metadata requires the Node module resolver");',
+  '\treturn fileURLToPath((loader.version === "v2" ? loader.resolveSync(parentURL, {',
+  '\t\tspecifier,',
+  '\t\tattributes: {}',
+  '\t}) : loader.resolveSync(specifier, parentURL, {})).url);',
+].join('\n');
+const APP_BOOT_FALLBACK_SOURCE = [
+  `// ${REV_MARK}`,
+  'function pluginResourceFallback(specifier, parentURL) {',
+  '\tconst request = createRequire(parentURL);',
+  '\ttry {',
+  '\t\treturn request.resolve(specifier);',
+  '\t} catch {}',
+  '\tconst parts = specifier.split("/");',
+  '\tconst packageName = specifier.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];',
+  '\tconst subpath = specifier.slice(packageName.length).replace(/^\\/+/, "");',
+  '\tlet directory = dirname(fileURLToPath(parentURL));',
+  '\tfor (let depth = 0; depth < 12; depth += 1) {',
+  '\t\tconst packageDir = join(directory, "node_modules", packageName);',
+  '\t\tif (subpath !== "" && existsSync(join(packageDir, "package.json"))) {',
+  '\t\t\tconst target = join(packageDir, subpath);',
+  '\t\t\tfor (const probe of [target, `${target}.js`, join(target, "index.js")]) {',
+  '\t\t\t\tif (existsSync(probe)) return realpathSync(probe);',
+  '\t\t\t}',
+  '\t\t\tbreak;',
+  '\t\t}',
+  '\t\tconst parent = dirname(directory);',
+  '\t\tif (parent === directory) break;',
+  '\t\tdirectory = parent;',
+  '\t}',
+  "\tconst error = new Error(`Cannot find module '${specifier}' from '${parentURL}'`);",
+  '\terror.code = "MODULE_NOT_FOUND";',
+  '\tthrow error;',
+  '}',
+].join('\n');
+const APP_BOOT_RESOLVER_TO = [
+  `\tif (loader === void 0) return pluginResourceFallback(specifier, parentURL); // ${REV_MARK}`,
+  '\ttry {',
+  '\t\treturn fileURLToPath((loader.version === "v2" ? loader.resolveSync(parentURL, {',
+  '\t\t\tspecifier,',
+  '\t\t\tattributes: {}',
+  '\t\t}) : loader.resolveSync(specifier, parentURL, {})).url);',
+  '\t} catch (error) {',
+  '\t\tif (error?.code !== "MODULE_NOT_FOUND" && error?.code !== "ERR_MODULE_NOT_FOUND") throw error;',
+  '\t\treturn pluginResourceFallback(specifier, parentURL);',
+  '\t}',
+  APP_BOOT_FALLBACK_SOURCE
+].join('\n');
+for (const target of packageTargets('@deepseek-ai/dsh-app-boot/lib/index.js')) {
+  const source = readFileSync(target, 'utf8');
+  if (source.includes('pluginResourceFallback')) {
+    if (!hasCurrentRev(target)) writePatch(target, source.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+    console.log(`[bun-preload] Patch 10: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  if (!source.includes(APP_BOOT_RESOLVER_FROM)) {
+    console.warn(`[bun-preload] Patch 10: 未找到上游 resolvePluginResource 文本，跳过 ${target}（上游版本不符）`);
+    continue;
+  }
+  writePatch(target, source.replace(APP_BOOT_RESOLVER_FROM, APP_BOOT_RESOLVER_TO));
+  console.log(`[bun-preload] Patch 10: 插件展示元数据解析兜底 applied to ${target}`);
+}
+
+// ── Patch 11: 插件说明符按 Loader 的 baseUrl 解析（Bun 没有 Node 内部 loader）──
+// cordis 的 Loader.import() 在 Node 下走 internal.import(name, baseUrl)；Bun 下 internal 缺失
+// （ModuleLoader.fromInternal() 返回 undefined），退化成「从本文件位置裸 import(name)」。
+// 于是 profile 里带子路径的插件（billion-context/dsh）解析不到 ⇒ 该 entry 的 fiber 永远建不起来，
+// dsh 只报「bili-native (billion-context): failed to import」。这里补上与 Node 同语义的解析：
+// 用 createRequire(baseUrl) 解析后 import 文件 URL；解析不了时原样返回（node: 内建、相对路径照旧）。
+const LOADER_RESOLVE_IMPORT_FROM = [
+  '\t\t\telse return await import(__rewriteRelativeImportExtension(',
+  '\t\t\t\t/* @vite-ignore */',
+  '\t\t\t\tname',
+  '\t\t\t));'
+].join('\n');
+const LOADER_RESOLVE_IMPORT_TO = [
+  '\t\t\telse return await __bunImportFromBase(name, this.ctx.baseUrl, __rewriteRelativeImportExtension);'
+].join('\n');
+const LOADER_URL_IMPORT_FROM = 'import { createRequire } from "node:module";';
+const LOADER_URL_IMPORT_TO = [
+  'import { createRequire } from "node:module";',
+  'import { pathToFileURL as __bunPathToFileURL } from "node:url";'
+].join('\n');
+const LOADER_RESOLVE_HELPER = [
+  `// ${REV_MARK} — Bun 下把插件说明符解析到 Loader baseUrl（与 Node 的 internal.import(name, baseUrl) 同语义）`,
+  'function __bunResolveFromBase(name, baseUrl) {',
+  '\ttry {',
+  '\t\tif (name.startsWith("node:")) return name;',
+  '\t\tconst resolved = createRequire(baseUrl).resolve(name);',
+  '\t\treturn resolved.startsWith("node:") ? resolved : __bunPathToFileURL(resolved).href;',
+  '\t} catch {',
+  '\t\treturn name;',
+  '\t}',
+  '}',
+  'async function __bunImportFromBase(name, baseUrl, rewrite) {',
+  '\tconst target = __bunResolveFromBase(name, baseUrl);',
+  '\ttry {',
+  '\t\treturn await import(/* @vite-ignore */ rewrite(target));',
+  '\t} catch (error) {',
+  '\t\tconsole.error(`[bun-preload] 插件导入失败：${name} ← ${target}`, error);',
+  '\t\tthrow error;',
+  '\t}',
+  '}',
+  ''
+].join('\n');
+for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index.js')) {
+  const source = readFileSync(target, 'utf8');
+  if (source.includes('__bunResolveFromBase')) {
+    if (!hasCurrentRev(target)) writePatch(target, source.replace(/\/\/ bun-preload-rev:\d+/g, `// ${REV_MARK}`));
+    console.log(`[bun-preload] Patch 11: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  if (!source.includes(LOADER_RESOLVE_IMPORT_FROM) || !source.includes(LOADER_URL_IMPORT_FROM)) {
+    console.warn(`[bun-preload] Patch 11: 未找到上游 Loader.import 文本，跳过 ${target}（上游版本不符）`);
+    continue;
+  }
+  const patched = source
+    .replace(LOADER_URL_IMPORT_FROM, LOADER_URL_IMPORT_TO)
+    .replace(LOADER_RESOLVE_IMPORT_FROM, LOADER_RESOLVE_IMPORT_TO);
+  writePatch(target, `${patched}\n${LOADER_RESOLVE_HELPER}`);
+  console.log(`[bun-preload] Patch 11: 插件说明符按 baseUrl 解析 applied to ${target}`);
+}
+
+console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析（不还原）`);

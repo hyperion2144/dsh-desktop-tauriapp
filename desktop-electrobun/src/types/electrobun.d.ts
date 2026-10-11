@@ -29,6 +29,13 @@ declare module 'electrobun/bun' {
     constructor(options: WindowOptions)
     close(): void
     on(event: string, handler: (...args: unknown[]) => void): void
+    /** 窗口的 webview（重载页面、执行脚本） */
+    readonly webview?: {
+      url: string
+      loadURL(url: string): void
+      executeJavascript(js: string): void
+    }
+    setWindowButtonPosition(x: number, y: number): void
   }
 
   export interface BuildConfigShape {
@@ -43,9 +50,22 @@ declare module 'electrobun/bun' {
   export const Utils: {
     quit(): void
     showNotification?(options: { title: string; body: string }): void
+    /** 系统浏览器 / 默认应用程序打开外链（FFI，成功返 true） */
+    openExternal(url: string): boolean
+    clipboardWriteText(text: string): void
   }
 
   export const Tray: unknown
+
+  export const ApplicationMenu: {
+    setApplicationMenu(items: unknown[]): void
+    on(event: string, handler: (event: unknown) => void): void
+  }
+
+  export const ContextMenu: {
+    showContextMenu(items: unknown[]): void
+    on(event: 'context-menu-clicked', handler: (event: unknown) => void): void
+  }
 }
 
 declare module 'electrobun' {

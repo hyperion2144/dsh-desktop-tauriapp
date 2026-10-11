@@ -18,6 +18,8 @@ import { statSync } from 'node:fs'
 import { decide } from '../shared/admission.ts'
 import { INDEX_FILE, contentTypeFor, isNoContentAsset, resolveAsset } from '../shared/asset-path.ts'
 import { corsHeaders, scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../shared/headers.ts'
+import { isExternalUrl } from './external.ts'
+import type { ContextMenuRequest } from './context-menu.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
 export const BOOT_LINE = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
@@ -42,6 +44,10 @@ export interface ShellServerOptions {
   port: number
   /** 宿主就绪前返回 null（页面会等 __DSH_BOOT_READY__） */
   bootPayload: () => BootPayload | null
+  /** 「在系统浏览器打开」——由主进程实现（Electrobun Utils.openExternal）。 */
+  onOpenExternal?: (url: string) => void
+  /** 页面右键菜单——由主进程弹原生菜单。 */
+  onContextMenu?: (request: ContextMenuRequest) => void
   onLog?: (line: string) => void
 }
 
@@ -156,6 +162,32 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           const payload = options.bootPayload()
           if (payload === null) return new Response('boot pending', { status: 503 })
           return Response.json(payload, { headers: { 'cache-control': 'no-store' } })
+        }
+        // 外链：交给系统浏览器（页面里 window.open / 点击 / 中键都走这里）
+        if (decision.rel === 'open-external') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onOpenExternal === undefined) return new Response('no window host', { status: 501 })
+          const body = (await request.json().catch(() => null)) as { url?: unknown } | null
+          const target = typeof body?.url === 'string' ? body.url : ''
+          if (target === '' || !isExternalUrl(target, origin)) {
+            log(`[shell] 拒绝外链 ${target}`)
+            return new Response('not an external url', { status: 400 })
+          }
+          options.onOpenExternal(target)
+          log(`[shell] 外链转系统浏览器 ${target}`)
+          return new Response(null, { status: 204 })
+        }
+        // 右键菜单：页面把上下文报过来，主进程弹原生菜单
+        if (decision.rel === 'context-menu') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onContextMenu === undefined) return new Response('no window host', { status: 501 })
+          const body = (await request.json().catch(() => null)) as Partial<ContextMenuRequest> | null
+          options.onContextMenu({
+            linkUrl: typeof body?.linkUrl === 'string' && body.linkUrl !== '' ? body.linkUrl : null,
+            hasSelection: body?.hasSelection === true,
+            editable: body?.editable === true,
+          })
+          return new Response(null, { status: 204 })
         }
         return new Response('not found', { status: 404 })
       }

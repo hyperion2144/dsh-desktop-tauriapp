@@ -10,12 +10,17 @@ import { startHost } from './host.ts'
 import { reconcileProfileTree } from './profile-tree.ts'
 import { layout, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer } from './shell-server.ts'
+import type { ContextMenuRequest } from './context-menu.ts'
 
 export interface ServiceOptions {
   clientVersion: string
   /** 覆盖 DSH_HOME 等；默认读 process.env */
   env?: Record<string, string | undefined>
   noWindow?: boolean
+  /** 页面外链转系统浏览器（主进程实现；无窗口宿主可不给） */
+  onOpenExternal?: (url: string) => void
+  /** 页面右键菜单（主进程实现） */
+  onContextMenu?: (request: ContextMenuRequest) => void
   onLog?: (line: string) => void
 }
 
@@ -152,6 +157,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     upstreamOrigin: new URL(host.ready.url).origin,
     port: pagePort,
     bootPayload: () => bootPayload,
+    onOpenExternal: options.onOpenExternal,
+    onContextMenu: options.onContextMenu,
     onLog: log,
   })
   const pageUrl = `${server.origin}/${token}/`
