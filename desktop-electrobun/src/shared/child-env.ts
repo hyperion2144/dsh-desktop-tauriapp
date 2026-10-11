@@ -10,8 +10,19 @@
 
 export const CLIENT_VERSION_KEY = 'DSH_CLIENT_VERSION'
 export const REQUIRED_ENV_KEYS = [CLIENT_VERSION_KEY, 'DSH_PROFILE', 'DSH_HOME'] as const
-export const OPTIONAL_ENV_KEYS = ['DSH_PROFILE_DIR', 'DSH_BUN_PRELOAD_TREES', 'NODE_PATH'] as const
 
+/** 端口合法性（子进程只认正经端口；坏值宁可不下发，让宿主插件用它的默认值）。 */
+function isValidPortNumber(value: number): boolean {
+  return Number.isInteger(value) && value > 0 && value <= 65535
+}
+export const OPTIONAL_ENV_KEYS = [
+  'DSH_PROFILE_DIR',
+  'DSH_BUN_PRELOAD_TREES',
+  'NODE_PATH',
+  'DSH_DESKTOP_PORT',
+  'DSH_MOBILE_LANE_PORT',
+  'DSH_MOBILE_ENABLED',
+] as const
 /** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
 export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID', 'DSH_SHELL_PATCH_FILES'] as const
 
@@ -47,6 +58,10 @@ export interface ChildEnvInput {
   patchFiles?: string[]
   /** 通知口（旧壳 `start_notify_server` 的等价物）：缺省不给，插件就静默降级 */
   notify?: { port: number; token: string } | undefined
+  /** dsh web 监听端口（旧壳 `DSH_DESKTOP_PORT`）：手机访问插件靠它找上游 */
+  upstreamPort?: number | undefined
+  /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`，默认 desktop 3092） */
+  lanePort?: number | undefined
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -78,6 +93,20 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
     delete env.DSH_DESKTOP_NOTIFY_PORT
     delete env.DSH_DESKTOP_NOTIFY_TOKEN
     delete env.DSH_DESKTOP_PROFILE
+  }
+  // 手机访问（#86/#94）：上游 dsh 端口 + lane 端口 + 开关。旧壳 lifecycle.rs:394 三件套，缺上游端口
+  // 插件会照默认值 3080 去代理，手机侧就打到别人家的端口上。
+  if (input.upstreamPort !== undefined && isValidPortNumber(input.upstreamPort)) {
+    env.DSH_DESKTOP_PORT = String(input.upstreamPort)
+  } else {
+    delete env.DSH_DESKTOP_PORT
+  }
+  if (input.lanePort !== undefined && isValidPortNumber(input.lanePort)) {
+    env.DSH_MOBILE_LANE_PORT = String(input.lanePort)
+    env.DSH_MOBILE_ENABLED = '1'
+  } else {
+    delete env.DSH_MOBILE_LANE_PORT
+    delete env.DSH_MOBILE_ENABLED
   }
   return env
 }

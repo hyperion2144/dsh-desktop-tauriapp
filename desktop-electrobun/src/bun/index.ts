@@ -29,6 +29,8 @@ import {
 } from './window-state.ts'
 import { loadSettings } from './settings-store.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
+import { createNotifier, type Notifier } from './notifications.ts'
+import { SCENARIO } from '../shared/notify-policy.ts'
 import { join } from 'node:path'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
@@ -209,7 +211,18 @@ if (!noWindow) {
     pushStage()
   })
 }
+
+// 通知：决策在壳里（notify-policy），投递交给 Electrobun 的原生通道（无窗口时退到命令行）。
+const notifier: Notifier = createNotifier({
+  notifications: bootSettings.notifications,
+  home: dshHome(),
+  appName: APP_NAME,
+  show: (options) => Utils.showNotification?.(options),
+  isFullscreen: () => mainWindow?.isFullScreen() ?? false,
+  onLog: (line) => console.log(line),
+})
 let service: Awaited<ReturnType<typeof startService>>
+// 通知：决策在壳里（notify-policy），投递交给 Electrobun 的原生通道（无窗口时退到命令行）。
 try {
   service = await startService({
   clientVersion: CLIENT_VERSION,
@@ -246,10 +259,12 @@ try {
   onHostGiveUp: (state, reason) => {
     console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
   },
+  notifier,
   })
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)
   console.error(`[shell] 启动失败：${message}`)
+  notifier.notify(SCENARIO.STARTUP_ERROR, `桌面壳启动失败：${message}`)
   // 无窗口模式（CI/黑盒）把失败原样抛出去；有启动界面就留在屏幕上让人看见原因
   // 启动界面还没到 dom-ready 时不能推 JS（原生层会 FATAL）：那就只留日志
   if (splash === null || !splashReady) throw error

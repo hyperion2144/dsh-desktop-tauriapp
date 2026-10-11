@@ -28,6 +28,10 @@ export interface StartHostInput {
   patchFiles?: string[]
   /** 通知口（壳的通知服务）：缺省不给，宿主插件静默降级 */
   notify?: { port: number; token: string } | undefined
+  /** dsh web 监听端口（旧壳 `DSH_DESKTOP_PORT`）；缺省让 dsh 自己挑（--port 0） */
+  upstreamPort?: number | undefined
+  /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`） */
+  lanePort?: number | undefined
 }
 
 export interface HostHandle {
@@ -62,6 +66,8 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     parentPid: process.pid,
     patchFiles: input.patchFiles,
     notify: input.notify,
+    upstreamPort: input.upstreamPort,
+    lanePort: input.lanePort
   })
   assertChildEnv(env)
 

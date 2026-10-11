@@ -158,6 +158,44 @@ describe('dsh 子进程环境整表', () => {
     expect(() => assertChildEnv(env)).toThrow()
   })
 
+  test('手机访问三件套：上游端口 + lane 端口 + 开关（旧壳 lifecycle.rs:394；缺上游端口插件会照 3080 去代理）', () => {
+    const withMobile = buildChildEnv({
+      base: {},
+      clientVersion: '0.12.0',
+      profile: 'desktop',
+      home: '/tmp/home',
+      upstreamPort: 3081,
+      lanePort: 3092,
+    })
+    expect(withMobile.DSH_DESKTOP_PORT).toBe('3081')
+    expect(withMobile.DSH_MOBILE_LANE_PORT).toBe('3092')
+    expect(withMobile.DSH_MOBILE_ENABLED).toBe('1')
+
+    // 不给就删干净（不能让上一次残留的 env 把插件指到别人的端口上）
+    const without = buildChildEnv({
+      base: { DSH_DESKTOP_PORT: '3080', DSH_MOBILE_LANE_PORT: '3091', DSH_MOBILE_ENABLED: '1' },
+      clientVersion: '0.12.0',
+      profile: 'desktop',
+      home: '/tmp/home',
+    })
+    expect(without.DSH_DESKTOP_PORT).toBeUndefined()
+    expect(without.DSH_MOBILE_LANE_PORT).toBeUndefined()
+    expect(without.DSH_MOBILE_ENABLED).toBeUndefined()
+
+    // 坏端口不下发
+    const bad = buildChildEnv({
+      base: {},
+      clientVersion: '0.12.0',
+      profile: 'desktop',
+      home: '/tmp/home',
+      upstreamPort: 0,
+      lanePort: 70_000,
+    })
+    expect(bad.DSH_DESKTOP_PORT).toBeUndefined()
+    expect(bad.DSH_MOBILE_LANE_PORT).toBeUndefined()
+    expect(bad.DSH_MOBILE_ENABLED).toBeUndefined()
+  })
+
   test('资源条件显式写在代码里（cwd / 隔离区清理 / fd 上限）', () => {
     expect(CHILD_RESOURCE_CONDITIONS.cwdIsHome).toBe(true)
     expect(CHILD_RESOURCE_CONDITIONS.quarantineCleanupBeforeSpawn).toBe(true)

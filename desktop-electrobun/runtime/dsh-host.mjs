@@ -42,7 +42,6 @@ function patchFiles() {
 console.log(
   `[host] bun = ${process.versions.bun} | profile = ${profileName} | DSH_HOME = ${process.env.DSH_HOME ?? '(unset)'} | DSH_CLIENT_VERSION = ${process.env.DSH_CLIENT_VERSION ?? '(unset)'}`,
 )
-
 const application = runProfile({
   environment: boot.loadLayeredEnv('dsh'),
   profile: profileName,
@@ -50,8 +49,19 @@ const application = runProfile({
   // 注入清单：壳写好的 `--patch` 覆盖层（connection inject / 网关心跳 / 壳插件行）。
   // 旧壳把同一份文件交给 dsh CLI 的 `--patch`；这里走 runProfile 的 patchFiles 入口。
   patchFiles: patchFiles(),
-  args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
+  args: ['--no-open', '--host', '127.0.0.1', '--port', listenPort()],
 })
+
+// 监听端口：壳给了 `DSH_DESKTOP_PORT` 就用它（旧壳固定 3080/3081，且手机访问插件靠这个变量找上游）；
+// 没给就 `--port 0` 自己拿（官方 desktop-host 的做法）。
+function listenPort() {
+  const raw = Number(process.env.DSH_DESKTOP_PORT ?? '')
+  if (Number.isInteger(raw) && raw > 0 && raw <= 65535) {
+    console.log(`[host] 监听端口由壳指定：${String(raw)}`)
+    return String(raw)
+  }
+  return '0'
+}
 
 // 父进程看门狗：壳崩溃/被 SIGKILL/退出后，我们会变成孤儿继续占着会话——
 // 所以由子进程反过来盯着壳（DSH_SHELL_PARENT_PID 由壳注入）。

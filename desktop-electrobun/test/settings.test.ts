@@ -13,6 +13,7 @@ import {
   expandHome,
   normalizeSettings,
   profilePort,
+  profileLanePort,
   serializeSettings,
   settingsSummary,
 } from '../src/shared/settings.ts'
@@ -147,6 +148,19 @@ describe('activeProfile / profilePort / expandHome', () => {
     expect(profilePort(settings, 'web', {})).toBe(3080)
     expect(profilePort(settings, 'other', {})).toBe(3080)
     expect(profilePort(settings, 'desktop', { DSH_DESKTOP_PORT: '5081' })).toBe(5081)
+  })
+
+  test('手机 lane 端口：环境变量 > profile 覆盖 > web 的 lane_port > 默认表（desktop 3092）', () => {
+    expect(profileLanePort(defaultSettings(), 'desktop', {})).toBe(3092)
+    expect(profileLanePort(defaultSettings(), 'web', {})).toBe(3091)
+    expect(profileLanePort(defaultSettings(), 'other', {})).toBe(3091)
+    expect(profileLanePort(normalizeSettings({ lane_port: 4091 }), 'web', {})).toBe(4091)
+    expect(profileLanePort(normalizeSettings({ lane_port: 4091 }), 'desktop', {})).toBe(3092)
+    const perProfile = normalizeSettings({ profile_lane_ports: { desktop: 4092 } })
+    expect(profileLanePort(perProfile, 'desktop', {})).toBe(4092)
+    expect(profileLanePort(perProfile, 'desktop', { DSH_MOBILE_LANE_PORT: '6092' })).toBe(6092)
+    // 坏值不下发（同 profilePort：非法 env 值当作没给）
+    expect(profileLanePort(perProfile, 'desktop', { DSH_MOBILE_LANE_PORT: '0' })).toBe(4092)
   })
 
   test('~ 展开（DSH_HOME 带 ~ 时壳与 dsh 必须指向同一目录）', () => {

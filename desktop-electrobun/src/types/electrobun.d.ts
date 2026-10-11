@@ -48,6 +48,12 @@ declare module 'electrobun/bun' {
     setAlwaysOnTop(alwaysOnTop: boolean): void
     setFrame(x: number, y: number, width: number, height: number): void
     getFrame(): { x: number; y: number; width: number; height: number }
+    isFullScreen(): boolean
+    setFullScreen(fullScreen: boolean): void
+    maximize(): void
+    isMaximized(): boolean
+    setTitle(title: string): void
+    center(): void
   }
 
   export interface BuildConfigShape {
@@ -61,7 +67,7 @@ declare module 'electrobun/bun' {
 
   export const Utils: {
     quit(): void
-    showNotification?(options: { title: string; body: string }): void
+    showNotification?(options: { title: string; body?: string; subtitle?: string; silent?: boolean }): void
     /** 系统浏览器 / 默认应用程序打开外链（FFI，成功返 true） */
     openExternal(url: string): boolean
     clipboardWriteText(text: string): void

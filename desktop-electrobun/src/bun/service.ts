@@ -21,7 +21,9 @@ import { stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
-import { activeProfile, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
+import { createNotifier, type Notifier } from './notifications.ts'
+import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
+import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 
 export interface ServiceOptions {
   clientVersion: string
@@ -43,6 +45,8 @@ export interface ServiceOptions {
   onLog?: (line: string) => void
   /** 直接给定设置（测试/多窗口复用；缺省从磁盘读） */
   settings?: DesktopSettings
+  /** 通知器（index.ts 注入 Electrobun 原生通道；缺省走命令行兜底） */
+  notifier?: Notifier
 }
 
 export interface ShellState {
@@ -54,6 +58,10 @@ export interface ShellState {
   runtimeDir: string
   distDir: string
   hostPid: number
+  /** dsh 上游监听端口（旧壳 `DSH_DESKTOP_PORT`，手机访问插件靠它找上游） */
+  upstreamPort: number
+  /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`） */
+  lanePort: number
   /** 通知口端口（忙状态/通知上报；0 = 未起） */
   notifyPort: number
   injections: number
@@ -149,6 +157,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     isFree: portFree,
   })
   if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
+  // 上游 dsh 端口（旧壳 `port_for_profile` + `DSH_DESKTOP_PORT`）：手机访问插件靠它找上游；
+  // 固定端口而不是 `--port 0`，与旧壳一致（3080 web / 3081 desktop），被占就顺延并在日志里说清楚。
+  const intendedUpstream = profilePort(settings, paths.profile, env)
+  const upstreamPort = portFree(intendedUpstream)
+    ? intendedUpstream
+    : choosePort({ requested: intendedUpstream, base: intendedUpstream + 1, span: 20, isFree: portFree })
+  if (upstreamPort === null) throw new Error('dsh 上游端口池已耗尽')
+  const lanePort = profileLanePort(settings, paths.profile, env)
+  log(`端口：页面 origin ${String(pagePort)} | dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
   options.onStage?.('ports')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
 
@@ -205,14 +222,22 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       }
     },
     onNotify: (payload) => {
-      // 通知轮次接；现在只留痕，确保「壳收得到」这件事可诊断。
-      log(`通知口收到 ${payload.type}：${payload.body.slice(0, 60)}`)
+      const scenarioId = NOTIFY_TYPE_SCENARIOS[payload.type]
+      if (scenarioId === undefined) {
+        log(`通知口收到未知类型 ${payload.type}，已忽略`)
+        return
+      }
+      notifier.notify(scenarioId, payload.body)
     },
     onLog: log,
   })
   const keepAwake = createKeepAwake({ arbiter, log })
   if (settings.preventSleep) keepAwake.start()
   else log('防休眠：设置里已关闭（prevent_sleep = false）')
+
+  // ---- 通知：决策在 notify-policy，这里只做「场景 → 投递」与宿主事件映射 ----
+  // 旧壳 70 个调用点收敛到场景 id；新壳先接已有的调用点（宿主事件 + 服务健康 + 启动受阻）。
+  const notifier = options.notifier ?? createNotifier({ notifications: settings.notifications, home, onLog: log })
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
     home,
@@ -238,6 +263,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         env: childEnv,
         onLog: log,
         patchFiles,
+        upstreamPort,
+        lanePort,
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     } catch (error) {
@@ -253,6 +280,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         env: childEnv,
         onLog: log,
         patchFiles,
+        upstreamPort,
+        lanePort,
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }
@@ -311,6 +340,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     runtimeDir: paths.runtimeDir,
     distDir: paths.distDir,
     hostPid: host.pid,
+    upstreamPort,
+    lanePort,
     notifyPort: notifyServer.port,
     injections: bootPayload.injections.length,
     noWindow: options.noWindow ?? false,
@@ -356,6 +387,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     log(`宿主 ${String(host.pid)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
       options.onHostGiveUp?.(state, decision.reason)
+      notifier.notify(SCENARIO.STARTUP_ERROR, `dsh 服务无法恢复：${decision.reason}`)
       return
     }
     ledger.record(Date.now())
@@ -371,6 +403,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     }
     applyHost()
     log(`守护器已重启宿主：pid = ${String(host.pid)} | injections = ${String(bootPayload.injections.length)}`)
+    notifier.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务已自动重启（${paths.profile}）`)
     options.onHostRestart?.(state)
     void supervise()
   }

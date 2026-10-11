@@ -359,6 +359,15 @@ export function profilePort(settings: DesktopSettings, profile: string, env: Rec
   if (perProfile !== undefined) return perProfile
   return DEFAULT_PROFILE_PORTS[profile] ?? 3080
 }
+/** 手机访问 lane 端口：环境变量 `DSH_MOBILE_LANE_PORT` > profile 专属 > `lane_port` > 默认表。 */
+export function profileLanePort(settings: DesktopSettings, profile: string, env: Record<string, string | undefined> = {}): number {
+  const fromEnv = port(env.DSH_MOBILE_LANE_PORT)
+  if (fromEnv !== undefined) return fromEnv
+  const perProfile = settings.profileLanePorts?.[profile]
+  if (perProfile !== undefined) return perProfile
+  if (profile === 'web' && settings.lanePort !== undefined) return settings.lanePort
+  return DEFAULT_PROFILE_LANE_PORTS[profile] ?? 3091
+}
 
 /** `~` 前缀展开（旧壳 `expand_home`：DSH_HOME 带 `~` 时若不展开，壳与 dsh 会各写各的目录）。 */
 export function expandHome(path: string, home: string): string {

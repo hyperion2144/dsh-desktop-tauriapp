@@ -73,6 +73,10 @@ suite('缝 ①：壳的 loopback 面（真进程 + 真 HTTP/WS）', () => {
         DSH_SHELL_PROFILE_MODE: 'fresh',
         DSH_SHELL_PAGE_PORT: '6397',
         DSH_SHELL_LOG: join(home, 'shell.log'),
+        // 上游/lane 端口也固定在测试自己的段里：开发者机器上往往还跑着一个真实壳（它占 3080/3091），
+        // 让测试与它抢端口会得到 EADDRINUSE 而不是被测行为。
+        DSH_DESKTOP_PORT: '6398',
+        DSH_MOBILE_LANE_PORT: '6399',
       },
       stdout: 'pipe',
       stderr: 'pipe',
