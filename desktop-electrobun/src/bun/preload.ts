@@ -1,0 +1,33 @@
+// 页面桥：官方 apps/desktop/src/preload-app.ts 的 `dshDesktopBoot` 等价物。
+//
+// 契约（官方与我们的 dist 都已内置同一段胶水）：
+//   - 壳在 index.html 的 <head> 后插一行 `globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()`
+//   - 该 promise 的 resolve 由这里暴露的 `dshDesktopBoot.ready()` 的结果喂给页面
+//   - 页面拿到 { injections, streamBaseUrl } 后调用上游自带的 applyIndexInjections 逐行应用，
+//     并设 `__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }`
+//
+// 载荷来源：壳自己（进程内）持有宿主上报的 rows。骨架期用壳的同源端点
+// `/__shell__/boot`（宿主就绪前 503，页面会等）取回；把载体换成 Electrobun 的
+// 每视图 RPC 是后续增量，契约不变（官方用 IPC handle 返回同样两个字段）。
+
+export const BOOT_ENDPOINT = '/__shell__/boot'
+
+export function bootPreloadScript(locale: string): string {
+  return [
+    // 系统语言：旧壳（WKWebView）天然跟随系统，CEF 下默认 en-US，页面语言就跟着错了。
+    // 这里把壳探到的系统 locale 摆在 navigator 上，页面按它选语言。
+    'try {',
+    `  const primary = ${JSON.stringify(locale)}`,
+    `  const candidates = ${JSON.stringify([...new Set([locale, locale.split('-')[0] ?? locale, 'en-US', 'en'])])}`,
+    "  Object.defineProperty(navigator, 'language', { get: () => primary })",
+    "  Object.defineProperty(navigator, 'languages', { get: () => candidates })",
+    '} catch {}',
+    'globalThis.dshDesktopBoot = {',
+    `  ready: () => fetch(${JSON.stringify(BOOT_ENDPOINT)}, { cache: 'no-store' }).then((res) => {`,
+    "    if (!res.ok) throw new Error('shell boot pending: ' + res.status)",
+    '    return res.json()',
+    '  }),',
+    '  failed: (error) => { console.error("desktop boot failed", error) },',
+    '}',
+  ].join('\n')
+}
