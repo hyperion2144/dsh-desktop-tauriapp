@@ -10,7 +10,7 @@ import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
 import { reconcileProfileTree } from './profile-tree.ts'
-import { layout, type ShellLayout } from './runtime.ts'
+import { layout, resolveBuiltinRuntimeDir, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
@@ -24,9 +24,19 @@ import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
-import { createCommandTable } from './commands.ts'
+import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
+import {
+  externalPackageRoot,
+  externalVersion,
+  fetchRuntimeCatalog,
+  listInstalledRuntimes,
+  purgeRuntimeTrash,
+  readRuntimeVersion,
+  resolveExternalRuntime,
+  trashInstalledRuntime,
+} from './runtime-store.ts'
 
 export interface ServiceOptions {
   /** 平台（命令表要回给页面；缺省 process.platform） */
@@ -117,9 +127,23 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   ].filter((entry) => entry !== '')
   log(`设置：${settingsSummary(settings)}${provenance.length > 0 ? `（${provenance.join('；')}）` : ''}`)
 
-  const paths = layout({ env, profile: activeProfile(settings, env) })
+  // 运行时选中：设置里的 dsh 来源（builtin/external）与偏好版本在这里生效；
+  // 旧壳的 DSH_MODE / DSH_SHELL_RUNTIME_DIR 覆盖仍在 layout 内部处理。
+  let paths = layout({
+    env,
+    profile: activeProfile(settings, env),
+    mode: settings.dshMode,
+    preferred: settings.dshRuntime,
+  })
   options.onStage?.('layout')
-  log(`运行时 = ${paths.runtimeDir} | dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`)
+  log(
+    `运行时 = ${paths.runtimeDir}（${paths.runtimeKind}${paths.runtimeVersion === null ? '' : ` ${paths.runtimeVersion}`}）| dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`
+  )
+  if (paths.runtimeNote !== null) log(`运行时回退：${paths.runtimeNote}`)
+  // 回收站：上一次卸载留下的运行时目录到这时才真删（旧壳 #114：直接删会动到与运行树
+  // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
+  const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
+  if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
 
   // ---- profile 树 reconcile：空 DSH_HOME 下也把运行时树摊进 profile（#209）----
   const profileDir = `${paths.home}/profiles/${paths.profile}`
@@ -318,6 +342,26 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let rpcRouter: RpcRouter | null = null
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值
   let liveSettings = settings
+  // 命令表要的运行时快照：设置里的来源 + 当前生效的运行时 + 已装列表 + 外部 dsh 定位。
+  // 每次调用都重算（面板刷新时顺带发现新装/新删的版本；旧壳同样在命令里现查）。
+  const runtimeSnapshot = (): RuntimeSnapshot => {
+    const mode = liveSettings.dshMode ?? 'builtin'
+    // 外部来源取「能用」的那一个：PATH 上可能先撞到壳自己的垫片脚本（定位不到包根）
+    const external = mode === 'external' ? resolveExternalRuntime(env, { home: env.HOME, log }) : null
+    const externalBin = external?.bin ?? null
+    const externalRoot = externalBin === null ? null : externalPackageRoot(externalBin)
+    const builtinDir = resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir })
+    return {
+      mode,
+      builtinVersion: builtinDir === null ? null : readRuntimeVersion(builtinDir),
+      activeVersion: paths.runtimeVersion,
+      activeKind: paths.runtimeKind,
+      selected: liveSettings.dshRuntime ?? null,
+      installed: listInstalledRuntimes(paths.appSupport),
+      externalPath: externalBin,
+      externalVersion: external?.version ?? (externalRoot === null ? null : externalVersion(externalRoot)),
+    }
+  }
   const serverOptions: ShellServerOptions = {
     distDir: paths.distDir,
     token,
@@ -440,6 +484,24 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     server,
     restartHost: async () => {
       if (stopping) return
+      // 设置面板切了 dsh 来源/运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
+      // 服务面、状态与命令表都以它为事实源），再杀宿主——守护器会带着新运行时重启。
+      const next = layout({
+        env,
+        profile: paths.profile,
+        mode: liveSettings.dshMode,
+        preferred: liveSettings.dshRuntime,
+      })
+      if (next.runtimeDir !== paths.runtimeDir) {
+        log(
+          `运行时切换：${paths.runtimeVersion ?? paths.runtimeDir} → ${next.runtimeVersion ?? next.runtimeDir}（${next.runtimeKind}）`
+        )
+      }
+      Object.assign(paths, next)
+      serverOptions.distDir = paths.distDir
+      state.runtimeDir = paths.runtimeDir
+      state.distDir = paths.distDir
+      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
       // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
       await host.stop()
     },
@@ -486,7 +548,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       },
       notifier,
       dshStatus: () => dshStatusCode,
-      dshVersion: () => basename(paths.runtimeDir),
+      dshVersion: () => paths.runtimeVersion ?? basename(paths.runtimeDir),
+      runtime: () => runtimeSnapshot(),
+      fetchCatalog: (source) =>
+        fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
+      removeRuntime: async (version) => {
+        trashInstalledRuntime(paths.appSupport, version, log)
+      },
     }),
   )
   return service

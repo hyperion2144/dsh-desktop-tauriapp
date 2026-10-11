@@ -243,9 +243,15 @@ describe('命令表', () => {
         return result.body
       }
       // 真实路径是 dispatch：命令抛错 ⇒ ok:false + 可读原因（面板显示它，不是永远转圈）
+      const download = await call('download_runtime')
+      expect(download.ok).toBe(false)
+      expect(String(download.error)).toContain('尚未移植')
+      // 运行时目录已经移植：未注入 fetchCatalog 时也要回结构完整的空目录，而不是报错
       const catalog = await call('list_runtime_catalog')
-      expect(catalog.ok).toBe(false)
-      expect(String(catalog.error)).toContain('尚未移植')
+      expect(catalog.ok).toBe(true)
+      const catalogValue = catalog.value as Record<string, unknown>
+      expect(catalogValue.source).toBe('github')
+      expect(catalogValue.catalog).toEqual([])
       const guest = await call('browser_guest_acquire')
       expect(String(guest.error)).toContain('尚未移植')
       const blob = await call('start_blob_download')

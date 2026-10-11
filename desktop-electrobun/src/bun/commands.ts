@@ -4,7 +4,8 @@
 // 「尚未移植」而不是静默成功——面板会把它显示成一条失败提示，比转圈或假装保存好。
 // 命令实现全部只依赖注入的 deps，方便单测（不 import electrobun）。
 
-import type { DesktopSettings } from '../shared/settings.ts'
+import type { DesktopSettings, DshMode, RuntimeSource } from '../shared/settings.ts'
+import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
 import { serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcHandler } from './rpc.ts'
 import type { Notifier } from './notifications.ts'
@@ -34,6 +35,12 @@ export interface CommandDeps {
   /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
   playSound?: (name: string) => void
   notifier?: Notifier
+  /** 运行时快照：来源 / 内置版本 / 已装列表 / 外部 dsh 路径（命令表不自己碰文件系统） */
+  runtime?: () => RuntimeSnapshot
+  /** 拉取版本目录（github / npm；失败不抛，回 {entries, error}） */
+  fetchCatalog?: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
+  /** 删除一个已下载运行时（先移回收站，清单摘除） */
+  removeRuntime?: (version: string) => Promise<void>
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -42,12 +49,25 @@ function runningPort(deps: CommandDeps): number {
   return typeof running.upstreamPort === 'number' ? running.upstreamPort : 0
 }
 
+export interface RuntimeSnapshot {
+  mode: DshMode
+  /** 随包内置版本（读内置树 package.json） */
+  builtinVersion: string | null
+  /** 当前生效运行时的真实版本 */
+  activeVersion: string | null
+  /** override | external | installed | builtin */
+  activeKind: string
+  /** 面板 select 的当前值：设置里的 dshRuntime（外部模式下不生效） */
+  selected: string | null
+  installed: InstalledRuntime[]
+  externalPath: string | null
+  externalVersion: string | null
+}
+
+
 /** 已实现命令里，明确「还没搬过来」的那几条：报清楚原因，UI 才能给人看。 */
 const NOT_PORTED: Record<string, string> = {
-  download_runtime: '运行时下载尚未移植（运行时管理轮次）',
-  remove_runtime: '运行时删除尚未移植（运行时管理轮次）',
-  list_runtime_catalog: '运行时目录尚未移植（运行时管理轮次）',
-  runtime_download_status: '运行时下载状态尚未移植（运行时管理轮次）',
+  download_runtime: '运行时下载尚未移植（下一轮：pnpm 安装 + 进度）',
   rebuild_profile_dependencies: 'profile 依赖重建尚未移植',
   migrate_profile: 'profile 迁移尚未移植',
   migration_status: 'profile 迁移尚未移植',
@@ -137,19 +157,61 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
 
     // 设置面板的「dsh 来源」卡：形状对齐 DshSourceState（running.origin 是标签，不是 URL）
     get_dsh_source: () => {
-      const settings = deps.settings()
-      const mode = settings.dshMode ?? 'builtin'
-      const version = deps.dshVersion?.() ?? ''
+      const snapshot = deps.runtime?.()
+      const mode = snapshot?.mode ?? deps.settings().dshMode ?? 'builtin'
       const running = deps.status?.() ?? null
+      const runningVersion = snapshot?.activeVersion ?? deps.dshVersion?.() ?? ''
       return {
         mode,
-        builtin: mode === 'builtin' ? { dsh_version: version } : null,
-        external: mode === 'external' ? { dsh_version: version, path: settings.dshRuntime ?? '' } : null,
+        builtin: snapshot?.builtinVersion == null ? null : { dsh_version: snapshot.builtinVersion },
+        external:
+          snapshot?.externalPath == null
+            ? null
+            : { dsh_version: snapshot.externalVersion ?? '', path: snapshot.externalPath },
         running:
           running === null
             ? null
-            : { mode, origin: 'shell', port: runningPort(deps), version },
+            : { mode, origin: 'shell', port: runningPort(deps), version: runningVersion },
       }
+    },
+
+    // ---- 运行时管理（旧壳 runtime/registry.rs 的命令面）----
+    // 版本目录：远端拉不到不算失败（回 error 标记，面板降级显示本地已装；旧壳 #107）
+    list_runtime_catalog: async (args) => {
+      const snapshot = deps.runtime?.()
+      const requested = argString(args, 'source') ?? deps.settings().runtimeSource ?? ''
+      const source = (requested === '' ? 'github' : requested) as RuntimeSource
+      const fetched = (await deps.fetchCatalog?.(source)) ?? { entries: [] }
+      const body: Record<string, unknown> = {
+        source,
+        mode: snapshot?.mode ?? 'builtin',
+        builtin: snapshot?.builtinVersion ?? null,
+        // 外部 CLI 不占本地运行时树：此时「当前使用」不指向任何已下载版本（旧壳 #135）
+        selected: (snapshot?.mode ?? 'builtin') === 'external' ? null : (snapshot?.selected ?? null),
+        installed: snapshot?.installed ?? [],
+        catalog: fetched.entries,
+      }
+      if (fetched.error !== undefined) body.error = fetched.error
+      return body
+    },
+
+    runtime_download_status: () => ({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }),
+
+    // 卸载：正在用 / 内置的不允许删（旧壳同款守卫；外置模式下不占本地树，故不拦）
+    remove_runtime: async (args) => {
+      const version = argString(args, 'version')
+      if (version === undefined || version === '') throw new Error('remove_runtime: version 不能为空')
+      if (deps.removeRuntime === undefined) throw new Error('remove_runtime: 运行时管理不可用')
+      const snapshot = deps.runtime?.()
+      if (snapshot !== undefined) {
+        if (snapshot.mode === 'builtin' && snapshot.selected === version) {
+          throw new Error(`${version} 正在使用，请先切换到其他版本`)
+        }
+        if (snapshot.builtinVersion === version) throw new Error(`${version} 是内置版本，不可删除`)
+      }
+      await deps.removeRuntime(version)
+      deps.log(`[rpc] 卸载运行时 dsh ${version}`)
+      return { ok: true, version }
     },
 
     // 设置面板切 dsh 来源 / profile 后的动作：重启宿主，页面由守护器回调自动重载
