@@ -18,6 +18,9 @@ import type { ContextMenuRequest } from './context-menu.ts'
 import { loadSettings } from './settings-store.ts'
 import { scaffoldProfile } from './profile-scaffold.ts'
 import { stagePlugins } from './plugin-staging.ts'
+import { createArbiter } from '../shared/power-arbiter.ts'
+import { createKeepAwake } from './keep-awake.ts'
+import { startNotifyServer } from './notify-server.ts'
 import { activeProfile, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 
 export interface ServiceOptions {
@@ -51,6 +54,8 @@ export interface ShellState {
   runtimeDir: string
   distDir: string
   hostPid: number
+  /** 通知口端口（忙状态/通知上报；0 = 未起） */
+  notifyPort: number
   injections: number
   noWindow: boolean
   /** 壳设置（loadSettings 的结果，可供托盘/设置面板/防休眠等复用） */
@@ -184,6 +189,30 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     reconcileProfile()
     log(`profile 依赖树：已按运行时树摊平（${paths.profile}）`)
   }
+
+  // ---- 防休眠（#186）：纯裁决 + tick 循环；忙状态由宿主插件 POST /notify 上报 ----
+  // 旧壳把通知口跑在独立随机端口上（notify.rs），端口与令牌经环境变量交给 dsh 侧插件；
+  // 插件缺 env 时静默降级（不是关键路径）——这里保持同一契约。
+  const arbiter = createArbiter({ enabled: settings.preventSleep })
+  // 令牌缺省每启动随机；`DSH_SHELL_NOTIFY_TOKEN` 是探针/黑盒测试用的覆盖口（与其它 DSH_SHELL_* 同性质）。
+  const notifyTokenOverride = (env.DSH_SHELL_NOTIFY_TOKEN ?? '').trim()
+  const notifyServer = startNotifyServer({
+    ...(notifyTokenOverride === '' ? {} : { token: notifyTokenOverride }),
+    onBusy: (profile, busy) => {
+      const changed = arbiter.setBusy(profile, busy, Date.now())
+      if (changed) {
+        log(`防休眠：${profile} ${busy ? '开始' : '结束'}跑会话 → ${arbiter.shouldHold() ? '持有断言' : '可释放'}`)
+      }
+    },
+    onNotify: (payload) => {
+      // 通知轮次接；现在只留痕，确保「壳收得到」这件事可诊断。
+      log(`通知口收到 ${payload.type}：${payload.body.slice(0, 60)}`)
+    },
+    onLog: log,
+  })
+  const keepAwake = createKeepAwake({ arbiter, log })
+  if (settings.preventSleep) keepAwake.start()
+  else log('防休眠：设置里已关闭（prevent_sleep = false）')
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
     home,
@@ -209,6 +238,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         env: childEnv,
         onLog: log,
         patchFiles,
+        notify: { port: notifyServer.port, token: notifyServer.token },
       })
     } catch (error) {
       // 首次启动：dsh 刚把 profile 脚手架（cordis.yml/package.json）落盘，但依赖树还是空的，
@@ -223,6 +253,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         env: childEnv,
         onLog: log,
         patchFiles,
+        notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }
     log(`host ready | dsh = ${new URL(host.ready.url).origin} | injections = ${String(host.ready.injections.length)}`)
@@ -280,6 +311,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     runtimeDir: paths.runtimeDir,
     distDir: paths.distDir,
     hostPid: host.pid,
+    notifyPort: notifyServer.port,
     injections: bootPayload.injections.length,
     noWindow: options.noWindow ?? false,
     settings,
@@ -317,6 +349,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     registerHost()
     const code = await host.exited
     if (stopping) return
+    // 旧实例没了 = 它的忙租约不再会被刷新：先摘干净再决定要不要重启。
+    arbiter.clear()
+    keepAwake.tick()
     const decision = ledger.decide(Date.now())
     log(`宿主 ${String(host.pid)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
@@ -357,6 +392,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       stopping = true
       ledger.reset()
       server.stop()
+      notifyServer.stop()
+      keepAwake.stop()
+      arbiter.clear()
       try {
         await host.stop()
       } catch {}

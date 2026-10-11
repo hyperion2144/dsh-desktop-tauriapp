@@ -15,6 +15,13 @@ export const OPTIONAL_ENV_KEYS = ['DSH_PROFILE_DIR', 'DSH_BUN_PRELOAD_TREES', 'N
 /** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
 export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID', 'DSH_SHELL_PATCH_FILES'] as const
 
+/** 壳 → 宿主插件（仓库根 `index.js`）的私有契约：插件读它们回报忙状态与通知。 */
+export const SHELL_PLUGIN_ENV_KEYS = [
+  'DSH_DESKTOP_NOTIFY_PORT',
+  'DSH_DESKTOP_NOTIFY_TOKEN',
+  'DSH_DESKTOP_PROFILE',
+] as const
+
 /** 除环境变量外的资源条件（缝 ①/② 各有用例；这里显式写出来，避免只活在别人脑子里）。 */
 export const CHILD_RESOURCE_CONDITIONS = {
   /** GUI 启动时 cwd 不是家目录，必须显式设成 DSH_HOME */
@@ -38,6 +45,8 @@ export interface ChildEnvInput {
   parentPid?: number | undefined
   /** `--patch` 注入清单（壳写好的覆盖层；缺省不给，宿主就用 dsh 默认行为） */
   patchFiles?: string[]
+  /** 通知口（旧壳 `start_notify_server` 的等价物）：缺省不给，插件就静默降级 */
+  notify?: { port: number; token: string } | undefined
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -60,6 +69,15 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
     env.DSH_SHELL_PATCH_FILES = input.patchFiles.join(':')
   } else {
     delete env.DSH_SHELL_PATCH_FILES
+  }
+  if (input.notify !== undefined && input.notify.port > 0 && input.notify.token !== '') {
+    env.DSH_DESKTOP_NOTIFY_PORT = String(input.notify.port)
+    env.DSH_DESKTOP_NOTIFY_TOKEN = input.notify.token
+    env.DSH_DESKTOP_PROFILE = input.profile
+  } else {
+    delete env.DSH_DESKTOP_NOTIFY_PORT
+    delete env.DSH_DESKTOP_NOTIFY_TOKEN
+    delete env.DSH_DESKTOP_PROFILE
   }
   return env
 }

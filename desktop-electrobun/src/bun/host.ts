@@ -26,6 +26,8 @@ export interface StartHostInput {
   timeoutMs?: number
   /** `--patch` 注入清单（插件 staging 的产物；缺省不注入） */
   patchFiles?: string[]
+  /** 通知口（壳的通知服务）：缺省不给，宿主插件静默降级 */
+  notify?: { port: number; token: string } | undefined
 }
 
 export interface HostHandle {
@@ -59,6 +61,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     nodePath: `${layout.runtimeDir}/node_modules`,
     parentPid: process.pid,
     patchFiles: input.patchFiles,
+    notify: input.notify,
   })
   assertChildEnv(env)
 
