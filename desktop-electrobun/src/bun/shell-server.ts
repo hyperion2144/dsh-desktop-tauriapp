@@ -48,6 +48,8 @@ export interface ShellServerOptions {
   onOpenExternal?: (url: string) => void
   /** 页面右键菜单——由主进程弹原生菜单。 */
   onContextMenu?: (request: ContextMenuRequest) => void
+  /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
+  onActivate?: () => void
   onLog?: (line: string) => void
 }
 
@@ -187,6 +189,14 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
             hasSelection: body?.hasSelection === true,
             editable: body?.editable === true,
           })
+          return new Response(null, { status: 204 })
+        }
+        // 单实例：第二个壳请已有实例把窗口带到前台（不占端口、不起宿主）
+        if (decision.rel === 'activate') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onActivate === undefined) return new Response('no window host', { status: 501 })
+          options.onActivate()
+          log('[shell] 收到激活请求：窗口带到前台')
           return new Response(null, { status: 204 })
         }
         return new Response('not found', { status: 404 })

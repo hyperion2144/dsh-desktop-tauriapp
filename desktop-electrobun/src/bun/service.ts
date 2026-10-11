@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
+import type { ShellStage } from './stages.ts'
 import { reconcileProfileTree } from './profile-tree.ts'
 import { layout, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer, type ShellServerOptions } from './shell-server.ts'
@@ -28,6 +29,10 @@ export interface ServiceOptions {
   onHostRestart?: (state: ShellState) => void
   /** 宿主反复退出，守护器放弃（不再重启） */
   onHostGiveUp?: (state: ShellState, reason: string) => void
+  /** 启动阶段变化（启动界面据此报进度；无窗口模式也会调） */
+  onStage?: (stage: ShellStage) => void
+  /** 第二个实例请求把窗口带到前台（单实例激活） */
+  onActivate?: () => void
   onLog?: (line: string) => void
 }
 
@@ -73,6 +78,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   }
 
   const paths = layout({ env })
+  options.onStage?.('layout')
   log(`运行时 = ${paths.runtimeDir} | dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`)
 
   // ---- profile 树 reconcile：空 DSH_HOME 下也把运行时树摊进 profile（#209）----
@@ -118,6 +124,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     isFree: portFree,
   })
   if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
+  options.onStage?.('ports')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
 
   // ---- 启动清扫：上一次壳留下的孤儿宿主 ----
@@ -180,6 +187,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     }
   }
   await connect()
+  options.onStage?.('cookie')
 
   // ---- loopback 服务 ----
   // boot 载荷与上游可换：守护器重启宿主后要指向新的 url/cookie（同一个 options 对象）。
@@ -196,9 +204,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     bootPayload: () => bootPayload,
     onOpenExternal: options.onOpenExternal,
     onContextMenu: options.onContextMenu,
+    onActivate: options.onActivate,
     onLog: log,
   }
   const server = startShellServer(serverOptions)
+  options.onStage?.('server')
   bootPayload.injections = host.ready.injections
   const pageUrl = `${server.origin}/${token}/`
 
@@ -279,6 +289,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   registerHost()
   void supervise()
   log(`端口台账：${JSON.stringify(claims)}`)
+  options.onStage?.('ready')
 
   return {
     state,

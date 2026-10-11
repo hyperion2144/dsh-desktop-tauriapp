@@ -36,6 +36,18 @@ declare module 'electrobun/bun' {
       executeJavascript(js: string): void
     }
     setWindowButtonPosition(x: number, y: number): void
+    /** 窗口带到前台（单实例激活用）：恢复最小化 / 显示 / 抢焦点 */
+    show(): void
+    activate(): void
+    focus(): void
+    unminimize(): void
+    hide(): void
+    isVisible(): boolean
+    minimize(): void
+    isMinimized(): boolean
+    setAlwaysOnTop(alwaysOnTop: boolean): void
+    setFrame(x: number, y: number, width: number, height: number): void
+    getFrame(): { x: number; y: number; width: number; height: number }
   }
 
   export interface BuildConfigShape {
