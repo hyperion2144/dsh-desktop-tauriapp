@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { startHost } from './host.ts'
+import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import { reconcileProfileTree } from './profile-tree.ts'
 import { layout, type ShellLayout } from './runtime.ts'
 import { startShellServer, type BootPayload, type ShellServer } from './shell-server.ts'
@@ -111,6 +112,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
 
   // ---- 宿主：Bun 起 dsh，自己拿端口并上报 { url, injections } ----
+  // GUI（Finder/LaunchServices）启动只继承 launchd 的最小 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
+  // 于是 dsh 子进程里 gh / bun / node / pnpm 全部找不到。官方 Electron 桌面为此读回登录 shell
+  // 的环境；这里同语义做一遍，并把结果也落到壳自己的 process.env（后续 spawn 都受益）。
+  const loginShell = await readLoginShellEnvironment(env, { timeoutMs: resolveLoginShellTimeoutMs(env) })
+  if (loginShell.failures.length > 0) {
+    log(`登录 shell 环境读取失败：${loginShell.failures.map((failure) => `${failure.shell}(${failure.reason})`).join('、')}——沿用继承环境`)
+  }
+  log(`PATH = ${loginShell.environment.PATH ?? '(空)'}`)
+  for (const [key, value] of Object.entries(loginShell.environment)) process.env[key] = value
+  const childEnv = loginShell.environment
+
   const hostMode = env.DSH_SHELL_PROFILE_MODE === 'fresh' ? 'fresh' : 'existing'
   let host: Awaited<ReturnType<typeof startHost>>
   try {
@@ -118,6 +130,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       layout: paths,
       clientVersion: options.clientVersion,
       mode: hostMode,
+      env: childEnv,
       onLog: log,
     })
   } catch (error) {
@@ -130,6 +143,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       layout: paths,
       clientVersion: options.clientVersion,
       mode: 'existing',
+      env: childEnv,
       onLog: log,
     })
   }

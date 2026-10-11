@@ -1,8 +1,9 @@
 import type { ElectrobunConfig } from 'electrobun'
+import { APP_NAME } from './src/shared/app.ts'
 
 export default {
   app: {
-    name: 'DeepSeek Harness Desktop',
+    name: APP_NAME,
     identifier: 'com.arcreel.dsh-desktop-tauriapp',
     version: '0.1.0',
   },

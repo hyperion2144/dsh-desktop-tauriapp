@@ -6,6 +6,8 @@
 // 只在 macOS 装（Windows/Linux 的 Ctrl+C/V 由 CEF 渲染进程自己处理，装了反而多出一条菜单栏，
 // 而那边旧壳的标题栏是自绘的）。
 
+import { APP_NAME } from '../shared/app.ts'
+
 export interface MenuItem {
   type?: 'normal' | 'separator' | 'divider'
   label?: string
@@ -15,7 +17,7 @@ export interface MenuItem {
 }
 
 /** 应用菜单结构（纯数据，便于单测断言剪贴板角色没有丢）。 */
-export function applicationMenuItems(appName = 'DeepSeek Harness Desktop'): MenuItem[] {
+export function applicationMenuItems(appName = APP_NAME): MenuItem[] {
   return [
     {
       label: appName,

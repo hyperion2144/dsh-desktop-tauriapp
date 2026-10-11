@@ -10,6 +10,7 @@ import { bootPreloadScript } from './preload.ts'
 import { startService } from './service.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
+import { APP_NAME } from '../shared/app.ts'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
 const CLIENT_VERSION = '0.1.0'
@@ -35,7 +36,7 @@ const noWindow = process.env.DSH_SHELL_NO_WINDOW === '1'
 /** 壳平台名：与旧壳 body[data-dsh-desktop-platform] 契约同名。 */
 const platform = process.platform === 'darwin' ? 'darwin' : process.platform === 'win32' ? 'win32' : 'linux'
 // macOS 的 Cmd+C/Cmd+V 由 NSMenu 的选择器驱动（见 menu.ts），不装菜单就没有系统剪贴板快捷键。
-if (platform === 'darwin') installApplicationMenu(ApplicationMenu)
+if (platform === 'darwin') installApplicationMenu(ApplicationMenu, APP_NAME)
 // 系统语言：CEF 默认 en-US，页面语言跟着错；旧壳（WKWebView）是天然跟随系统的。
 const locale = await systemLocale()
 // 页面外链与右键菜单都要主进程出面：CEF 不会自己弹菜单，也不接管 window.open。
@@ -61,7 +62,7 @@ if (!noWindow) {
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
   const win = new BrowserWindow({
-    title: 'DeepSeek Harness Desktop',
+    title: APP_NAME,
     url: service.state.pageUrl,
     renderer: 'cef',
     preload: bootPreloadScript(locale, platform, service.state.origin),

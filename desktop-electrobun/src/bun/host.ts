@@ -20,6 +20,8 @@ export interface StartHostInput {
   clientVersion: string
   profile?: string
   mode?: 'existing' | 'fresh'
+  /** dsh 子进程的环境；缺省用壳继承的 process.env（GUI 启动时是 launchd 的最小集） */
+  env?: Record<string, string | undefined>
   onLog?: (line: string) => void
   timeoutMs?: number
 }
@@ -39,7 +41,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
   const bunBin = input.bunBin ?? process.execPath
   const onLog = input.onLog ?? (() => {})
   const env = buildChildEnv({
-    base: process.env,
+    base: input.env ?? process.env,
     clientVersion: input.clientVersion,
     profile,
     home: layout.home,
