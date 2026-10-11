@@ -11,7 +11,7 @@ import { startService } from './service.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
-import { appSupportDir, trayImagePath } from './runtime.ts'
+import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
@@ -27,6 +27,8 @@ import {
   type DisplayBounds,
   type WindowFrame,
 } from './window-state.ts'
+import { loadSettings } from './settings-store.ts'
+import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { join } from 'node:path'
 
 /** 客户端版本标识：dsh 0.2.1-alpha.2 的 telemetry/product-analytics 插件把它当必填项。 */
@@ -69,7 +71,10 @@ let mainWindowReady = false
 // ---- 托盘 + 窗口几何：关窗回托盘、Dock 再激活、位置尺寸记忆 ----
 // 旧 Tauri 壳用 tauri-plugin-window-state + tauri-plugin-single-instance；Electrobun 两样都没有。
 const windowStateFile = join(appSupportDir(), 'window.json')
-const instanceProfile = process.env.DSH_PROFILE ?? 'desktop'
+// 实例锁与托盘都要 profile：DSH_PROFILE > 设置 > 默认。
+// 设置文件可能还不存在（首启），读失败就按默认——真正的落盘由 service 那一步做。
+const bootSettings: DesktopSettings = loadSettings({ home: dshHome() }).settings
+const instanceProfile = activeProfile(bootSettings, process.env)
 let tray: TrayHandle | null = null
 let windowVisible = false
 let quitting = false
@@ -156,7 +161,7 @@ function onTrayAction(action: TrayAction): void {
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
 // （Electrobun 2.0.2 没有单实例 API，旧 Tauri 壳用的是 tauri-plugin-single-instance）
 const instanceFile = join(appSupportDir(), 'shell-instance.json')
-const instance = acquireInstance(instanceFile, process.env.DSH_PROFILE ?? 'desktop')
+const instance = acquireInstance(instanceFile, instanceProfile)
 if (!instance.acquired) {
   const previous = instance.previous
   if (previous !== null && previous.origin !== '') {

@@ -15,6 +15,8 @@ import { startShellServer, type BootPayload, type ShellServer, type ShellServerO
 import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } from './host-registry.ts'
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
+import { loadSettings } from './settings-store.ts'
+import { activeProfile, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 
 export interface ServiceOptions {
   clientVersion: string
@@ -34,6 +36,8 @@ export interface ServiceOptions {
   /** 第二个实例请求把窗口带到前台（单实例激活） */
   onActivate?: () => void
   onLog?: (line: string) => void
+  /** 直接给定设置（测试/多窗口复用；缺省从磁盘读） */
+  settings?: DesktopSettings
 }
 
 export interface ShellState {
@@ -47,6 +51,10 @@ export interface ShellState {
   hostPid: number
   injections: number
   noWindow: boolean
+  /** 壳设置（loadSettings 的结果，可供托盘/设置面板/防休眠等复用） */
+  settings: DesktopSettings
+  /** 设置文件的读取过程（首启/迁移/损坏重建） */
+  settingsProvenance: { created: boolean; migrated: boolean; recovered: boolean }
 }
 
 export interface ShellService {
@@ -77,7 +85,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     options.onLog?.(stamped)
   }
 
-  const paths = layout({ env })
+  // ---- 设置：壳自己的一份（desktop-settings.json，旧壳的 settings.yaml 只读迁移一次）----
+  const loaded = loadSettings({ home, log })
+  const settings = options.settings ?? loaded.settings
+  const provenance = [
+    loaded.created ? '首次启动已落盘' : '',
+    loaded.migrated ? '已从 settings.yaml 迁移' : '',
+    loaded.recovered ? '原文件损坏，已备份重建' : '',
+  ].filter((entry) => entry !== '')
+  log(`设置：${settingsSummary(settings)}${provenance.length > 0 ? `（${provenance.join('；')}）` : ''}`)
+
+  const paths = layout({ env, profile: activeProfile(settings, env) })
   options.onStage?.('layout')
   log(`运行时 = ${paths.runtimeDir} | dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`)
 
@@ -231,6 +249,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     hostPid: host.pid,
     injections: bootPayload.injections.length,
     noWindow: options.noWindow ?? false,
+    settings,
+    settingsProvenance: { created: loaded.created, migrated: loaded.migrated, recovered: loaded.recovered },
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
 

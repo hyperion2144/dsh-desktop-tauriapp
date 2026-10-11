@@ -31,6 +31,8 @@ export interface LayoutInput {
   env?: Record<string, string | undefined>
   /** 覆盖运行时目录（测试/多运行时用） */
   runtimeDir?: string
+  /** 覆盖 profile（设置里选了别的 profile 时给；缺省按 DSH_PROFILE > default） */
+  profile?: string
 }
 
 export function dshHome(env: Record<string, string | undefined> = process.env): string {
@@ -106,7 +108,12 @@ function packagedRoot(startDir: string): string | null {
 export function layout(input: LayoutInput = {}): ShellLayout {
   const env = input.env ?? process.env
   const home = dshHome(env)
-  const profile = env.DSH_PROFILE !== undefined && env.DSH_PROFILE !== '' ? env.DSH_PROFILE : 'desktop'
+  const profile =
+    input.profile !== undefined && input.profile !== ''
+      ? input.profile
+      : env.DSH_PROFILE !== undefined && env.DSH_PROFILE !== ''
+        ? env.DSH_PROFILE
+        : 'desktop'
   const runtimeDir = resolveRuntimeDir({ ...input, env })
   const dshLibDir = join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh', 'lib')
   const distDir = env.DSH_SHELL_DIST ?? join(runtimeDir, 'node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist')
