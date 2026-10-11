@@ -244,9 +244,10 @@ describe('命令表', () => {
         return result.body
       }
       // 真实路径是 dispatch：命令抛错 ⇒ ok:false + 可读原因（面板显示它，不是永远转圈）
+      // profile 迁移已接：没注入回调时也要报出「未接」这句，而不是回到「尚未移植」
       const notPorted = await call('migrate_profile')
       expect(notPorted.ok).toBe(false)
-      expect(String(notPorted.error)).toContain('尚未移植')
+      expect(String(notPorted.error)).toContain('壳未接迁移')
       // 运行时目录已经移植：未注入 fetchCatalog 时也要回结构完整的空目录，而不是报错
       const catalog = await call('list_runtime_catalog')
       expect(catalog.ok).toBe(true)
@@ -483,5 +484,146 @@ describe('/__shell__/rpc 端点', () => {
       const response = await fetch(`${origin}/__shell__/rpc`)
       expect(response.status).toBe(405)
     })
+  })
+})
+
+// profile 运维与启动检查的命令边界（旧壳 commands.rs:252/541/711/737/758）。
+// 守的是：启动弹窗拿到的是**客户端读得懂的字段名**（details 用 snake_case），迁移/重建/连接
+// 都真把活派给注入的回调；报错带上能直接给用户看的句子（面板原样显示这些字符串）。
+describe('profile 运维与启动检查', () => {
+  test('启动检查：默认健全 ⇒ none；profile 残缺 ⇒ 三项明细用 snake_case', async () => {
+    const healthy = harness()
+    const broken = harness({
+      profileHealth: () => ({ dirExists: true, missingFiles: ['cordis.yml'], nodeModulesExists: false }),
+    })
+    try {
+      expect(await healthy.table['check_startup_needed']?.({})).toEqual({ action: 'none' })
+      expect(await broken.table['check_startup_needed']?.({})).toEqual({
+        action: 'profile-incomplete',
+        profile: 'desktop',
+        details: { dir_exists: true, missing_files: ['cordis.yml'], node_modules_exists: false },
+      })
+    } finally {
+      healthy.cleanup()
+      broken.cleanup()
+    }
+  })
+
+  test('启动检查：存量安装且没设 active_profile ⇒ 让用户选（profiles 来自壳）', async () => {
+    const h = harness({
+      profiles: () => ['desktop', 'web'],
+      settings: () => ({ ...defaultSettings(), activeProfile: undefined }),
+    })
+    try {
+      expect(await h.table['check_startup_needed']?.({})).toEqual({
+        action: 'profile-selection',
+        profiles: ['desktop', 'web'],
+      })
+      // 全新安装：不弹选择（没得选）
+      const fresh = harness({ freshInstall: () => true, settings: () => ({ ...defaultSettings(), activeProfile: undefined }) })
+      try {
+        expect(await fresh.table['check_startup_needed']?.({})).toEqual({ action: 'none' })
+      } finally {
+        fresh.cleanup()
+      }
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('确认启动：名字非法直接拒；合法的记「已确认」+ 写 pending + 把 repair 传下去', async () => {
+    const confirmed: Array<{ profile: string; repair: boolean }> = []
+    let checked = 0
+    let pending: string | null = null
+    const h = harness({
+      markStartupChecked: () => {
+        checked += 1
+      },
+      setPendingProfile: (profile) => {
+        pending = profile
+      },
+      takePendingProfile: () => {
+        const value = pending
+        pending = null
+        return value
+      },
+      confirmStartupProfile: async (profile, repair) => {
+        confirmed.push({ profile, repair })
+      },
+    })
+    try {
+      await expect(h.table['confirm_startup_profile']?.({ name: '有中文' })).rejects.toThrow('名称仅允许')
+      expect(await h.table['confirm_startup_profile']?.({ name: 'web', repair: true })).toEqual({})
+      expect(confirmed).toEqual([{ profile: 'web', repair: true }])
+      expect(checked).toBe(1)
+      // pending 由前端取走即清（旧壳 get_pending_active_profile 同语义）
+      expect(await h.table['get_pending_active_profile']?.({})).toBe('web')
+      expect(await h.table['get_pending_active_profile']?.({})).toBeNull()
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('依赖重建：该 profile 在跑 ⇒ 拒（带端口）；不在跑 ⇒ 真调重建', async () => {
+    const rebuilt: string[] = []
+    const running = harness({
+      runningPortOfProfile: async () => 6393,
+      rebuildProfile: async (profile) => {
+        rebuilt.push(profile)
+        return 'x'
+      },
+    })
+    const idle = harness({
+      runningPortOfProfile: async () => null,
+      rebuildProfile: async (profile) => {
+        rebuilt.push(profile)
+        return `${profile}：依赖已重建`
+      },
+    })
+    try {
+      await expect(running.table['rebuild_profile_dependencies']?.({ profile: 'desktop' })).rejects.toThrow(
+        'desktop 正在运行（端口 6393）',
+      )
+      expect(rebuilt).toEqual([])
+      expect(await idle.table['rebuild_profile_dependencies']?.({ profile: 'desktop' })).toBe('desktop：依赖已重建')
+      expect(rebuilt).toEqual(['desktop'])
+    } finally {
+      running.cleanup()
+      idle.cleanup()
+    }
+  })
+
+  test('迁移：source/dest/overwrite 原样传下去，总结原样回给面板', async () => {
+    const calls: Array<[string, string, boolean]> = []
+    const h = harness({
+      migrateProfile: async (source, dest, overwrite) => {
+        calls.push([source, dest, overwrite])
+        return '已迁移 desktop → web：文件 3、目录 2、链接 0、排除 1'
+      },
+      migrationStatus: () => ({ running: false, copied: 3, total: 3 }),
+    })
+    try {
+      const summary = await h.table['migrate_profile']?.({ source: 'desktop', dest: 'web', overwrite: true })
+      expect(summary).toBe('已迁移 desktop → web：文件 3、目录 2、链接 0、排除 1')
+      expect(calls).toEqual([['desktop', 'web', true]])
+      expect(await h.table['migration_status']?.({})).toEqual({ running: false, copied: 3, total: 3 })
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('代理连接测试：空地址拒；其余交给注入的 IO（回耗时 ms）', async () => {
+    const h = harness({ testProxy: async (url) => (url.includes('127.0.0.1') ? 12 : 0) })
+    const bare = harness()
+    try {
+      await expect(h.table['test_proxy_connectivity']?.({ url: '' })).rejects.toThrow('代理地址为空')
+      expect(await h.table['test_proxy_connectivity']?.({ url: 'http://127.0.0.1:7890' })).toBe(12)
+      await expect(bare.table['test_proxy_connectivity']?.({ url: 'http://127.0.0.1:7890' })).rejects.toThrow(
+        '壳未接连接测试',
+      )
+    } finally {
+      h.cleanup()
+      bare.cleanup()
+    }
   })
 })

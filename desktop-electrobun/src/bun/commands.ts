@@ -13,6 +13,7 @@ import { argNumber, argString, type RpcHandler } from './rpc.ts'
 import { listSounds, type Notifier } from './notifications.ts'
 import { permissionHint, type NotifyPermission } from '../shared/notify-permission.ts'
 import type { PortClaim } from '../shared/ports.ts'
+import { startupAction, validProfileName, type MigrationStatus, type StartupHealth } from '../shared/profile-ops.ts'
 
 export interface CommandDeps {
   home: string
@@ -68,6 +69,29 @@ export interface CommandDeps {
   downloadDir?: string
   /** 下载管理器（`src/bun/downloads.ts`）；无窗口单测可以不接 */
   downloads?: DownloadManager | (() => DownloadManager | undefined)
+  /** 启动检查是否已确认过（旧壳 DshState.skip_startup_check，仅进程内） */
+  startupChecked?: () => boolean
+  /** 确认过启动检查（旧壳在 confirm_startup_profile 里置位） */
+  markStartupChecked?: () => void
+  /** 全新安装（旧壳看 settings 文件此前存不存在） */
+  freshInstall?: () => boolean
+  /** profile 完整性（缺哪些必需文件 / 有没有 node_modules） */
+  profileHealth?: (profile: string) => StartupHealth
+  /** 待生效的 profile：确认启动时写入，前端取走即清（旧壳 get_pending_active_profile） */
+  setPendingProfile?: (profile: string) => void
+  takePendingProfile?: () => string | null
+  /** 用指定 profile 起服务面（repair 时先重建依赖） */
+  confirmStartupProfile?: (profile: string, repair: boolean) => Promise<void>
+  /** 该 profile 是否正在跑（回它在监听的端口；用于「先停再重建」的门） */
+  runningPortOfProfile?: (profile: string) => Promise<number | null>
+  /** 用内置 pnpm 重建该 profile 的依赖（阻塞数分钟） */
+  rebuildProfile?: (profile: string) => Promise<string>
+  /** 迁移 profile；目标已存在且 !overwrite 时抛「需确认覆盖」 */
+  migrateProfile?: (source: string, dest: string, overwrite: boolean) => Promise<string>
+  /** 迁移进度（面板 300ms 轮询） */
+  migrationStatus?: () => MigrationStatus
+  /** TCP 连一次代理，返回耗时 ms（旧壳 test_proxy_connectivity） */
+  testProxy?: (url: string) => Promise<number>
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -96,16 +120,6 @@ export interface RuntimeSnapshot {
 
 /** 已实现命令里，明确「还没搬过来」的那几条：报清楚原因，UI 才能给人看。 */
 const NOT_PORTED: Record<string, string> = {
-  rebuild_profile_dependencies: 'profile 依赖重建尚未移植',
-  migrate_profile: 'profile 迁移尚未移植',
-  migration_status: 'profile 迁移尚未移植',
-  check_startup_needed: '启动 profile 确认流程尚未移植',
-  confirm_startup_profile: '启动 profile 确认流程尚未移植',
-  get_pending_active_profile: '启动 profile 确认流程尚未移植',
-  test_proxy_connectivity: '代理连通性测试尚未移植',
-  start_blob_download: '下载管理器尚未移植',
-  save_blob_chunk: '下载管理器尚未移植',
-  finish_blob_download: '下载管理器尚未移植',
   browser_guest_state: '浏览器 guest 尚未移植',
   browser_guest_acquire: '浏览器 guest 尚未移植',
   browser_guest_navigate: '浏览器 guest 尚未移植',
@@ -489,6 +503,63 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     exit_window_instance: () => {
       deps.closeWindow?.()
       return {}
+    },
+
+    // ---- profile 运维与启动检查（旧壳 commands.rs:252/541/711/737/758） ----
+    // 存量安装且没设 active_profile ⇒ 让用户选；profile 残缺 ⇒ 让用户确认修复。
+    check_startup_needed: () => {
+      const decision = startupAction({
+        skipCheck: deps.startupChecked?.() ?? false,
+        freshInstall: deps.freshInstall?.() ?? false,
+        activeProfile: deps.settings().activeProfile ?? null,
+        profiles: deps.profiles?.() ?? [profileOf(deps)],
+        health: deps.profileHealth?.(profileOf(deps)) ?? { dirExists: true, missingFiles: [], nodeModulesExists: true },
+        profile: profileOf(deps),
+      })
+      if (decision.action === 'none') return { action: 'none' }
+      if (decision.action === 'profile-selection') return { action: 'profile-selection', profiles: decision.profiles }
+      return {
+        action: 'profile-incomplete',
+        profile: decision.profile,
+        // 客户端读的是 snake_case（desktop-settings.tsx 的 details.missing_files / node_modules_exists）
+        details: {
+          dir_exists: decision.details.dirExists,
+          missing_files: [...decision.details.missingFiles],
+          node_modules_exists: decision.details.nodeModulesExists,
+        },
+      }
+    },
+    confirm_startup_profile: async (args) => {
+      const name = argString(args, 'name')
+      if (!validProfileName(name)) throw new Error('profile 名称仅允许字母、数字、_ 与 -（1-32 字符）')
+      if (deps.confirmStartupProfile === undefined) throw new Error('confirm_startup_profile：壳未接启动确认')
+      deps.markStartupChecked?.()
+      deps.setPendingProfile?.(name)
+      await deps.confirmStartupProfile(name, args['repair'] === true)
+      return {}
+    },
+    // 前端激活时取回启动时选的 profile，再由它自己 save_desktop_settings 持久化（旧壳同序）
+    get_pending_active_profile: () => deps.takePendingProfile?.() ?? null,
+    rebuild_profile_dependencies: async (args) => {
+      const profile = argString(args, 'profile') || profileOf(deps)
+      if (!validProfileName(profile)) throw new Error('profile 名称仅允许字母、数字、_ 与 -（1-32 字符）')
+      const port = (await deps.runningPortOfProfile?.(profile)) ?? null
+      if (port !== null) throw new Error(`${profile} 正在运行（端口 ${String(port)}），请先停止该 profile 再重建`)
+      if (deps.rebuildProfile === undefined) throw new Error('rebuild_profile_dependencies：壳未接依赖重建')
+      return deps.rebuildProfile(profile)
+    },
+    migrate_profile: async (args) => {
+      const source = argString(args, 'source')
+      const dest = argString(args, 'dest')
+      if (deps.migrateProfile === undefined) throw new Error('migrate_profile：壳未接迁移')
+      return deps.migrateProfile(source, dest, args['overwrite'] === true)
+    },
+    migration_status: () => deps.migrationStatus?.() ?? { running: false, copied: 0, total: 0 },
+    test_proxy_connectivity: async (args) => {
+      const url = argString(args, 'url')
+      if (url === '') throw new Error('代理地址为空')
+      if (deps.testProxy === undefined) throw new Error('test_proxy_connectivity：壳未接连接测试')
+      return deps.testProxy(url)
     },
   }
 

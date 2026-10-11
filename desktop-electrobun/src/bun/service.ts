@@ -32,6 +32,7 @@ import { updateSettings } from './settings-store.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { listProfiles } from './profiles.ts'
 import { createDownloadManager } from './downloads.ts'
+import { createTaskTracker, installProfileDependencies, migrateProfile, profileHealth, testProxyConnectivity } from './profile-manager.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import {
@@ -60,6 +61,8 @@ export interface ServiceOptions {
   noWindow?: boolean
   /** 页面外链转系统浏览器（主进程实现；无窗口宿主可不给） */
   onOpenExternal?: (url: string) => void
+  /** 打开另一个 profile 的窗口（启动确认选了别的 profile 时用；多窗口见 index.ts） */
+  onOpenProfileWindow?: (profile: string) => Promise<void>
   /** 页面右键菜单（主进程实现） */
   onContextMenu?: (request: ContextMenuRequest) => void
   /** 宿主被守护器重启成功（主进程用它把页面刷回来） */
@@ -482,6 +485,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let rpcRouter: RpcRouter | null = null
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值
   let liveSettings = settings
+  // 启动检查的进程内状态（旧壳 DshState：skip_startup_check 与 pending_active_profile 都不落盘）
+  let startupChecked = false
+  let pendingProfile: string | null = null
+  // 迁移/依赖重建的进度（设置面板 300ms 轮询 migration_status）
+  const taskTracker = createTaskTracker()
   // 下载管理器（旧壳 `download/{manager,transfer}.rs`）：URL 直链与页面 blob 两条管线共用一份任务表。
   // cookie 只在「下载目标就是壳对接的那个 dsh 实例」时带（旧壳 transfer.rs 同语义）；
   // 页面 origin 的请求由壳自己的反代补 cookie，所以它不需要这里带。
@@ -658,6 +666,20 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
     return liveSettings
   }
+
+  /** profile 依赖重建（旧壳 profiles.rs 的 pnpm_install_profile）：内置 pnpm install --no-frozen-lockfile */
+  const rebuildProfileDependencies = async (profile: string): Promise<string> => {
+    const result = await installProfileDependencies({
+      home,
+      profile,
+      appSupport: paths.appSupport,
+      runtimeRoot: paths.runtimeDir,
+      env: childEnv,
+      log,
+    })
+    if (!result.ok) throw new Error(result.error)
+    return `${profile}：依赖已重建`
+  }
   const service: ShellService = {
     state,
     paths,
@@ -766,6 +788,57 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       downloadStatus: () => downloader.status(),
       downloads,
       downloadDir: join(env.HOME ?? home, 'Downloads'),
+      // ---- profile 运维与启动检查（旧壳 commands.rs 的对应命令）----
+      startupChecked: () => startupChecked,
+      markStartupChecked: () => {
+        startupChecked = true
+      },
+      freshInstall: () => loaded.created,
+      profileHealth: (profile) => profileHealth(home, profile),
+      setPendingProfile: (profile) => {
+        pendingProfile = profile
+      },
+      takePendingProfile: () => {
+        const pending = pendingProfile
+        pendingProfile = null
+        return pending
+      },
+      confirmStartupProfile: async (profile, repair) => {
+        // 旧壳顺序：先按需修复，再把该 profile 交给服务面（pending 由前端取回后自己落盘）
+        if (repair) await rebuildProfileDependencies(profile)
+        saveSettings({ active_profile: profile })
+        if (profile !== paths.profile) await options.onOpenProfileWindow?.(profile)
+      },
+      runningPortOfProfile: async (profile) => {
+        const claims = pruneClaims(parseClaims(await readClaims()), isAlivePid)
+        const hit = claimFor(claims, profile)
+        return hit === undefined ? null : hit.port
+      },
+      rebuildProfile: rebuildProfileDependencies,
+      migrateProfile: async (source, dest, overwrite) => {
+        const next = await migrateProfile({
+          home,
+          source,
+          dest,
+          overwrite,
+          activeProfile: paths.profile,
+          install: () =>
+            installProfileDependencies({
+              home,
+              profile: dest,
+              appSupport: paths.appSupport,
+              runtimeRoot: paths.runtimeDir,
+              env: childEnv,
+              preferOffline: true,
+              log,
+            }),
+          log,
+          track: taskTracker,
+        })
+        return next
+      },
+      migrationStatus: () => taskTracker.migrationStatus(),
+      testProxy: (url) => testProxyConnectivity(url),
     }),
   )
   return service

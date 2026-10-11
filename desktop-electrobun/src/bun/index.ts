@@ -301,6 +301,11 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     onCloseWindow: () => {
       windows.get(profile)?.window.close()
     },
+    // 启动确认选了别的 profile：#82 的旧行为是「用它重启」；新壳每 profile 一份服务面，所以是开它那份窗口
+    onOpenProfileWindow: async (target) => {
+      if (target === profile) return
+      await openProfileWindow(target)
+    },
   }
 }
 
