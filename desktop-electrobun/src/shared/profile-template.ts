@@ -60,6 +60,23 @@ export function pnpmWorkspaceYaml(): string {
   return `packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n\n${PNPM_ALLOW_BUILDS}`
 }
 
+/**
+ * 下载运行时用的 workspace 文件（旧壳 `runtime/registry.rs::runtime_workspace_yaml`）：
+ * - `packages: []` 自声明 workspace root，截断 pnpm 向上搜索（祖先目录的 workspace 会引发
+ *   `ERR_PNPM_UNEXPECTED_STORE`；旧壳 #95：`--ignore-workspace` / `--store-dir` / `--force` 都无效）；
+ * - `nodeLinker: hoisted` = npm 式全量平铺，与内置树同构（symlink 布局会让解析钩子 MODULE_NOT_FOUND）；
+ * - `storeDir` 独立（旧壳 #114：不写全局 store，避免动到与运行树 hardlink 共享 inode 的 ctime）；
+ * - `allowBuilds` 白名单（pnpm 11 未批准的构建脚本直接 exit 1，旧壳 #135）。
+ */
+export function runtimeWorkspaceYaml(storeDir: string): string {
+  return `packages: []\nnodeLinker: hoisted\nstoreDir: ${storeDir.replace(/\\/g, '/')}\n\n${PNPM_ALLOW_BUILDS}`
+}
+
+/** 同上信息的 `.npmrc` 版：pnpm 11 只认 yaml，这里保留仅为兼容旧 pnpm（旧壳同做法）。 */
+export function runtimeNpmrc(storeDir: string): string {
+  return `node-linker=hoisted\nstore-dir=${storeDir.replace(/\\/g, '/')}\n`
+}
+
 export interface ProfileFile {
   /** profile 目录内的文件名 */
   name: string

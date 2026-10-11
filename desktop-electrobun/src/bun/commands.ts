@@ -5,6 +5,7 @@
 // 命令实现全部只依赖注入的 deps，方便单测（不 import electrobun）。
 
 import type { DesktopSettings, DshMode, RuntimeSource } from '../shared/settings.ts'
+import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
 import { serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcHandler } from './rpc.ts'
@@ -41,6 +42,10 @@ export interface CommandDeps {
   fetchCatalog?: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
   /** 删除一个已下载运行时（先移回收站，清单摘除） */
   removeRuntime?: (version: string) => Promise<void>
+  /** 下载并安装一个运行时（单飞；已有任务在跑时抛「已有运行时下载任务」） */
+  downloadRuntime?: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
+  /** 下载进度（面板每 600ms 轮询；旧壳 runtime_download_status 同形状） */
+  downloadStatus?: () => RuntimeDownloadStatus
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -67,7 +72,6 @@ export interface RuntimeSnapshot {
 
 /** 已实现命令里，明确「还没搬过来」的那几条：报清楚原因，UI 才能给人看。 */
 const NOT_PORTED: Record<string, string> = {
-  download_runtime: '运行时下载尚未移植（下一轮：pnpm 安装 + 进度）',
   rebuild_profile_dependencies: 'profile 依赖重建尚未移植',
   migrate_profile: 'profile 迁移尚未移植',
   migration_status: 'profile 迁移尚未移植',
@@ -195,7 +199,19 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return body
     },
 
-    runtime_download_status: () => ({ active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }),
+    runtime_download_status: () =>
+      deps.downloadStatus?.() ?? { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' },
+
+    // 下载安装：单飞（已有任务在跑时由 deps.downloadRuntime 抛「已有运行时下载任务」）
+    download_runtime: async (args) => {
+      const version = argString(args, 'version')
+      if (version === undefined || version === '') throw new Error('download_runtime: version 不能为空')
+      if (deps.downloadRuntime === undefined) throw new Error('download_runtime: 运行时下载不可用')
+      // 页面不传 / 传空串都按默认来源（旧壳 source 参数缺省即 github）
+      const rawSource = argString(args, 'source')
+      const source = (rawSource === undefined || rawSource === '' ? 'github' : rawSource) as RuntimeSource
+      return deps.downloadRuntime(version, source)
+    },
 
     // 卸载：正在用 / 内置的不允许删（旧壳同款守卫；外置模式下不占本地树，故不拦）
     remove_runtime: async (args) => {

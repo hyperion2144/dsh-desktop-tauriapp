@@ -243,9 +243,9 @@ describe('命令表', () => {
         return result.body
       }
       // 真实路径是 dispatch：命令抛错 ⇒ ok:false + 可读原因（面板显示它，不是永远转圈）
-      const download = await call('download_runtime')
-      expect(download.ok).toBe(false)
-      expect(String(download.error)).toContain('尚未移植')
+      const notPorted = await call('migrate_profile')
+      expect(notPorted.ok).toBe(false)
+      expect(String(notPorted.error)).toContain('尚未移植')
       // 运行时目录已经移植：未注入 fetchCatalog 时也要回结构完整的空目录，而不是报错
       const catalog = await call('list_runtime_catalog')
       expect(catalog.ok).toBe(true)
@@ -259,6 +259,49 @@ describe('命令表', () => {
       // 下载列表先给空数组：tab 不该因为管理器未移植而炸
       const downloads = await call('list_downloads')
       expect(downloads).toEqual({ ok: true, value: [] })
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('运行时下载：命令走依赖、状态从状态机读（面板轮询那条路）', async () => {
+    const started: Array<{ version: string; source: string }> = []
+    const h = harness({
+      downloadRuntime: async (version, source) => {
+        started.push({ version, source })
+        return { ok: true as const, version }
+      },
+      downloadStatus: () => ({ active: true, version: '9.9.9', resolved: 12, downloaded: 3, added: 1, error: '' }),
+    })
+    try {
+      await expect(h.table.download_runtime?.({ version: '9.9.9' })).resolves.toEqual({ ok: true, version: '9.9.9' })
+      expect(started).toEqual([{ version: '9.9.9', source: 'github' }])
+      await h.table.download_runtime?.({ version: '9.9.9', source: 'npm' })
+      expect(started[1]?.source).toBe('npm')
+      // 面板每 600ms 轮询这个命令：必须回状态机里的真值，而不是写死的空闲态
+      expect(await h.table.runtime_download_status?.({})).toEqual({
+        active: true,
+        version: '9.9.9',
+        resolved: 12,
+        downloaded: 3,
+        added: 1,
+        error: '',
+      })
+      // 没注入依赖时（旧调用方）仍要回一个结构完整的空闲态，别让面板炸
+      const bare = harness()
+      try {
+        expect(await bare.table.runtime_download_status?.({})).toEqual({
+          active: false,
+          version: '',
+          resolved: 0,
+          downloaded: 0,
+          added: 0,
+          error: '',
+        })
+        await expect(bare.table.download_runtime?.({ version: '1.0.0' })).rejects.toThrow('运行时下载不可用')
+      } finally {
+        bare.cleanup()
+      }
     } finally {
       h.cleanup()
     }

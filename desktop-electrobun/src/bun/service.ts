@@ -34,9 +34,11 @@ import {
   listInstalledRuntimes,
   purgeRuntimeTrash,
   readRuntimeVersion,
+  recordInstalledRuntime,
   resolveExternalRuntime,
   trashInstalledRuntime,
 } from './runtime-store.ts'
+import { createRuntimeDownloader, ensureNodeShim, installRuntime, resolvePnpmCjs } from './runtime-install.ts'
 
 export interface ServiceOptions {
   /** 平台（命令表要回给页面；缺省 process.platform） */
@@ -144,6 +146,46 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
   const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
   if (purgedTrash > 0) log(`运行时回收站：清理 ${String(purgedTrash)} 项（上一次卸载的残留）`)
+
+  // ---- 运行时下载安装：面板点「下载」→ 单飞装树（命令表只调 downloader，不自己 spawn）----
+  // pnpm.cjs 随内置树分发（`prepare-builtin-runtime.mjs` 装的 pnpm@11.16.0）；包管理器跑在**我们的 Bun** 上。
+  const bunPath = process.execPath
+  const builtinDir = resolveBuiltinRuntimeDir(env, { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir })
+  const pnpmCjs = resolvePnpmCjs({
+    env,
+    runtimeRoot: paths.runtimeKind === 'external' ? null : paths.runtimeDir,
+    builtinDir,
+    appSupport: paths.appSupport,
+  })
+  if (pnpmCjs === null) log('运行时下载：没找到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定），面板点下载会失败')
+  const downloader = createRuntimeDownloader({
+    install: async (version, onProgress) => {
+      if (pnpmCjs === null) throw new Error('找不到 pnpm.cjs（可用 DSH_SHELL_PNPM 指定内置的那份）')
+      const nodeShimDir = ensureNodeShim({
+        appSupport: paths.appSupport,
+        bunPath,
+        hasNode: Bun.which('node') !== null,
+        log,
+      })
+      await installRuntime({
+        appSupport: paths.appSupport,
+        version,
+        bunPath,
+        pnpmCjs,
+        nodeShimDir,
+        onProgress,
+        onLog: log,
+      })
+    },
+    record: (version, source) => {
+      recordInstalledRuntime(paths.appSupport, {
+        version,
+        source: source === 'npm' ? 'npm' : 'github',
+        installed_at: Date.now(),
+      })
+    },
+    log,
+  })
 
   // ---- profile 树 reconcile：空 DSH_HOME 下也把运行时树摊进 profile（#209）----
   const profileDir = `${paths.home}/profiles/${paths.profile}`
@@ -555,6 +597,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       removeRuntime: async (version) => {
         trashInstalledRuntime(paths.appSupport, version, log)
       },
+      downloadRuntime: (version, source) => downloader.start(version, source),
+      downloadStatus: () => downloader.status(),
     }),
   )
   return service

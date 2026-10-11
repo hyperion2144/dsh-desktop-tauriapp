@@ -75,7 +75,11 @@ watchParent({
 
 const { ctx } = await application
 
-const base = `${ctx.webServer.protocol}//127.0.0.1:${String(ctx.webServer.port)}`
+// 官方桌面（0.2.1-alpha.2 起）能读到 ctx.webServer.protocol；更老的树（含 0.2.1-alpha.1）没有这个字段，
+// 拼出来就是 `undefined//127.0.0.1:6396` → authenticatedUrl 抛 `Invalid URL`。运行时可以下到任意版本，
+// 所以这里宽容一点：没有 protocol 就按 http（loopback 本来就是 http）。
+const protocol = typeof ctx.webServer.protocol === 'string' && ctx.webServer.protocol !== '' ? ctx.webServer.protocol : 'http:'
+const base = `${protocol}//127.0.0.1:${String(ctx.webServer.port)}`
 const url = ctx.connection.authenticatedUrl(base)
 const injections = ctx.webServer.collectIndexInjections()
 console.log(`[host] webServer.port = ${String(ctx.webServer.port)} | injections = ${String(injections.length)}`)
