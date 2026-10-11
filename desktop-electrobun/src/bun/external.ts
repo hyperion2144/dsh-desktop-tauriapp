@@ -16,6 +16,8 @@
 
 export const OPEN_EXTERNAL_ENDPOINT = '/__shell__/open-external'
 
+import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
+
 /** 能交给系统打开的协议。 */
 const EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:', 'tel:'])
 
@@ -36,11 +38,12 @@ export function isExternalUrl(raw: string, selfOrigin: string): boolean {
  * document-start 注入的外链拦截脚本。
  * `selfOrigin` 是壳自己的 loopback origin（同源链接保持应用内行为）。
  */
-export function externalLinksScript(selfOrigin: string): string {
+export function externalLinksScript(selfOrigin: string, viewToken: string): string {
   return [
     ';(() => {',
     `  const ENDPOINT = ${JSON.stringify(OPEN_EXTERNAL_ENDPOINT)}`,
     `  const SELF_ORIGIN = ${JSON.stringify(selfOrigin)}`,
+    `  const VIEW_TOKEN = ${JSON.stringify(viewToken)}`,
     `  const PROTOCOLS = ${JSON.stringify([...EXTERNAL_PROTOCOLS])}`,
     '  const log = (msg) => console.info("[external] " + msg)',
     '  const isExternal = (raw) => {',
@@ -56,7 +59,7 @@ export function externalLinksScript(selfOrigin: string): string {
     '    try {',
     '      void fetch(ENDPOINT, {',
     '        method: "POST",',
-    '        headers: { "content-type": "application/json" },',
+    `        headers: { "content-type": "application/json", ${JSON.stringify(VIEW_TOKEN_HEADER)}: VIEW_TOKEN },`,
     '        body: JSON.stringify({ url }),',
     '        keepalive: true,',
     '      }).then((res) => { if (!res.ok) log("壳拒绝了外链：" + url + " (" + res.status + ")") })',

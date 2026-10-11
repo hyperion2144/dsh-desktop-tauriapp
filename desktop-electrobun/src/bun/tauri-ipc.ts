@@ -15,14 +15,17 @@
 /** 壳 RPC 端点（与 `shell-server.ts` 的 `/__shell__/rpc` 一致）。 */
 export const RPC_ENDPOINT = '/__shell__/rpc'
 
-export function tauriIpcScript(): string {
+import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
+
+export function tauriIpcScript(viewToken: string): string {
   return [
     'try {',
     `  const endpoint = ${JSON.stringify(RPC_ENDPOINT)}`,
+    `  const viewToken = ${JSON.stringify(viewToken)}`,
     '  const invoke = (cmd, args) => {',
     '    return fetch(endpoint, {',
     "      method: 'POST',",
-    "      headers: { 'content-type': 'application/json' },",
+    `      headers: { 'content-type': 'application/json', '${VIEW_TOKEN_HEADER}': viewToken },`,
     "      cache: 'no-store',",
     '      body: JSON.stringify({ cmd: String(cmd), args: args && typeof args === \'object\' ? args : {} }),',
     '    }).then(async (res) => {',

@@ -16,6 +16,7 @@ import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
 import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
+import { createViewRegistry } from '../shared/view-grant.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
@@ -94,6 +95,8 @@ const windowStateFile = join(appSupportDir(), 'window.json')
 const bootSettings: DesktopSettings = loadSettings({ home: dshHome() }).settings
 const instanceProfile = activeProfile(bootSettings, process.env)
 let tray: TrayHandle | null = null
+// 每视图授权台账（#220 决策 12）：每个窗口一枚 token，页面桥带回来，壳按视图种类放行命令。
+const views = createViewRegistry()
 let windowVisible = false
 let quitting = false
 /** 关窗后是否只是隐藏：没有托盘（原生层没建成）时隐藏就叫不回来了，那时关窗等于退出。 */
@@ -295,6 +298,7 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     notifier,
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
+    views,
     pickSoundFile: pickSoundFileImpl,
     chooseDownloadDir: pickDownloadDirImpl,
     // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口
@@ -357,7 +361,7 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}` ,
     url: svc.state.pageUrl,
     renderer: 'cef',
-    preload: bootPreloadScript(locale, platform, svc.state.origin),
+    preload: bootPreloadScript(locale, platform, svc.state.origin, views.issue('shell', profile, windowKey(profile)).token),
     titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'hidden',
     frame,
   })
@@ -404,6 +408,8 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
   })
   win.on('close', () => {
     windows.delete(profile)
+    // 窗口没了就撤销它的视图 token（旧壳的 capability 是静态文件，这里跟着窗口走）
+    views.revokeLabel(windowKey(profile))
     if (focusedProfile === profile) focusedProfile = null
     refreshTray()
   })

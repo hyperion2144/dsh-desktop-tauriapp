@@ -10,6 +10,8 @@
 
 export const CONTEXT_MENU_ENDPOINT = '/__shell__/context-menu'
 
+import { VIEW_TOKEN_HEADER } from '../shared/view-grant.ts'
+
 export interface ContextMenuRequest {
   /** 右键点到的链接（没有则 null）。 */
   linkUrl: string | null
@@ -63,10 +65,11 @@ export function contextMenuItems(request: ContextMenuRequest, linkIsExternal: bo
 }
 
 /** document-start 注入：右键时把上下文报给壳，交给原生菜单。 */
-export function contextMenuScript(): string {
+export function contextMenuScript(viewToken: string): string {
   return [
     ';(() => {',
     `  const ENDPOINT = ${JSON.stringify(CONTEXT_MENU_ENDPOINT)}`,
+    `  const VIEW_TOKEN = ${JSON.stringify(viewToken)}`,
     '  const log = (msg) => console.info("[context-menu] " + msg)',
     '  document.addEventListener("contextmenu", (event) => {',
     '    const target = event.target',
@@ -80,7 +83,7 @@ export function contextMenuScript(): string {
     '    try {',
     '      void fetch(ENDPOINT, {',
     '        method: "POST",',
-    '        headers: { "content-type": "application/json" },',
+    `        headers: { "content-type": "application/json", ${JSON.stringify(VIEW_TOKEN_HEADER)}: VIEW_TOKEN },`,
     '        body: JSON.stringify({ linkUrl: href, hasSelection: selection.length > 0, editable, x: event.clientX, y: event.clientY }),',
     '        keepalive: true,',
     '      })',

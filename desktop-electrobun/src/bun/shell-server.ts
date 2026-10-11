@@ -19,6 +19,8 @@ import { decide } from '../shared/admission.ts'
 import { INDEX_FILE, contentTypeFor, isNoContentAsset, resolveAsset } from '../shared/asset-path.ts'
 import { corsHeaders, scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../shared/headers.ts'
 import { isExternalUrl } from './external.ts'
+import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
+import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
@@ -51,6 +53,12 @@ export interface ShellServerOptions {
   /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
   onActivate?: () => void
   /** 壳 ↔ 页面 RPC（`/__shell__/rpc`）：调用方给命令表与错误语义，这里只管 HTTP */
+  /**
+   * 每视图授权（#220 决策 12）：页面桥带 `x-dsh-shell-view` 回来，这里查表拿视图种类。
+   * 不给或给了没登记的 token ⇒ 一律拒绝（403）；`shell` 视图放行全部命令，`guest` 只放行白名单。
+   * 不传 `views` ⇒ 不做每视图校验（只在测试与旧调用点里出现）。
+   */
+  views?: ViewRegistry
   onRpc?: (raw: string) => Promise<{ status: number; body: Record<string, unknown> }>
   onLog?: (line: string) => void
 }
@@ -76,6 +84,24 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
   const authority = new URL(options.upstreamOrigin).host
   let served = 0
   let proxied = 0
+
+  /**
+   * 每视图授权：页面桥带 `x-dsh-shell-view` 回来。missing/未登记 —— 拒绝；
+   * 拿到授权后再看命令是否属于该视图的允许集（guest 只留白名单）。
+   */
+  function authorize(request: Request, command: string | null): { grant: ViewGrant | null; deny: Response | null } {
+    if (options.views === undefined) return { grant: null, deny: null }
+    const grant = options.views.lookup(request.headers.get(VIEW_TOKEN_HEADER))
+    if (grant === null) {
+      log(`[shell] 拒绝未登记视图的请求（${command ?? request.url}，token=${request.headers.get(VIEW_TOKEN_HEADER) ?? '无'}）`)
+      return { grant: null, deny: new Response('shell view token required', { status: 403 }) }
+    }
+    if (command !== null && !isCommandAllowed(grant.kind, command)) {
+      log(`[shell] 拒绝命令：${denyReason(grant.kind, command)}（${grant.label}）`)
+      return { grant, deny: Response.json({ ok: false, error: denyReason(grant.kind, command) }, { status: 403 }) }
+    }
+    return { grant, deny: null }
+  }
 
   async function serveStatic(rel: string): Promise<Response | null> {
     const file = resolveAsset(options.distDir, rel)
@@ -163,6 +189,8 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           return Response.json(health())
         }
         if (decision.rel === 'boot') {
+          const bootAuth = authorize(request, null)
+          if (bootAuth.deny !== null) return bootAuth.deny
           const payload = options.bootPayload()
           if (payload === null) return new Response('boot pending', { status: 503 })
           return Response.json(payload, { headers: { 'cache-control': 'no-store' } })
@@ -172,6 +200,16 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onRpc === undefined) return new Response('rpc unavailable', { status: 501 })
           const raw = await request.text()
+          const parsed = ((): { cmd?: unknown } | null => {
+            try {
+              return JSON.parse(raw) as { cmd?: unknown }
+            } catch {
+              return null
+            }
+          })()
+          const command = typeof parsed?.cmd === 'string' ? parsed.cmd : null
+          const rpcAuth = authorize(request, command)
+          if (rpcAuth.deny !== null) return rpcAuth.deny
           const result = await options.onRpc(raw)
           return Response.json(result.body, {
             status: result.status,
@@ -182,6 +220,8 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
         if (decision.rel === 'open-external') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onOpenExternal === undefined) return new Response('no window host', { status: 501 })
+          const externalAuth = authorize(request, null)
+          if (externalAuth.deny !== null) return externalAuth.deny
           const body = (await request.json().catch(() => null)) as { url?: unknown } | null
           const target = typeof body?.url === 'string' ? body.url : ''
           if (target === '' || !isExternalUrl(target, origin)) {

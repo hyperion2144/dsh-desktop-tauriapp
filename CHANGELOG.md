@@ -3,6 +3,14 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **每视图授权：页面桥带令牌，壳按视图种类放行命令（#220 决策 12 的「授权层重建」，旧壳靠 Tauri capability 按窗口发权限）**：
+  - **为什么要做**：旧壳的权限是 `capabilities/*.json` 按**窗口**给的（default 75 条 + remote-desktop 74 条）；新壳所有窗口**同源**（同一个 loopback origin，`http://127.0.0.1:<pagePort>`），只看 Origin + cookie 分不出「主窗」与「贴进来的网页」——一旦做 guest 浏览器/远程窗口，外来页面就能调全部 41 条命令（改设置、装/删运行时、迁移 profile、关窗）。
+  - **做法**：主进程给每个窗口发一枚随机 view token（`createViewRegistry()`，纯内存、壳重启即失效），随该窗口的 preload 注入页面；页面桥（`__TAURI_INTERNALS__.invoke`）、boot 取载荷、外链、右键菜单**四个端点都带 `x-dsh-shell-view`**；壳侧查表得到视图种类，再按种类放行：`shell`（我们自己的页面）全放行，`guest`（外来网页）**只放行 `log_console` / `log_diag`**，其余命令回 403 + 可读原因并记一条日志。窗口关闭时按窗口标签批量撤销 token（旧壳的 capability 是静态文件，这里跟着窗口走）。
+  - **闸门口径**：boot 载荷也要求 token（页面拿不到注入就等于黑屏，本来就只有我们的 preload 会取）；`/__shell__/activate` 保持无 token（它是**第二个壳的主进程**发的，不是页面）。`health` 仍是只读探测口。
+  - **没接令牌的调用点**：`views` 不传就不做每视图校验（只在测试与单实例等主进程路径上出现）；`guest` 的发放方等 `browser_guest_*`（侧边栏浏览器/远程窗口）落地时再接，白名单与测试已经在位。
+  - **测试**：新增 `test/view-grant.test.ts`（13 例：白名单纯逻辑、台账发/查/批撤、以及真 HTTP 的 7 条——无 token 403、伪造 403、shell 放行、guest 拒特权（含原因）、guest 放行报日志、guest 仍能开外链、boot 要 token、关窗后旧 token 立刻失效）。
+  - **实机证据（dev 实例，隔离 home，CDP 在真 CEF 窗口里验）**：页面桥 `invoke('get_desktop_client_environment')` 返回 `{mode:'advanced',profile:'desktop'}`；页面自己裸 `fetch('/__shell__/rpc')` **403**、伪造 token **403**、裸 `/__shell__/boot` **403**，壳日志逐条记「拒绝未登记视图的请求」；多窗口（`DSH_SHELL_OPEN_PROFILES=web`）两个窗口各自拿到**自己 profile** 的环境（web / desktop），两个页面都完整加载插件（`__ModuleLoader__` 就绪）——即令牌是按窗口发放与校验的。
+  - **已知取舍**：令牌只活在内存且只在 preload 里出现（页面 JS 拿不到，除非自己读 `x-dsh-shell-view` 的来源，而它无法伪造别人的 token）；preload 顶层的 `const viewToken` 是全局词法绑定（与页面同名变量理论上可能冲突，实测无）；`log_diag` 目前未实现（先留在白名单里）。
 - **profile 运维与启动检查：设置面板最后几项空白的命令全部接上（#220，地图 #204，旧壳 `commands.rs:252/541/711/737/758` + `profiles.rs`）**：
   - **启动检查（`check_startup_needed`）**：全新安装不弹窗（没得选）；存量安装且没设 `active_profile` → 回 `{action:'profile-selection', profiles}`（面板弹选择框）；当前 profile 缺目录/缺四个必需文件之一/没 `node_modules` → 回 `{action:'profile-incomplete', profile, details}`（**details 用客户端读的 snake_case**：`dir_exists` / `missing_files` / `node_modules_exists`）。裁决是纯函数 `startupAction`（`src/shared/profile-ops.ts`），`skip_startup_check` 与 `pending_active_profile` 都只活在进程内（照旧壳，不落盘）。
   - **确认启动（`confirm_startup_profile`）**：校验名字 → 记「已确认」→ 写 pending → `repair=true` 时先重建依赖 → 把设置里的 `active_profile` 换过去；若选的是**别的** profile，新壳按多窗口语义**打开那份 profile 的窗口**（旧壳是「用它重启」）。`get_pending_active_profile` 取走即清（前端自己再 `save_desktop_settings` 持久化——与旧壳同一顺序）。

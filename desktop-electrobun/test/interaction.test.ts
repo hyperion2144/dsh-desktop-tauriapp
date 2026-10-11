@@ -12,6 +12,7 @@ import {
   type ShellMenuItem,
 } from '../src/bun/context-menu.ts'
 import { OPEN_EXTERNAL_ENDPOINT, externalLinksScript, isExternalUrl } from '../src/bun/external.ts'
+import { VIEW_TOKEN_HEADER } from '../src/shared/view-grant.ts'
 
 const SELF = 'http://127.0.0.1:6391'
 
@@ -31,15 +32,16 @@ describe('外链：判定与拦截脚本', () => {
   })
 
   test('window.open 被改写：上游「在系统浏览器打开」就是这一句', () => {
-    const script = externalLinksScript(SELF)
+    const script = externalLinksScript(SELF, 'tok-a')
     expect(script).toContain(OPEN_EXTERNAL_ENDPOINT)
     expect(script).toContain(JSON.stringify(SELF))
     expect(script).toContain('globalThis.open = function')
+    expect(script).toContain(VIEW_TOKEN_HEADER)
     expect(script).toContain('nativeOpen.call')
   })
 
   test('点击与中键都要拦，且放行页面自己处理过的链接', () => {
-    const script = externalLinksScript(SELF)
+    const script = externalLinksScript(SELF, 'tok-a')
     expect(script).toContain('addEventListener("click"')
     // 中键：不拦就会在实例里打开新页面，把壳带走（用户报的那条）
     expect(script).toContain('addEventListener("auxclick"')
@@ -91,7 +93,7 @@ describe('右键菜单：结构', () => {
 
 describe('右键菜单：注入脚本', () => {
   test('把上下文报给壳端点，并带上坐标以外的三个判据', () => {
-    const script = contextMenuScript()
+    const script = contextMenuScript('tok-a')
     expect(script).toContain(CONTEXT_MENU_ENDPOINT)
     expect(script).toContain('addEventListener("contextmenu"')
     expect(script).toContain('linkUrl')
@@ -100,6 +102,6 @@ describe('右键菜单：注入脚本', () => {
   })
 
   test('页面自己接管过右键就不插手', () => {
-    expect(contextMenuScript()).toContain('if (event.defaultPrevented) return')
+    expect(contextMenuScript('tok-a')).toContain('if (event.defaultPrevented) return')
   })
 })

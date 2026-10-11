@@ -23,6 +23,7 @@ import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
 import { createNativeNotify, type NativeNotify } from './notify-un.ts'
+import type { ViewRegistry } from '../shared/view-grant.ts'
 import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
@@ -83,6 +84,8 @@ export interface ServiceOptions {
   pickSoundFile?: () => Promise<string | null>
   /** 弹目录选择器选下载位置（index.ts 注入 Electrobun 的 openFileDialog；缺省落 ~/Downloads） */
   chooseDownloadDir?: (start: string) => Promise<string | null>
+  /** 每视图授权台账（#220 决策 12）：index.ts 注入进程级那一个，页面桥带 token 回来查表 */
+  views?: ViewRegistry
 }
 
 export interface ShellState {
@@ -545,6 +548,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onOpenExternal: options.onOpenExternal,
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
+    views: options.views,
     onLog: log,
     onRpc: async (raw) => {
       if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
