@@ -8,6 +8,8 @@ import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { bootPreloadScript } from './preload.ts'
 import { startService } from './service.ts'
+import type { RuntimeSnapshot } from './commands.ts'
+import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
 import { isExternalUrl } from './external.ts'
 import { APP_NAME } from '../shared/app.ts'
@@ -16,8 +18,8 @@ import { acquireInstance, activateUrl, releaseInstance, updateInstance } from '.
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
-import { trayMenu, type TrayAction, type TrayState } from './tray-menu.ts'
-import { listProfiles, runtimeLabel } from './profiles.ts'
+import { trayMenu, type TrayAction, type TrayCatalogItem, type TrayState } from './tray-menu.ts'
+import { listProfiles } from './profiles.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -115,19 +117,76 @@ function scheduleFrameSave(win: BrowserWindow): void {
   }, 400)
 }
 
+/** 版本目录缓存：托盘子菜单用它渲染「↓ 下载并切换」，但不该每刷一次托盘就打网络（旧壳也拿缓存）。 */
+const TRAY_CATALOG_TTL_MS = 10 * 60_000
+let catalogCache: { at: number; entries: TrayCatalogItem[] } | null = null
+let catalogPending = false
+
+function ensureCatalog(): void {
+  if (catalogPending) return
+  if (catalogCache !== null && Date.now() - catalogCache.at < TRAY_CATALOG_TTL_MS) return
+  catalogPending = true
+  void service
+    .fetchCatalog(service.settings().runtimeSource ?? 'github')
+    .then((result) => {
+      if (result.error === undefined) catalogCache = { at: Date.now(), entries: result.entries }
+      else console.warn(`[shell] 拉运行时版本目录失败：${result.error}`)
+    })
+    .catch((error: unknown) => {
+      console.warn(`[shell] 拉运行时版本目录失败：${String(error)}`)
+    })
+    .finally(() => {
+      catalogPending = false
+      tray?.setState(trayState())
+    })
+}
+
+/** 下载状态在运行时管理器里；壳侧只读它——取不到就当作不在下载。 */
+function downloadStatusSafe(): RuntimeDownloadStatus {
+  try {
+    return service.downloadStatus()
+  } catch {
+    return { active: false, version: '', resolved: 0, downloaded: 0, added: 0, error: '' }
+  }
+}
+
+/** 运行时的展示名：外部 CLI / 已下载版本 / 随包内置三档，旧壳 `运行时：<label>` 同一口径。 */
+function runtimeLabelOf(snapshot: RuntimeSnapshot): string {
+  if (snapshot.mode === 'external') {
+    return snapshot.externalVersion === null ? '外部 dsh（未找到）' : `外部 dsh ${snapshot.externalVersion}`
+  }
+  if (snapshot.activeVersion !== null && snapshot.activeVersion !== snapshot.builtinVersion) {
+    return `${snapshot.activeVersion}（已下载）`
+  }
+  return snapshot.activeVersion === null ? '内置（版本未知）' : `内置 ${snapshot.activeVersion}`
+}
+
 function trayState(): TrayState {
+  const settings = service.settings()
+  const snapshot = service.runtime()
+  const download = downloadStatusSafe()
   return {
     windowVisible,
-    profile: instanceProfile,
-    // 多 profile 窗口还没做：菜单只列当前这一个，别摆一个点了不切的子菜单
-    profiles: [instanceProfile],
-    hostRunning: service !== null,
-    runtimeLabel: runtimeLabel(service?.state.runtimeDir ?? ''),
+    profile: service.paths.profile,
+    // 多 profile：菜单按 home 下的 profile 目录列，点了就地切（旧壳 `切换 Profile（本窗口）`）
+    profiles: listProfiles(dshHome(), service.paths.profile),
+    hostRunning: service.state.hostPid > 0,
+    runtimeLabel: runtimeLabelOf(snapshot),
+    mode: settings.dshMode ?? 'builtin',
+    builtinVersion: snapshot.builtinVersion,
+    selected: settings.dshRuntime ?? null,
+    installed: snapshot.installed.map((entry) => entry.version),
+    catalog: catalogCache?.entries ?? [],
+    externalAvailable: snapshot.externalPath !== null,
+    downloading: download.active && download.version !== '' ? download.version : null,
   }
 }
 
 function refreshTray(): void {
-  tray?.setState(trayState())
+  if (tray === null) return
+  tray.setState(trayState())
+  // 顺带把「有哪些版本可下载」拿回来（有缓存/正在拉就跳过，不阻塞窗口操作）
+  ensureCatalog()
 }
 
 function showMainWindow(): void {
@@ -146,18 +205,107 @@ function hideMainWindow(): void {
   refreshTray()
 }
 
+/** 托盘「重启 dsh 服务」：杀掉宿主，守护器带着同一份运行时把它拉起来。 */
+async function restartServiceFromTray(): Promise<void> {
+  console.log('[shell] 托盘：重启 dsh 服务')
+  try {
+    await service.restartHost()
+  } catch (error) {
+    console.error(`[shell] 重启 dsh 服务失败：${String(error)}`)
+  }
+  refreshTray()
+}
+
+/** 托盘「切换 Profile」：就地按新 profile 重启 dsh（页面 origin 不变，localStorage 不换桶）。 */
+async function switchProfileFromTray(profile: string): Promise<void> {
+  if (profile === service.paths.profile) {
+    showMainWindow()
+    return
+  }
+  console.log(`[shell] 托盘：切换 profile ${service.paths.profile} → ${profile}`)
+  try {
+    await service.switchProfile(profile)
+  } catch (error) {
+    console.error(`[shell] 切换 profile 失败：${String(error)}`)
+    notifier.notify(SCENARIO.STARTUP_ERROR, `切换 profile ${profile} 失败`)
+  }
+  refreshTray()
+}
+
+/** 托盘「运行时版本」：内置 / 外部 dsh / 某个已下载版本（写设置 + 杀宿主让守护器重起）。 */
+async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
+  const patch: Record<string, unknown> =
+    action.mode === 'external'
+      ? { dsh_mode: 'external' }
+      : action.version === undefined
+        ? { dsh_mode: 'builtin', dsh_runtime: null }
+        : { dsh_mode: 'builtin', dsh_runtime: action.version }
+  console.log(`[shell] 托盘：切换运行时 ${JSON.stringify(patch)}`)
+  service.save(patch)
+  refreshTray()
+  try {
+    await service.restartHost()
+  } catch (error) {
+    console.error(`[shell] 切换运行时失败：${String(error)}`)
+  }
+  refreshTray()
+}
+
+/** 下载中每秒刷一次托盘：菜单上那条「（下载中…）」会自己更新，下载结束就停。 */
+let downloadTimer: ReturnType<typeof setInterval> | null = null
+function pollDownload(): void {
+  if (downloadTimer !== null) return
+  downloadTimer = setInterval(() => {
+    tray?.setState(trayState())
+    if (!downloadStatusSafe().active && downloadTimer !== null) {
+      clearInterval(downloadTimer)
+      downloadTimer = null
+    }
+  }, 1_000)
+}
+
+/** 托盘「↓ 下载并切换 <v>」：装完直接切过去（旧壳 runtime-fetch-<v> 同语义）。 */
+async function downloadRuntimeFromTray(version: string): Promise<void> {
+  if (version === '') return
+  console.log(`[shell] 托盘：下载运行时 ${version}`)
+  pollDownload()
+  try {
+    await service.download(version, service.settings().runtimeSource ?? 'github')
+  } catch (error) {
+    console.error(`[shell] 下载运行时 ${version} 失败：${String(error)}`)
+    notifier.notify(SCENARIO.STARTUP_ERROR, `下载运行时 ${version} 失败`)
+    refreshTray()
+    return
+  }
+  console.log(`[shell] 运行时 ${version} 装好了，切过去`)
+  // 装完的版本要从「↓ 下载并切换」那一栏挪进「已装」：缓存作废，重新拉一份
+  catalogCache = null
+  await switchRuntimeFromTray({ kind: 'switch-runtime', version })
+}
+
 function onTrayAction(action: TrayAction): void {
-  if (action.kind === 'toggle-window') {
-    if (windowVisible) hideMainWindow()
-    else showMainWindow()
-    return
+  switch (action.kind) {
+    case 'toggle-window':
+      if (windowVisible) hideMainWindow()
+      else showMainWindow()
+      return
+    case 'quit':
+      console.log('[shell] 托盘：退出')
+      void shutdown()
+      return
+    case 'restart-service':
+      void restartServiceFromTray()
+      return
+    case 'select-profile':
+      if (action.profile !== undefined) void switchProfileFromTray(action.profile)
+      return
+    case 'switch-runtime':
+      void switchRuntimeFromTray(action)
+      return
+    case 'download-runtime':
+      void downloadRuntimeFromTray(action.version ?? '')
+      return
   }
-  if (action.kind === 'quit') {
-    console.log('[shell] 托盘：退出')
-    void shutdown()
-    return
-  }
-  console.log(`[shell] 托盘请求切换 profile：${String(action.profile)}（多 profile 窗口未实现，本轮不切）`)
 }
 
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
@@ -222,7 +370,6 @@ const notifier: Notifier = createNotifier({
   onLog: (line) => console.log(line),
 })
 let service: Awaited<ReturnType<typeof startService>>
-// 通知：决策在壳里（notify-policy），投递交给 Electrobun 的原生通道（无窗口时退到命令行）。
 try {
   service = await startService({
   clientVersion: CLIENT_VERSION,
@@ -260,6 +407,17 @@ try {
     console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
   },
   notifier,
+  // 「桌面通知」tab 的「自定义文件…」：Electrobun 原生文件选择器（旧壳 tauri-plugin-dialog 的等价物）
+  pickSoundFile: async () => {
+    const picked = await Utils.openFileDialog({
+      startingFolder: '~/',
+      allowedFileTypes: 'wav,mp3,ogg',
+      canChooseFiles: true,
+      canChooseDirectory: false,
+      allowsMultipleSelection: false,
+    })
+    return picked[0] ?? null
+  },
   // 页面请求关窗（`close_current_window` / `exit_window_instance`）：走窗口自己的关闭流程
   onCloseWindow: () => {
     mainWindow?.close()

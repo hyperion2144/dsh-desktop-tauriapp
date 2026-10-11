@@ -7,13 +7,14 @@
 import type { DesktopSettings, DshMode, RuntimeSource } from '../shared/settings.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.ts'
-import { serializeSettings } from '../shared/settings.ts'
+import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcHandler } from './rpc.ts'
-import type { Notifier } from './notifications.ts'
+import { listSounds, type Notifier } from './notifications.ts'
 
 export interface CommandDeps {
   home: string
-  profile: string
+  /** 当前 profile；可以是取值函数——壳里切了 profile 之后面板得看到新的那个 */
+  profile: string | (() => string)
   /** 'darwin' | 'win32' | 'linux'（旧壳 `desktop_platform_tag()`） */
   platform: string
   log: (line: string) => void
@@ -35,6 +36,12 @@ export interface CommandDeps {
   closeWindow?: () => void
   /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
   playSound?: (name: string) => void
+  /** 系统默认提示音的试听（旧壳 `preview_notification_sound("default")`） */
+  playSystemSound?: () => void
+  /** 弹原生文件选择器选音频（返回绝对路径或 null；旧壳 tauri-plugin-dialog） */
+  pickSoundFile?: () => Promise<string | null>
+  /** 把音频文件收进 `$DSH_HOME/sounds/`，返回入库文件名（旧壳 sounds::import_file） */
+  importSound?: (path: string) => string
   notifier?: Notifier
   /** 运行时快照：来源 / 内置版本 / 已装列表 / 外部 dsh 路径（命令表不自己碰文件系统） */
   runtime?: () => RuntimeSnapshot
@@ -79,8 +86,6 @@ const NOT_PORTED: Record<string, string> = {
   confirm_startup_profile: '启动 profile 确认流程尚未移植',
   get_pending_active_profile: '启动 profile 确认流程尚未移植',
   test_proxy_connectivity: '代理连通性测试尚未移植',
-  choose_notification_sound: '音效文件选择器尚未移植',
-  import_notification_sound: '音效导入尚未移植',
   start_blob_download: '下载管理器尚未移植',
   save_blob_chunk: '下载管理器尚未移植',
   finish_blob_download: '下载管理器尚未移植',
@@ -93,6 +98,11 @@ const NOT_PORTED: Record<string, string> = {
   browser_guest_release_all: '浏览器 guest 尚未移植',
 }
 
+/** profile 可以是静态值（单测）或取值函数（壳里跟着托盘切 profile 变） */
+function profileOf(deps: CommandDeps): string {
+  return typeof deps.profile === 'function' ? deps.profile() : deps.profile
+}
+
 export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler> {
   const handlers: Record<string, RpcHandler> = {
     // ---- 渲染环境：客户端插件的第一步；回 undefined 会让整片桌面 chrome 不激活 ----
@@ -102,9 +112,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         // 旧壳有 compatibility / advanced 两档；新壳只有 advanced（自绘 chrome 是唯一形态）
         mode: 'advanced',
         platform: deps.platform,
-        profile: deps.profile,
-        // 视觉窗口化已整块删除（#200 收尾），恒 false，别让面板把它当开关回填成「开」
-        renderBudget: false,
+        profile: profileOf(deps),
         dshMode: settings.dshMode ?? 'builtin',
       }
     },
@@ -124,7 +132,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         port: upstreamPort,
         origin,
         profiles: [
-          { name: deps.profile, active: true, selectable: true },
+          { name: profileOf(deps), active: true, selectable: true },
         ],
         // 面板的 nsGet() 读这一段（旧壳只回吐扁平键，那段其实是死的）
         settings: serializeSettings(settings),
@@ -243,7 +251,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const settings = deps.settings()
       return [
         {
-          profile: deps.profile,
+          profile: profileOf(deps),
           port: ports?.port ?? 0,
           lane_port: ports?.lanePort ?? 0,
           running: true,
@@ -252,7 +260,7 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     },
 
     list_profile_dependency_status: () => {
-      return [{ profile: deps.profile, ready: true, note: '依赖树来自当前运行时（#209 reconcile）' }]
+      return [{ profile: profileOf(deps), ready: true, note: '依赖树来自当前运行时（#209 reconcile）' }]
     },
 
     // ---- 下载 tab：管理器本体还没移植，但先给空列表而不是报错 ----
@@ -269,10 +277,27 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     },
 
     // ---- 通知 tab ----
-    get_notifications_state: () => ({
-      config: deps.settings().notifications,
-      permission: 'granted',
-    }),
+    get_notifications_state: () => {
+      const config = deps.settings().notifications
+      const chosen = config.scenarios ?? {}
+      return {
+        // 旧壳在 macOS 上问 UNUserNotificationCenter 要授权状态；Electrobun 没暴露这个查询面，
+        // 授权由原生层在第一条通知时申请（申请失败后的回落会写日志，见 notifications.ts）。
+        permission: 'granted',
+        config,
+        // 14 条场景的元数据（唯一事实源＝shared/settings.ts 的 NOTIFICATION_SCENARIOS）
+        scenarios: NOTIFICATION_SCENARIOS.map((meta) => ({
+          id: meta.id,
+          group: meta.group,
+          name: meta.name,
+          desc: meta.desc,
+          defaultOn: meta.defaultOn,
+          config: chosen[meta.id] ?? null,
+        })),
+        groups: NOTIFICATION_GROUPS,
+        sounds: listSounds(deps.home),
+      }
+    },
     set_notifications_config: (args) => {
       const config = args.config
       if (typeof config !== 'object' || config === null || Array.isArray(config)) {
@@ -281,14 +306,38 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const next = deps.save({ notifications: config })
       return { config: next.notifications }
     },
-    request_notification_permission_cmd: () => ({ granted: true }),
+    request_notification_permission_cmd: () => {
+      // 新壳没有系统授权状态的查询面（Electrobun 未暴露 UNUserNotificationCenter）：授权由原生层
+      // 在第一条通知时申请。这里如实说明，不让面板以为我们查过系统。
+      deps.log('[notify] 权限：由系统在第一条通知时申请（新壳无查询面，按可用上报）')
+      return { granted: true, prompted: false }
+    },
+    // 试听：旧壳 `preview_notification_sound(sound)`——`none` 无操作、`default` 播系统音、
+    // `custom:<名>`（或裸名）播 `$DSH_HOME/sounds/<名>`；客户端传的是 `{ sound }`。
     preview_notification_sound: (args) => {
-      const name = argString(args, 'name')
-      if (name !== '') {
-        deps.playSound?.(name)
-        return { played: name }
+      const raw = argString(args, 'sound') || argString(args, 'name')
+      const sound = raw.startsWith('custom:') ? raw.slice('custom:'.length) : raw
+      deps.log(`[notify] 试听请求：sound = ${sound === '' ? '(空)' : sound}`)
+      if (sound === '' || sound === 'none') {
+        deps.log('[notify] 试听：none/空 ⇒ 不响')
+        return { played: null, sound }
       }
-      return { played: null }
+      if (sound === 'default') {
+        deps.playSystemSound?.()
+        return { played: 'default', sound }
+      }
+      deps.playSound?.(sound)
+      return { played: sound, sound }
+    },
+    // 选文件（返回路径，由 import_notification_sound 收进 sounds/）
+    choose_notification_sound: async () => (await deps.pickSoundFile?.()) ?? null,
+    import_notification_sound: (args) => {
+      const path = argString(args, 'path')
+      if (path === '') throw new Error('import_notification_sound: path 不能为空')
+      if (deps.importSound === undefined) {
+        throw new Error('import_notification_sound: 壳未接音效导入')
+      }
+      return deps.importSound(path)
     },
 
     // ---- 杂项：诊断与外链 ----

@@ -21,12 +21,15 @@ import { stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
-import { createNotifier, type Notifier } from './notifications.ts'
+import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
 import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
 import { updateSettings } from './settings-store.ts'
+import type { RuntimeDownloadStatus } from './runtime-install.ts'
+import type { CatalogEntry } from '../shared/runtime-catalog.ts'
+import type { RuntimeSource } from '../shared/settings.ts'
 import {
   externalPackageRoot,
   externalVersion,
@@ -66,6 +69,8 @@ export interface ServiceOptions {
   settings?: DesktopSettings
   /** 通知器（index.ts 注入 Electrobun 原生通道；缺省走命令行兜底） */
   notifier?: Notifier
+  /** 弹原生文件选择器选音频（index.ts 注入；缺省返回 null） */
+  pickSoundFile?: () => Promise<string | null>
 }
 
 export interface ShellState {
@@ -99,6 +104,20 @@ export interface ShellService {
   stop: () => Promise<void>
   /** 手动重启宿主（守护器会接住退出并把服务面切到新宿主） */
   restartHost: () => Promise<void>
+  /** 就地按另一个 profile 重启 dsh：页面 origin 不变（旧壳 `switch-profile-<name>` 语义） */
+  switchProfile: (profile: string) => Promise<void>
+  /** 当前生效设置（托盘这类壳侧调用方读它） */
+  settings: () => DesktopSettings
+  /** 改设置：与命令表同一条写盘路径（落盘 + 刷新状态文件） */
+  save: (patch: Record<string, unknown>) => DesktopSettings
+  /** 运行时快照（来源 / 内置版本 / 已装列表 / 外部 dsh） */
+  runtime: () => RuntimeSnapshot
+  /** 拉版本目录（失败不抛，回 {entries, error}） */
+  fetchCatalog: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
+  /** 下载进度（托盘与设置面板共用同一个单飞状态） */
+  downloadStatus: () => RuntimeDownloadStatus
+  /** 下载并安装一个运行时（单飞） */
+  download: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -188,14 +207,18 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   })
 
   // ---- profile 树 reconcile：空 DSH_HOME 下也把运行时树摊进 profile（#209）----
-  const profileDir = `${paths.home}/profiles/${paths.profile}`
-  const profileModules = `${profileDir}/node_modules`
-  const reconcileProfile = (): void => {
-    mkdirSync(profileModules, { recursive: true })
-    reconcileProfileTree({ runtimeModules: `${paths.runtimeDir}/node_modules`, profileModules, onLog: log })
+  const reconcileProfileFor = (profile: string): void => {
+    const modules = `${paths.home}/profiles/${profile}/node_modules`
+    mkdirSync(modules, { recursive: true })
+    reconcileProfileTree({
+      runtimeModules: `${paths.runtimeDir}/node_modules`,
+      profileModules: modules,
+      onLog: log,
+    })
   }
+  const reconcileProfile = (): void => reconcileProfileFor(paths.profile)
   // 已有 profile 就先摊平；空的留给 dsh 自己脚手架（它要求目标目录不存在），首启完成后再摊。
-  if (existsSync(`${profileDir}/package.json`)) reconcileProfile()
+  if (existsSync(`${paths.home}/profiles/${paths.profile}/package.json`)) reconcileProfile()
 
   // ---- 页面 origin 端口：固定 + 被占顺延（origin 是 localStorage 的隔离键）----
   const readClaims = async (): Promise<string> => {
@@ -224,6 +247,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     }
   })
   const previous = claimFor(claims, paths.profile)
+  // 页面 origin 的认定 key：切 profile 不换 origin（localStorage 的隔离键就是它）
+  const claimProfile = paths.profile
   const pagePort = choosePort({
     requested: Number(env.DSH_SHELL_PAGE_PORT ?? '') || undefined,
     lastClaimed: previous?.port,
@@ -232,12 +257,21 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
   // 上游 dsh 端口（旧壳 `port_for_profile` + `DSH_DESKTOP_PORT`）：手机访问插件靠它找上游；
   // 固定端口而不是 `--port 0`，与旧壳一致（3080 web / 3081 desktop），被占就顺延并在日志里说清楚。
+  // lane 端口先算：上游顺延时不能顺手把手机 lane 要占的端口抢走（两个都绑 127.0.0.1）
+  let lanePort = profileLanePort(settings, paths.profile, env)
   const intendedUpstream = profilePort(settings, paths.profile, env)
-  const upstreamPort = portFree(intendedUpstream)
+  const upstreamFree = (port: number): boolean => port !== lanePort && portFree(port)
+  const pickedUpstream = upstreamFree(intendedUpstream)
     ? intendedUpstream
-    : choosePort({ requested: intendedUpstream, base: intendedUpstream + 1, span: 20, isFree: portFree })
-  if (upstreamPort === null) throw new Error('dsh 上游端口池已耗尽')
-  const lanePort = profileLanePort(settings, paths.profile, env)
+    : choosePort({
+        requested: intendedUpstream,
+        base: intendedUpstream + 1,
+        span: 20,
+        isFree: upstreamFree,
+      })
+  if (pickedUpstream === null) throw new Error('dsh 上游端口池已耗尽')
+  // let：切 profile 时就地换掉（守护器重启宿主时读的是这里）
+  let upstreamPort: number = pickedUpstream
   log(`端口：页面 origin ${String(pagePort)} | dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
   options.onStage?.('ports')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
@@ -323,7 +357,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     env,
     log,
   })
-  const patchFiles = [staged.injectFile]
+  let patchFiles = [staged.injectFile]
   let host!: Awaited<ReturnType<typeof startHost>>
   let cookie = ''
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
@@ -343,7 +377,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     } catch (error) {
       // 首次启动：dsh 刚把 profile 脚手架（cordis.yml/package.json）落盘，但依赖树还是空的，
       // 插件会整片 failed to import。摊平 profile 树后按 existing 重试一次——只在首启发生。
-      if (hostMode !== 'fresh' || !existsSync(`${profileDir}/package.json`)) throw error
+      if (
+        hostMode !== 'fresh' ||
+        !existsSync(`${paths.home}/profiles/${paths.profile}/package.json`)
+      ) {
+        throw error
+      }
       log('首次启动：profile 已建立但依赖树为空，摊平 profile 树后重试')
       reconcileProfile()
       host = await startHost({
@@ -426,7 +465,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const pageUrl = `${server.origin}/${token}/`
 
   claims = upsertClaim(claims, {
-    profile: paths.profile,
+    profile: claimProfile,
     port: pagePort,
     pid: process.pid,
     startedAt: new Date().toISOString(),
@@ -520,10 +559,25 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
 
+  // 写设置的唯一路径：命令表（设置面板）与壳侧（托盘切运行时）都走它
+  const saveSettings = (patch: Record<string, unknown>): DesktopSettings => {
+    liveSettings = updateSettings(home, patch, log)
+    state.settings = liveSettings
+    state.settingsProvenance = { created: false, migrated: false, recovered: false }
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+    return liveSettings
+  }
   const service: ShellService = {
     state,
     paths,
     server,
+    settings: () => liveSettings,
+    save: saveSettings,
+    runtime: () => runtimeSnapshot(),
+    fetchCatalog: (source) =>
+      fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
+    downloadStatus: () => downloader.status(),
+    download: (version, source) => downloader.start(version, source),
     restartHost: async () => {
       if (stopping) return
       // 设置面板切了 dsh 来源/运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
@@ -547,6 +601,60 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
       await host.stop()
     },
+    // 就地换 profile：新 profile 的脚手架/依赖树/注入清单/端口全部重算，然后杀宿主，
+    // 守护器带着新 profile 重启；页面 origin 不变（同一个 token 与端口，localStorage 不换桶）。
+    switchProfile: async (profile) => {
+      if (stopping) return
+      const target = profile.trim()
+      if (target === '' || target === paths.profile) return
+      log(`切换 profile：${paths.profile} → ${target}`)
+      // 落盘键名按旧壳：active_profile（normalizeSettings 同时认驼峰与下划线）
+      liveSettings = saveSettings({ active_profile: target })
+      Object.assign(
+        paths,
+        layout({
+          env,
+          profile: target,
+          mode: liveSettings.dshMode,
+          preferred: liveSettings.dshRuntime,
+        })
+      )
+      serverOptions.distDir = paths.distDir
+      const scaffold = scaffoldProfile(home, target)
+      if (scaffold.created.length > 0) {
+        log(`profile 脚手架：写入 ${scaffold.created.join('、')}（${target}）`)
+      }
+      reconcileProfileFor(target)
+      const staged = stagePlugins({
+        home,
+        profile: target,
+        appSupport: paths.appSupport,
+        paths: { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir },
+        ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
+        muxHeartbeatMs: liveSettings.muxHeartbeatMs,
+        desktopLayoutOnPhones: liveSettings.desktopLayoutOnPhones,
+        env,
+        log,
+      })
+      patchFiles = [staged.injectFile]
+      const nextLane = profileLanePort(liveSettings, target, env)
+      const intended = profilePort(liveSettings, target, env)
+      const free = (port: number): boolean => port !== nextLane && portFree(port)
+      const nextUpstream = free(intended)
+        ? intended
+        : choosePort({ requested: intended, base: intended + 1, span: 20, isFree: free })
+      if (nextUpstream === null) throw new Error('dsh 上游端口池已耗尽')
+      upstreamPort = nextUpstream
+      lanePort = nextLane
+      state.profile = paths.profile
+      state.runtimeDir = paths.runtimeDir
+      state.distDir = paths.distDir
+      state.upstreamPort = upstreamPort
+      state.lanePort = lanePort
+      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+      log(`新 profile 端口：dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
+      await host.stop()
+    },
     stop: async () => {
       stopping = true
       dshStatusCode = 6
@@ -559,7 +667,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         await host.stop()
       } catch {}
       forgetHosts()
-      const next = releaseClaim(parseClaims(JSON.stringify(claims)), paths.profile)
+      const next = releaseClaim(parseClaims(JSON.stringify(claims)), claimProfile)
       try {
         await Bun.write(claimsFile, `${JSON.stringify(next, null, 2)}\n`)
       } catch {}
@@ -569,17 +677,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   rpcRouter = createRpcRouter(
     createCommandTable({
       home,
-      profile: paths.profile,
+      profile: () => paths.profile,
       platform: options.platform ?? process.platform,
       log,
       settings: () => liveSettings,
-      save: (patch) => {
-        liveSettings = updateSettings(home, patch, log)
-        state.settings = liveSettings
-        state.settingsProvenance = { created: false, migrated: false, recovered: false }
-        void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-        return liveSettings
-      },
+      save: saveSettings,
       restartService: () => service.restartHost(),
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, lanePort }),
@@ -588,6 +690,22 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       playSound: (name) => {
         notifier.previewSound(name)
       },
+      playSystemSound: () => {
+        const command = systemDefaultSoundCommand(options.platform ?? process.platform)
+        if (command === null) {
+          log('[notify] 系统默认提示音只在 macOS 上试听')
+          return
+        }
+        try {
+          const child = Bun.spawn(command, { stdout: 'ignore', stderr: 'ignore' })
+          child.unref?.()
+          log(`[notify] 试听系统提示音：${command.join(' ')}（pid = ${String(child.pid)}）`)
+        } catch (error) {
+          log(`[notify] 系统音试听失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      },
+      pickSoundFile: options.pickSoundFile,
+      importSound: (path) => importSoundFile(home, path),
       notifier,
       dshStatus: () => dshStatusCode,
       dshVersion: () => paths.runtimeVersion ?? basename(paths.runtimeDir),

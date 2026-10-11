@@ -146,7 +146,8 @@ describe('命令表', () => {
       expect(env.mode).toBe('advanced')
       expect(env.platform).toBe('darwin')
       expect(env.profile).toBe('desktop')
-      expect(env.renderBudget).toBe(false)
+      // 视觉窗口化整块删除（换壳后不需要）：载荷里不再有这个键
+      expect(env).not.toHaveProperty('renderBudget')
     } finally {
       h.cleanup()
     }

@@ -5,11 +5,13 @@ import { join } from 'node:path'
 
 import {
   TRAY_MENU_ACTIONS,
+  TRAY_RUNTIME_FETCH_LIMIT,
   type TrayMenuItem,
   type TrayState,
   orderedProfiles,
   parseTrayAction,
   profileAction,
+  runtimeMenuItems,
   trayMenu,
   trayTitle,
 } from '../src/bun/tray-menu.ts'
@@ -45,6 +47,13 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   profiles: ['desktop'],
   hostRunning: true,
   runtimeLabel: '内置 0.2.1-alpha.2',
+  mode: 'builtin',
+  builtinVersion: '0.2.1-alpha.2',
+  selected: null,
+  installed: [],
+  catalog: [],
+  externalAvailable: false,
+  downloading: null,
   ...overrides,
 })
 
@@ -89,8 +98,8 @@ describe('trayMenu', () => {
     const items = trayMenu(baseState({ profile: 'web', profiles: ['web', 'app'] }))
     expect(items.filter((item) => item.type === 'divider').length).toBe(2)
     const actionable = items.filter((item): item is NormalItem => isNormal(item) && item.action !== undefined)
-    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有两个
-    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口'].sort())
+    // 子菜单父项只挂 submenu、不带 action；真正可点的顶层动作只有三个
+    expect(actionable.map((item) => item.label).sort()).toEqual(['退出', '隐藏窗口', '重启 dsh 服务'].sort())
   })
 })
 
@@ -98,15 +107,31 @@ describe('parseTrayAction', () => {
   test('解析三条动作', () => {
     expect(parseTrayAction(TRAY_MENU_ACTIONS.toggleWindow)).toEqual({ kind: 'toggle-window' })
     expect(parseTrayAction(TRAY_MENU_ACTIONS.quit)).toEqual({ kind: 'quit' })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.restartService)).toEqual({ kind: 'restart-service' })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeBuiltin)).toEqual({
+      kind: 'switch-runtime',
+      mode: 'builtin',
+    })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeExternal)).toEqual({
+      kind: 'switch-runtime',
+      mode: 'external',
+    })
+    expect(parseTrayAction(`${TRAY_MENU_ACTIONS.runtimeVersionPrefix}0.2.1-alpha.1`)).toEqual({
+      kind: 'switch-runtime',
+      version: '0.2.1-alpha.1',
+    })
+    expect(parseTrayAction(`${TRAY_MENU_ACTIONS.runtimeFetchPrefix}0.2.0-rc.2`)).toEqual({
+      kind: 'download-runtime',
+      version: '0.2.0-rc.2',
+    })
     expect(parseTrayAction(profileAction('web'))).toEqual({ kind: 'select-profile', profile: 'web' })
   })
+})
 
-  test('未知动作与空 profile 都返回 null', () => {
-    expect(parseTrayAction(undefined)).toBeNull()
-    expect(parseTrayAction(null)).toBeNull()
-    expect(parseTrayAction('')).toBeNull()
-    expect(parseTrayAction('tray:other')).toBeNull()
-    expect(parseTrayAction(TRAY_MENU_ACTIONS.profilePrefix)).toBeNull()
+describe('parseTrayAction 的前缀边界', () => {
+  test('前缀后面什么都没有就回 null，不造出空版本', () => {
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeVersionPrefix)).toBeNull()
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.runtimeFetchPrefix)).toBeNull()
   })
 })
 
@@ -121,6 +146,76 @@ describe('orderedProfiles', () => {
 
   test('当前不在列表里也补上', () => {
     expect(orderedProfiles({ profile: 'desktop', profiles: [] })).toEqual(['desktop'])
+  })
+})
+
+describe('runtimeMenuItems（托盘里的运行时来源切换）', () => {
+  test('默认只用内置树：内置打勾，不列外部也不列已装版本', () => {
+    expect(labels(runtimeMenuItems(baseState()))).toEqual(['✓ 内置 0.2.1-alpha.2（随安装包）'])
+  })
+
+  test('内置版本未知时文案退成「版本未知」', () => {
+    const items = runtimeMenuItems(baseState({ builtinVersion: null }))
+    expect(findItem(items, '内置（随安装包，版本未知）')?.checked).toBe(true)
+  })
+
+  test('外部 dsh 只在系统里真能找到时才列', () => {
+    expect(findItem(runtimeMenuItems(baseState()), '外部 dsh（DSH_BIN / PATH）')).toBeUndefined()
+    const items = runtimeMenuItems(baseState({ externalAvailable: true }))
+    expect(findItem(items, '外部 dsh（DSH_BIN / PATH）')?.action).toBe(TRAY_MENU_ACTIONS.runtimeExternal)
+  })
+
+  test('mode=external 时外部打勾、内置不打勾', () => {
+    const items = runtimeMenuItems(baseState({ mode: 'external', externalAvailable: true }))
+    expect(findItem(items, '外部 dsh（DSH_BIN / PATH）')?.checked).toBe(true)
+    expect(findItem(items, '内置 0.2.1-alpha.2（随安装包）')?.checked).toBe(false)
+  })
+
+  test('已下载版本按版本号倒序，且跳过与内置同号的', () => {
+    const items = runtimeMenuItems(
+      baseState({ installed: ['0.2.1-alpha.1', '0.2.0-rc.2', '0.2.1-alpha.2'] })
+    )
+    expect(labels(items)).toEqual(['✓ 内置 0.2.1-alpha.2（随安装包）', '0.2.1-alpha.1', '0.2.0-rc.2'])
+    expect(findItem(items, '0.2.1-alpha.1')?.action).toBe(
+      `${TRAY_MENU_ACTIONS.runtimeVersionPrefix}0.2.1-alpha.1`
+    )
+  })
+
+  test('选中已下载版本：那一行打勾、内置不再打勾', () => {
+    const items = runtimeMenuItems(
+      baseState({ installed: ['0.2.1-alpha.1'], selected: '0.2.1-alpha.1' })
+    )
+    expect(findItem(items, '0.2.1-alpha.1')?.checked).toBe(true)
+    expect(findItem(items, '内置 0.2.1-alpha.2（随安装包）')?.checked).toBe(false)
+  })
+
+  test('目录里未装的列成「↓ 下载并切换」，最多 5 条且不与已装重复', () => {
+    // 目录是壳按版本倒序给的；这里照同一个顺序摆
+    const catalog = [
+      { version: '0.2.1-alpha.1', channel: 'alpha' },
+      { version: '0.2.0', channel: 'latest' },
+      { version: '0.1.9', channel: 'latest' },
+      { version: '0.1.8', channel: 'latest' },
+      { version: '0.1.7', channel: 'latest' },
+      { version: '0.1.6', channel: 'latest' },
+      { version: '0.1.5', channel: 'latest' },
+    ]
+    const items = runtimeMenuItems(baseState({ installed: ['0.2.0'], catalog }))
+    const fetchRows = labels(items).filter((label) => label.startsWith('↓ 下载并切换'))
+    expect(fetchRows.length).toBe(TRAY_RUNTIME_FETCH_LIMIT)
+    expect(fetchRows).not.toContain('↓ 下载并切换 0.2.0（latest）')
+    expect(findItem(items, '↓ 下载并切换 0.2.1-alpha.1（alpha）')?.action).toBe(
+      `${TRAY_MENU_ACTIONS.runtimeFetchPrefix}0.2.1-alpha.1`
+    )
+  })
+
+  test('下载中：那一条带「（下载中…）」且不可点，目录项全部禁用', () => {
+    const items = runtimeMenuItems(
+      baseState({ downloading: '0.2.1-alpha.1', catalog: [{ version: '0.2.0', channel: 'latest' }] })
+    )
+    const row = findItem(items, '0.2.1-alpha.1（下载中…）')
+    expect(row?.enabled).toBe(false)
+    expect(findItem(items, '↓ 下载并切换 0.2.0（latest）')?.enabled).toBe(false)
   })
 })
 

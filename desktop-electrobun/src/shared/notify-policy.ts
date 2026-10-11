@@ -159,6 +159,35 @@ export function hasAllowedSoundExtension(name: string): boolean {
   return (SOUND_EXTENSIONS as readonly string[]).includes(ext)
 }
 
+/** 白名单扩展名 → 允许的文件头魔数（旧壳 `sounds::ALLOWED`，逐条对齐）。 */
+export const SOUND_FORMATS: ReadonlyArray<readonly [string, ReadonlyArray<ReadonlyArray<number>>]> = [
+  ['wav', [[0x52, 0x49, 0x46, 0x46]]], // RIFF
+  [
+    'mp3',
+    [
+      [0x49, 0x44, 0x33], // ID3
+      [0xff, 0xfb],
+      [0xff, 0xf3],
+      [0xff, 0xfa],
+      [0xff, 0xf2],
+    ],
+  ],
+  ['ogg', [[0x4f, 0x67, 0x67, 0x53]]], // OggS
+]
+
+/**
+ * 文件头魔数是否与扩展名相符（旧壳 `validate_format`）：扩展名不在白名单、或头几个字节
+ * 对不上任何魔数都算不合格——防「改个后缀当音效」与坏文件。
+ */
+export function soundFormatMatches(name: string, head: Uint8Array): boolean {
+  const dot = name.lastIndexOf('.')
+  if (dot <= 0) return false
+  const ext = name.slice(dot + 1).toLowerCase()
+  const entry = SOUND_FORMATS.find(([candidate]) => candidate === ext)
+  if (entry === undefined) return false
+  return entry[1].some((magic) => magic.every((byte, index) => head[index] === byte))
+}
+
 /** 音效目录：`$DSH_HOME/sounds/`（旧壳 `sounds_dir()`）。 */
 export function soundsDir(home: string): string {
   return `${home}/sounds`

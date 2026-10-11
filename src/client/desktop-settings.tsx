@@ -59,8 +59,6 @@ interface DesktopData {
   mux_heartbeat_ms?: number | null
   /** #147 路线 A：手机端是否改用桌面布局 */
   desktop_layout_on_phones?: boolean | null
-  /** #147 路线 B：桌面是否启用视觉窗口化（缺省 true；关掉可排除它带来的观感差异） */
-  desktop_render_budget?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
   prevent_sleep?: boolean | null
 }
@@ -323,7 +321,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
-  const [desktopRenderBudget, setDesktopRenderBudget] = useState(true)
   // #186：有会话在跑时阻止系统休眠（缺省开）
   const [preventSleep, setPreventSleep] = useState(true)
   const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
@@ -331,7 +328,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
   useEffect(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
-    setDesktopRenderBudget(desktop.desktop_render_budget !== false)
     setPreventSleep(desktop.prevent_sleep !== false)
     const hb = desktop.mux_heartbeat_ms
     setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
@@ -491,7 +487,6 @@ function DesktopSettingsPanel(): React.ReactElement {
           port: (ns.port as number) || d.port || 3080,
           mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
-          desktop_render_budget: d.desktop_render_budget ?? null,
           prevent_sleep: d.prevent_sleep ?? null,
         })
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
@@ -725,17 +720,6 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
   }
 
-  /** #147 路线 B：桌面视觉窗口化开关（即时保存；**下次启动桌面壳客户端生效**）。 */
-  const handleToggleRenderBudget = (next: boolean): void => {
-    setDesktopRenderBudget(next)
-    void nsSave({ desktop_render_budget: next }).then(() =>
-      setDownloadBoxNote(
-        next
-          ? '已保存：桌面启用视觉窗口化（缓解页面内存导致的自动刷新），下次启动生效。'
-          : '已保存：桌面关闭视觉窗口化，下次启动生效。'
-      )
-    )
-  }
 
   /** #186：防休眠开关（即时保存；壳侧状态机立刻生效，不需要重启）。 */
   const handleTogglePreventSleep = (next: boolean): void => {
@@ -1547,15 +1531,6 @@ function DesktopSettingsPanel(): React.ReactElement {
               onChange={(e) => setDesktopLayoutOnPhones(e.target.checked)}
             />
             手机端改用桌面布局（不加载移动布局插件）
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="checkbox"
-              data-desktop-settings="desktop-render-budget"
-              checked={desktopRenderBudget}
-              onChange={(e) => handleToggleRenderBudget(e.target.checked)}
-            />
-            桌面启用视觉窗口化（缓解页面内存导致的自动刷新；缺省开）
           </label>
           <PfBtn variant="ghost" onClick={handleSaveMobileLayout}>保存</PfBtn>
         </div>

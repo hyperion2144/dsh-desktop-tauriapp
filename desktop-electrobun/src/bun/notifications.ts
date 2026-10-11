@@ -9,7 +9,7 @@
 //
 // 不做的事（与规格一致）：通知**点击回调**（Electrobun 上游 #384 未支持）、通知中心去重。
 
-import { existsSync, statSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import {
   decide,
   hasAllowedSoundExtension,
@@ -17,6 +17,7 @@ import {
   localHm,
   MAX_SOUND_BYTES,
   MAX_SOUND_SECONDS,
+  soundFormatMatches,
   soundsDir,
   type NotifyDecision,
 } from '../shared/notify-policy.ts'
@@ -71,9 +72,70 @@ export function shellNotificationCommand(
   return null
 }
 
+/** `$DSH_HOME/sounds/` 下已入库的音效文件名（设置 tab 的下拉用；按名字排序）。 */
+export function listSounds(home: string): string[] {
+  try {
+    return readdirSync(soundsDir(home))
+      .filter((name) => hasAllowedSoundExtension(name))
+      .filter((name) => {
+        try {
+          return statSync(`${soundsDir(home)}/${name}`).isFile()
+        } catch {
+          return false
+        }
+      })
+      .sort()
+  } catch {
+    // 目录不存在＝还没有自定义音，不是错误
+    return []
+  }
+}
+
+/**
+ * 把一个外部音频文件收进 `$DSH_HOME/sounds/`（旧壳 `sounds::import_file`）：
+ * 文件名白名单 → 扩展名魔数 → 大小上限，逐关不过就抛，过了就拷贝，返回入库后的文件名。
+ */
+export function importSound(home: string, source: string): string {
+  const name = source.split('/').pop() ?? ''
+  if (name === '' || !isValidSoundName(name)) throw new Error(`音效文件名不合法：${name}`)
+  if (!hasAllowedSoundExtension(name)) {
+    throw new Error(`不支持的音效格式（白名单：wav / mp3 / ogg）：${name}`)
+  }
+  let size = 0
+  try {
+    const info = statSync(source)
+    if (!info.isFile()) throw new Error('不是普通文件')
+    size = info.size
+  } catch (error) {
+    throw new Error(`无法读取文件：${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (size > MAX_SOUND_BYTES) {
+    throw new Error(`文件 ${String(MAX_SOUND_BYTES / 1024 / 1024)}MB 上限，当前 ${String(size)} 字节`)
+  }
+  const head = new Uint8Array(readFileSync(source).subarray(0, 4))
+  if (!soundFormatMatches(name, head)) throw new Error('文件内容与扩展名不符（魔数校验失败）')
+  const dir = soundsDir(home)
+  mkdirSync(dir, { recursive: true })
+  copyFileSync(source, `${dir}/${name}`)
+  return name
+}
+
+/** 系统默认提示音（macOS：`afplay` 播系统音）——试听 `default` 档用。 */
+export function systemDefaultSoundCommand(platform: NodeJS.Platform): string[] | null {
+  if (platform !== 'darwin') return null
+  return ['afplay', '-t', String(MAX_SOUND_SECONDS), '/System/Library/Sounds/Ping.aiff']
+}
+
 export function createNotifier(options: NotifierOptions): Notifier {
   const log = options.onLog ?? ((): void => {})
   const platform = options.platform ?? process.platform
+  if (options.show === undefined) {
+    log(
+      `[notify] 未接原生通知（服务面 / 无窗口模式），回落到命令行${
+        platform === 'darwin' ? '（macOS 上会显示成「脚本编辑器」）' : ''
+      }`
+    )
+  }
   const appName = options.appName ?? 'DSH'
   const now = options.now ?? ((): Date => new Date())
 

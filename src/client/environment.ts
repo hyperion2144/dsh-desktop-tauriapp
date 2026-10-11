@@ -8,8 +8,6 @@ export type DesktopClientPlatform = 'darwin' | 'win32' | 'linux'
 export interface DesktopClientEnvironment {
   /** Active shell mode for this window lifetime. */
   mode: DesktopClientMode
-  /** 桌面渲染预算开关（壳下发；缺省视作开——它修的是“白屏+自动刷新”那个内存崩溃）。 */
-  renderBudget?: boolean
   /** Host platform used for native spacing and drag regions. */
   platform: DesktopClientPlatform
   /** 窗口所属 profile（#109：外壳侧边栏外链分流只在 desktop profile 生效）。 */
@@ -69,7 +67,5 @@ export async function requestDesktopClientEnvironment(): Promise<DesktopClientEn
     mode: env.mode,
     platform: env.platform,
     profile: typeof env.profile === 'string' ? env.profile : undefined,
-    // 渲染预算：壳下发才有值；缺省（未下发）由调用方视作**开**——它修的是实机内存崩溃。
-    renderBudget: typeof env.renderBudget === 'boolean' ? env.renderBudget : undefined,
   }
 }

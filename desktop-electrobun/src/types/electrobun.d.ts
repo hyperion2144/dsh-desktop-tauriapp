@@ -70,6 +70,14 @@ declare module 'electrobun/bun' {
     showNotification?(options: { title: string; body?: string; subtitle?: string; silent?: boolean }): void
     /** 系统浏览器 / 默认应用程序打开外链（FFI，成功返 true） */
     openExternal(url: string): boolean
+    /** 原生文件选择器（返回绝对路径数组；Electrobun `Utils.openFileDialog`） */
+    openFileDialog(options: {
+      startingFolder?: string
+      allowedFileTypes?: string
+      canChooseFiles?: boolean
+      canChooseDirectory?: boolean
+      allowsMultipleSelection?: boolean
+    }): Promise<string[]>
     clipboardWriteText(text: string): void
   }
 
