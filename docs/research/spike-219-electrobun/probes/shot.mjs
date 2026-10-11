@@ -1,0 +1,12 @@
+const targets = await (await fetch('http://127.0.0.1:9222/json')).json();
+const page = targets.find(t => t.type === 'page');
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+let id = 0; const pending = new Map();
+const send = (method, params = {}) => new Promise((res) => { const i = ++id; pending.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } };
+await new Promise((r) => { ws.onopen = r; });
+const shot = await send('Page.captureScreenshot', { format: 'png' });
+const path = process.argv[2] ?? '/tmp/spike-219/cef-page.png';
+await Bun.write(path, Buffer.from(shot.result.data, 'base64'));
+console.log('saved', path);
+ws.close();
