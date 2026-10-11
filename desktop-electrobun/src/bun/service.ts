@@ -4,7 +4,7 @@
 // 普通 bun 跑（无显示器、无 CEF 的 CI 也能跑），窗口是 index.ts 的事。
 
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
@@ -16,6 +16,8 @@ import { readHostRecords, sweepStaleHosts, upsertHostRecord, writeHostRecords } 
 import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 import { loadSettings } from './settings-store.ts'
+import { scaffoldProfile } from './profile-scaffold.ts'
+import { stagePlugins } from './plugin-staging.ts'
 import { activeProfile, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 
 export interface ServiceOptions {
@@ -166,6 +168,35 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const childEnv = loginShell.environment
 
   const hostMode = env.DSH_SHELL_PROFILE_MODE === 'fresh' ? 'fresh' : 'existing'
+
+  /** 选中运行时的版本号（目录名，如 0.2.1-alpha.2）：决定 connection 的两代 inject 契约 */
+  const runtimeVersion = basename(paths.runtimeDir)
+  // ---- profile 脚手架 + 插件 staging（都必须在起宿主之前，这次 spawn 就要能看到）----
+  // ① profile：上游 `loadProfile()` 只认「目录里已有 package.json」的 profile，缺了就报
+  //    `dsh: profile "desktop" does not exist`——全新 DSH_HOME 能起壳就是因为这一步。
+  const scaffold = scaffoldProfile(home, paths.profile)
+  if (scaffold.created.length > 0) {
+    log(`profile 脚手架：写入 ${scaffold.created.join('、')}（${paths.profile}）`)
+  }
+  // 新 profile 的依赖树：dsh 自己不会装（它只组合 bundles），所以按 #209 的做法把
+  // 运行时树的模块摊进 profile——否则首启后插件会整片 failed to import。
+  if (scaffold.created.includes('package.json')) {
+    reconcileProfile()
+    log(`profile 依赖树：已按运行时树摊平（${paths.profile}）`)
+  }
+  // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
+  const staged = stagePlugins({
+    home,
+    profile: paths.profile,
+    appSupport: paths.appSupport,
+    paths: { repoRoot: paths.repoRoot, resourcesDir: paths.resourcesDir },
+    ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
+    muxHeartbeatMs: settings.muxHeartbeatMs,
+    desktopLayoutOnPhones: settings.desktopLayoutOnPhones,
+    env,
+    log,
+  })
+  const patchFiles = [staged.injectFile]
   let host!: Awaited<ReturnType<typeof startHost>>
   let cookie = ''
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
@@ -177,6 +208,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: hostMode,
         env: childEnv,
         onLog: log,
+        patchFiles,
       })
     } catch (error) {
       // 首次启动：dsh 刚把 profile 脚手架（cordis.yml/package.json）落盘，但依赖树还是空的，
@@ -190,6 +222,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         mode: 'existing',
         env: childEnv,
         onLog: log,
+        patchFiles,
       })
     }
     log(`host ready | dsh = ${new URL(host.ready.url).origin} | injections = ${String(host.ready.injections.length)}`)

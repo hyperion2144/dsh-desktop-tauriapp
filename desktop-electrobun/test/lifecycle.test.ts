@@ -206,6 +206,8 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
       distDir: dir,
       preloadFile,
       hostScript,
+      repoRoot: dir,
+      resourcesDir: null,
     }
   }
 

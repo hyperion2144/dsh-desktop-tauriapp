@@ -13,7 +13,7 @@ export const REQUIRED_ENV_KEYS = [CLIENT_VERSION_KEY, 'DSH_PROFILE', 'DSH_HOME']
 export const OPTIONAL_ENV_KEYS = ['DSH_PROFILE_DIR', 'DSH_BUN_PRELOAD_TREES', 'NODE_PATH'] as const
 
 /** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
-export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID'] as const
+export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID', 'DSH_SHELL_PATCH_FILES'] as const
 
 /** 除环境变量外的资源条件（缝 ①/② 各有用例；这里显式写出来，避免只活在别人脑子里）。 */
 export const CHILD_RESOURCE_CONDITIONS = {
@@ -36,6 +36,8 @@ export interface ChildEnvInput {
   nodePath?: string | undefined
   /** 看门狗用的父 pid（壳自己的 pid）：壳崩溃/被 SIGKILL 后宿主能自己退出，不留孤儿 */
   parentPid?: number | undefined
+  /** `--patch` 注入清单（壳写好的覆盖层；缺省不给，宿主就用 dsh 默认行为） */
+  patchFiles?: string[]
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -54,6 +56,11 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   else delete env.NODE_PATH
   if (input.parentPid !== undefined) env.DSH_SHELL_PARENT_PID = String(input.parentPid)
   else delete env.DSH_SHELL_PARENT_PID
+  if (input.patchFiles !== undefined && input.patchFiles.length > 0) {
+    env.DSH_SHELL_PATCH_FILES = input.patchFiles.join(':')
+  } else {
+    delete env.DSH_SHELL_PATCH_FILES
+  }
   return env
 }
 

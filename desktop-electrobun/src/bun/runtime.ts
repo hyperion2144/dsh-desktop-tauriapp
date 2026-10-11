@@ -25,6 +25,10 @@ export interface ShellLayout {
   preloadFile: string
   /** 宿主脚本 */
   hostScript: string
+  /** 仓库根（开发态插件包与脚本的来源） */
+  repoRoot: string
+  /** 打包态资源根（`Contents/Resources`）；开发态为 null */
+  resourcesDir: string | null
 }
 
 export interface LayoutInput {
@@ -105,6 +109,14 @@ function packagedRoot(startDir: string): string | null {
   return null
 }
 
+/** 打包态的 `Contents/Resources`：只有在那里真的存在 `plugins/<壳插件>` 时才算数。 */
+function packagedResources(startDir: string): string | null {
+  for (const candidate of [resolve(startDir, '..', '..'), resolve(startDir, '..')]) {
+    if (existsSync(join(candidate, 'plugins', 'dsh-desktop-tauriapp', 'package.json'))) return candidate
+  }
+  return null
+}
+
 export function layout(input: LayoutInput = {}): ShellLayout {
   const env = input.env ?? process.env
   const home = dshHome(env)
@@ -128,7 +140,18 @@ export function layout(input: LayoutInput = {}): ShellLayout {
   const bundledPreload = join(projectRoot, 'runtime', 'bun-preload.mjs')
   const preloadFile = env.DSH_SHELL_PRELOAD ?? (existsSync(repoPreload) ? repoPreload : bundledPreload)
   const hostScript = env.DSH_SHELL_HOST_SCRIPT ?? join(projectRoot, 'runtime', 'dsh-host.mjs')
-  const result: ShellLayout = { home, profile, appSupport: appSupportDir(env), runtimeDir, dshLibDir, distDir, preloadFile, hostScript }
+  const result: ShellLayout = {
+    home,
+    profile,
+    appSupport: appSupportDir(env),
+    runtimeDir,
+    dshLibDir,
+    distDir,
+    preloadFile,
+    hostScript,
+    repoRoot,
+    resourcesDir: env.DSH_SHELL_RESOURCES ?? packagedResources(import.meta.dir),
+  }
   const missing = [
     ['dsh lib', dshLibDir],
     ['前端 dist', distDir],

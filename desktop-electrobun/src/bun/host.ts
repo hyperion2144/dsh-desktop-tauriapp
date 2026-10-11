@@ -24,6 +24,8 @@ export interface StartHostInput {
   env?: Record<string, string | undefined>
   onLog?: (line: string) => void
   timeoutMs?: number
+  /** `--patch` 注入清单（插件 staging 的产物；缺省不注入） */
+  patchFiles?: string[]
 }
 
 export interface HostHandle {
@@ -56,6 +58,7 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     preloadTrees: layout.runtimeDir,
     nodePath: `${layout.runtimeDir}/node_modules`,
     parentPid: process.pid,
+    patchFiles: input.patchFiles,
   })
   assertChildEnv(env)
 

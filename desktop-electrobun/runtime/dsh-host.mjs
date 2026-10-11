@@ -28,6 +28,17 @@ const require = createRequire(join(libDir, 'bin.js'))
 const boot = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-app-boot')).href)
 const { runProfile } = await import(pathToFileURL(join(libDir, 'profile-boot.js')).href)
 
+/** 壳交给我们的 `--patch` 清单（冒号分隔；空串 = 无注入）。 */
+function patchFiles() {
+  const raw = process.env.DSH_SHELL_PATCH_FILES ?? ''
+  const files = raw
+    .split(':')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+  if (files.length > 0) console.log(`[host] 注入清单：${files.join('、')}`)
+  return files
+}
+
 console.log(
   `[host] bun = ${process.versions.bun} | profile = ${profileName} | DSH_HOME = ${process.env.DSH_HOME ?? '(unset)'} | DSH_CLIENT_VERSION = ${process.env.DSH_CLIENT_VERSION ?? '(unset)'}`,
 )
@@ -36,7 +47,9 @@ const application = runProfile({
   environment: boot.loadLayeredEnv('dsh'),
   profile: profileName,
   ...(mode === 'fresh' ? { fromDefaultProfile: 'web' } : {}),
-  patchFiles: [],
+  // 注入清单：壳写好的 `--patch` 覆盖层（connection inject / 网关心跳 / 壳插件行）。
+  // 旧壳把同一份文件交给 dsh CLI 的 `--patch`；这里走 runProfile 的 patchFiles 入口。
+  patchFiles: patchFiles(),
   args: ['--no-open', '--host', '127.0.0.1', '--port', '0'],
 })
 
