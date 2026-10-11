@@ -3,6 +3,15 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **日志与诊断：有界轮转的壳日志 + 页面控制台镜像 + 一键导出诊断快照（#220 能力补齐）**：
+  - **壳日志现在会轮转**：以前是一行行 append 到 `$DSH_HOME/shell.log`，从不轮转（长跑必然无限涨）。现在按旧壳的两个好习惯（**本地时区**时间戳、单份 10 MB）加**固定份数**（当前 + 4 份历史 = 上限 50 MB，超过删最旧）；旧壳用 `tauri-plugin-log` 的 `KeepAll`，实测那台机器堆了 **90+ 份 ≈900 MB**——这次把「不封顶」换掉。
+  - **页面控制台现在真的进文件了（修了一个真 bug）**：客户端一直按 `{level, msg, pageUrl}` 调 `log_console`（`src/client/index.ts:63`），新壳却读 `message` ⇒ 字段对不上，**页面所有 console 都没落盘**（只写了一条 `(empty)`）。现在按旧壳 `desktop/src-tauri/src/commands.rs:139` 的契约实现：写 `$DSH_HOME/dsh-desktop-webview.log`，前缀逐字对齐（`[error]`/`[warn] `/`[info] `/`[debug]`/`[log]  `）、多行逐行加前缀、只有 warn/error 另镜像一份到壳日志（旧壳原话：控制台量大时不让壳日志噪声翻倍）。
+  - **诊断快照（旧壳没有这个面）**：`get_diagnostics` 回一个形状固定的 JSON——`summary`（一行摘要）/`shell`（应用版本、pid、启动时刻、uptime、locale）/`dsh`（profile、origin、页面/上游/lane 端口、宿主 pid、运行时种类与版本、dist、注入条数）/`settings`（路径、非默认项摘要、首启/迁移/损坏重建来源）/`views`（当前视图台账）/`downloads`/`notify`/`logs`（两份日志的路径、体积、历史份数 + 壳日志尾巴 80 行）/`process`（平台、arch、OS、Bun/Node 版本、CPU、内存）。`export_diagnostics` 写到 `<DSH_HOME>/diagnostics/diag-<本地时间戳>.json` 并在文件管理器里选中它，回 `{path, bytes}`。
+  - **设置面板多了「日志与诊断」卡**（`src/client/desktop-settings.tsx`）：显示摘要与壳日志路径，两个按钮「导出诊断」「显示日志路径」——用户报问题时点一下把文件发过来即可，不用在开发者工具里翻。
+  - **应用版本号单一来源**：`electrobun.config.ts` 的 `app.version` → 包内 `Resources/version.json`；壳按几个候选位置找它（dev 与打包态相对关系不同），找不到写 `unknown`（不编数字）。
+  - **测试**：新增 `test/log-file.test.ts`（14 例）与 `test/diagnostics.test.ts`（9 例），`test/rpc.test.ts` 补 3 例（客户端契约、未接时报清楚原因、接了回快照/路径）；全量 `bun test` **424 pass / 0 fail**（26 文件、1465 expect）。
+  - **实机证据（dev 实例，隔离 home，CDP 在真 CEF 窗口里验）**：页面 `console.warn` → `dsh-desktop-webview.log` 出现 `[warn]  [page=http://127.0.0.1:6461/tok-…/] 诊断探针…`，壳日志同步一条 `[page.warn]`；`get_diagnostics` 回 `summary = desktop · override 0.2.1-alpha.2 · 页面 6461 / 上游 6462 · 宿主 95123`、`shellLog = {path,bytes,rotated}`、`tail` 32 行、`appVersion = 0.1.0`；点「导出诊断」写出 `diag-20261012-000352.json`（1838 B）并弹「诊断已导出」；把壳日志外部灌到 10.5 MB 后再写一行 → 旧文件变成 `shell.log.1`、当前份只剩那一行（**真的会轮转**）。
+  - **已知取舍**：日志轮转按份数（不按天），也不压缩；诊断快照只含壳侧与日志尾巴，不含 dsh 自己的日志（dsh 的日志本来就在别处）；`get_diagnostics` 要 view token（终端 curl 会 403，用导出文件或页面按钮）。
 - **每视图授权：页面桥带令牌，壳按视图种类放行命令（#220 决策 12 的「授权层重建」，旧壳靠 Tauri capability 按窗口发权限）**：
   - **为什么要做**：旧壳的权限是 `capabilities/*.json` 按**窗口**给的（default 75 条 + remote-desktop 74 条）；新壳所有窗口**同源**（同一个 loopback origin，`http://127.0.0.1:<pagePort>`），只看 Origin + cookie 分不出「主窗」与「贴进来的网页」——一旦做 guest 浏览器/远程窗口，外来页面就能调全部 41 条命令（改设置、装/删运行时、迁移 profile、关窗）。
   - **做法**：主进程给每个窗口发一枚随机 view token（`createViewRegistry()`，纯内存、壳重启即失效），随该窗口的 preload 注入页面；页面桥（`__TAURI_INTERNALS__.invoke`）、boot 取载荷、外链、右键菜单**四个端点都带 `x-dsh-shell-view`**；壳侧查表得到视图种类，再按种类放行：`shell`（我们自己的页面）全放行，`guest`（外来网页）**只放行 `log_console` / `log_diag`**，其余命令回 403 + 可读原因并记一条日志。窗口关闭时按窗口标签批量撤销 token（旧壳的 capability 是静态文件，这里跟着窗口走）。

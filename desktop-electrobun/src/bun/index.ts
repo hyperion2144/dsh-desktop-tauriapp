@@ -17,6 +17,7 @@ import { APP_NAME } from '../shared/app.ts'
 import { appSupportDir, dshHome, trayImagePath } from './runtime.ts'
 import { acquireInstance, activateUrl, releaseInstance, updateInstance } from './single-instance.ts'
 import { createViewRegistry } from '../shared/view-grant.ts'
+import { resolveAppVersion } from './app-version.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from './splash.ts'
 import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
@@ -299,6 +300,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
     // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
     notifyBridge,
     views,
+    appVersion: resolveAppVersion(),
+    locale,
     pickSoundFile: pickSoundFileImpl,
     chooseDownloadDir: pickDownloadDirImpl,
     // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口

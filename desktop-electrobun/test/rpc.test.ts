@@ -322,11 +322,48 @@ describe('命令表', () => {
     }
   })
 
-  test('诊断日志：页面 console 走壳日志，不乱弹', async () => {
+  test('页面 console：按客户端契约 `{level,msg,pageUrl}` 交给 logPageConsole，不再丢字段', async () => {
+    const seen: { level: string; msg: string; pageUrl: string | null }[] = []
+    const h = harness({ logPageConsole: (input) => seen.push(input) })
+    try {
+      await h.table.log_console?.({ level: 'warn', msg: '来自页面', pageUrl: 'http://127.0.0.1:1/x' })
+      expect(seen).toEqual([{ level: 'warn', msg: '来自页面', pageUrl: 'http://127.0.0.1:1/x' }])
+      // 壳未接时退回老路：至少不报错、消息进壳日志
+      const bare = harness()
+      try {
+        await bare.table.log_console?.({ level: 'error', msg: '裸壳' })
+        expect(bare.calls.log.some((line) => line.includes('裸壳'))).toBe(true)
+      } finally {
+        bare.cleanup()
+      }
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('log_diag 进壳日志；get/export_diagnostics 未接时报清楚原因', async () => {
     const h = harness()
     try {
-      await h.table.log_console?.({ message: '来自页面' })
-      expect(h.calls.log.some((line) => line.includes('来自页面'))).toBe(true)
+      await h.table.log_diag?.({ msg: '外链被拦' })
+      expect(h.calls.log.some((line) => line.includes('[diag] 外链被拦'))).toBe(true)
+      // 同步抛（命令表直调），所以用 toThrow 而不是 rejects
+      expect(() => h.table.get_diagnostics?.({})).toThrow('壳未接诊断快照')
+      expect(() => h.table.export_diagnostics?.({})).toThrow('壳未接诊断导出')
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('接了诊断：get 回快照、export 回路径与字节数', async () => {
+    const h = harness({
+      diagnostics: () => ({ summary: 'desktop · installed 0.2.1-alpha.2' }),
+      exportDiagnostics: () => ({ path: '/home/.dsh/diagnostics/diag-1.json', bytes: 2048 }),
+    })
+    try {
+      const got = (await h.table.get_diagnostics?.({})) as { diagnostics: { summary: string } }
+      expect(got.diagnostics.summary).toContain('desktop')
+      const exported = (await h.table.export_diagnostics?.({})) as { path: string; bytes: number }
+      expect(exported).toEqual({ path: '/home/.dsh/diagnostics/diag-1.json', bytes: 2048 })
     } finally {
       h.cleanup()
     }

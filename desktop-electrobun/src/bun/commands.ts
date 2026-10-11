@@ -69,6 +69,12 @@ export interface CommandDeps {
   downloadDir?: string
   /** 下载管理器（`src/bun/downloads.ts`）；无窗口单测可以不接 */
   downloads?: DownloadManager | (() => DownloadManager | undefined)
+  /** 页面控制台一条消息（`log_console` 的客户端契约 `{level,msg,pageUrl}`；壳侧写 webview 日志） */
+  logPageConsole?: (input: { level: string; msg: string; pageUrl: string | null }) => void
+  /** 诊断快照（`get_diagnostics`；无窗口单测可不接） */
+  diagnostics?: () => Record<string, unknown>
+  /** 把诊断快照写到文件（`export_diagnostics`） */
+  exportDiagnostics?: (snapshot: Record<string, unknown>) => { path: string; bytes: number }
   /** 启动检查是否已确认过（旧壳 DshState.skip_startup_check，仅进程内） */
   startupChecked?: () => boolean
   /** 确认过启动检查（旧壳在 confirm_startup_profile 里置位） */
@@ -482,13 +488,31 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
     },
 
     // ---- 杂项：诊断与外链 ----
+    // 客户端契约是 `{ level, msg, pageUrl }`（旧壳 `commands.rs:139`）：写
+    // `$DSH_HOME/dsh-desktop-webview.log`，warn/error 另镜像到壳日志。
     log_console: (args) => {
-      deps.log(`[page] ${argString(args, 'message', '(empty)')}`)
+      const level = argString(args, 'level', 'log')
+      const msg = argString(args, 'msg', '')
+      const pageUrl = argString(args, 'pageUrl', '')
+      if (deps.logPageConsole !== undefined) deps.logPageConsole({ level, msg, pageUrl })
+      else deps.log(`[page.${level}] ${msg}`)
       return {}
     },
     log_diag: (args) => {
       deps.log(`[diag] ${argString(args, 'msg', '(empty)')}`)
       return {}
+    },
+    // 诊断快照 / 导出（#220「日志与诊断」）：一个 JSON 回答「哪版、哪个 profile、端口/pid、日志在哪」
+    get_diagnostics: () => {
+      const snapshot = deps.diagnostics?.() ?? null
+      if (snapshot === null) throw new Error('壳未接诊断快照')
+      return { diagnostics: snapshot }
+    },
+    export_diagnostics: () => {
+      const snapshot = deps.diagnostics?.() ?? null
+      if (snapshot === null || deps.exportDiagnostics === undefined) throw new Error('壳未接诊断导出')
+      const result = deps.exportDiagnostics(snapshot)
+      return { path: result.path, bytes: result.bytes }
     },
     open_external: (args) => {
       const url = argString(args, 'url')

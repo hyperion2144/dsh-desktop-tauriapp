@@ -33,6 +33,12 @@ import { updateSettings } from './settings-store.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { listProfiles } from './profiles.ts'
 import { createDownloadManager } from './downloads.ts'
+import { createLogSink, describeLogFile } from './log-sink.ts'
+import { buildDiagnostics, DIAG_TAIL_LINES, type DiagnosticsInput } from '../shared/diagnostics.ts'
+import { exportDiagnostics } from './diagnostics.ts'
+import { classifyLevel, mirrorToShellLog, pageLogLines } from '../shared/log-file.ts'
+import { revealPath } from './downloads.ts'
+import { release as osRelease, cpus as osCpus, freemem as osFreemem, totalmem as osTotalmem } from 'node:os'
 import { createTaskTracker, installProfileDependencies, migrateProfile, profileHealth, testProxyConnectivity } from './profile-manager.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
@@ -86,6 +92,10 @@ export interface ServiceOptions {
   chooseDownloadDir?: (start: string) => Promise<string | null>
   /** 每视图授权台账（#220 决策 12）：index.ts 注入进程级那一个，页面桥带 token 回来查表 */
   views?: ViewRegistry
+  /** 应用版本（诊断快照里报；index.ts 注入壳自己的版本号） */
+  appVersion?: string
+  /** 页面语言（诊断快照里报） */
+  locale?: string
 }
 
 export interface ShellState {
@@ -141,18 +151,23 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const env = options.env ?? process.env
   const home = env.DSH_HOME ?? join(env.HOME ?? '.', '.dsh')
   const logFile = env.DSH_SHELL_LOG ?? join(home, 'shell.log')
+  const webviewLogFile = join(home, 'dsh-desktop-webview.log')
   const stateFile = env.DSH_SHELL_STATE_FILE ?? join(home, 'shell-state.json')
   const claimsFile = env.DSH_SHELL_PORT_CLAIMS ?? join(home, 'shell-ports.json')
   mkdirSync(home, { recursive: true })
-  mkdirSync(dirname(logFile), { recursive: true })
+
+  // 壳日志：本地时区时间戳 + 有界轮转（10 MB × 5 份；旧壳 KeepAll 实测堆了 90+ 份）。
+  const shellLog = createLogSink({
+    file: logFile,
+    stdout: (line) => console.log(line),
+    onRotate: ({ moved, deleted }) => console.log(`[shell] 日志轮转：搬 ${String(moved)} 份、删 ${String(deleted)} 份`),
+  })
+  // 页面控制台另写一份（旧壳路径 `$DSH_HOME/dsh-desktop-webview.log`，不镜像到 stdout）。
+  const pageLog = createLogSink({ file: webviewLogFile })
 
   const log = (line: string): void => {
-    const stamped = `[shell ${new Date().toISOString()}] ${line}`
-    console.log(stamped)
-    try {
-      appendFileSync(logFile, `${stamped}\n`)
-    } catch {}
-    options.onLog?.(stamped)
+    shellLog.line(line)
+    options.onLog?.(line)
   }
 
   // ---- 设置：壳自己的一份（desktop-settings.json，旧壳的 settings.yaml 只读迁移一次）----
@@ -597,6 +612,68 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
 
+  // ---- 诊断快照（#220 日志与诊断）：一个 JSON 回答「哪版、哪个 profile、端口/pod、日志在哪」----
+  const startedAt = new Date().toISOString()
+  const pageLogPath = webviewLogFile
+  const diagnosticsInput = (): DiagnosticsInput => ({
+    appVersion: options.appVersion ?? 'unknown',
+    pid: process.pid,
+    startedAt,
+    uptimeMs: Date.now() - Date.parse(startedAt),
+    noWindow: state.noWindow,
+    locale: options.locale ?? 'zh-CN',
+    profile: paths.profile,
+    origin: state.origin,
+    pageUrl: state.pageUrl,
+    pagePort,
+    upstreamPort: state.upstreamPort,
+    lanePort: state.lanePort,
+    hostPid: state.hostPid,
+    hostRunning: state.hostPid > 0,
+    runtimeKind: paths.runtimeKind,
+    runtimeVersion: paths.runtimeVersion,
+    runtimeDir: paths.runtimeDir,
+    distDir: paths.distDir,
+    injections: state.injections,
+    settingsSummary: settingsSummary(settings),
+    settingsPath: join(home, 'desktop-settings.json'),
+    settingsProvenance: state.settingsProvenance,
+    views: (options.views?.list() ?? []).map((grant) => ({ kind: grant.kind, profile: grant.profile, label: grant.label })),
+    downloads: {
+      tasks: downloads.list().length,
+      active: downloads.list().filter((task) => task.status === 'downloading' || task.status === 'queued').length,
+      concurrency: downloads.concurrency(),
+    },
+    notify: {
+      available: notifyBridge.available,
+      permission: notifyBridge.available ? notifyBridge.status() : 'unavailable',
+      port: state.notifyPort,
+    },
+    logs: {
+      shell: describeLogFile(logFile),
+      webview: describeLogFile(pageLogPath),
+      tail: shellLog.tail(DIAG_TAIL_LINES),
+    },
+    process: {
+      platform: options.platform ?? process.platform,
+      arch: process.arch,
+      osRelease: osRelease(),
+      bun: Bun.version,
+      ...(process.versions.node === undefined ? {} : { node: process.versions.node }),
+      cpus: osCpus().length,
+      totalMemBytes: osTotalmem(),
+      freeMemBytes: osFreemem(),
+    },
+  })
+  const diagnosticsSnapshot = (): Record<string, unknown> => buildDiagnostics(diagnosticsInput(), new Date())
+
+  /** 页面控制台一条消息：写 `dsh-desktop-webview.log`；warn/error 另镜像一份到壳日志（旧壳同口径） */
+  const logPageConsole = (input: { level: string; msg: string; pageUrl: string | null }): void => {
+    const level = classifyLevel(input.level)
+    for (const line of pageLogLines({ level, msg: input.msg, pageUrl: input.pageUrl })) pageLog.write(`${line}\n`)
+    if (mirrorToShellLog(level)) log(`[page.${level}] ${input.msg.split('\n')[0] ?? ''}`)
+  }
+
   // ---- 宿主守护器：异常退出就退避重启，并把服务面切到新宿主（页面不再停在转发失败） ----
   const ledger = createRestartLedger()
   let stopping = false
@@ -791,6 +868,16 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       downloadRuntime: (version, source) => downloader.start(version, source),
       downloadStatus: () => downloader.status(),
       downloads,
+      logPageConsole,
+      diagnostics: () => diagnosticsSnapshot(),
+      exportDiagnostics: (snapshot) =>
+        exportDiagnostics({
+          home,
+          snapshot,
+          now: new Date(),
+          reveal: (path) => revealPath(path, log),
+          log,
+        }),
       downloadDir: join(env.HOME ?? home, 'Downloads'),
       // ---- profile 运维与启动检查（旧壳 commands.rs 的对应命令）----
       startupChecked: () => startupChecked,

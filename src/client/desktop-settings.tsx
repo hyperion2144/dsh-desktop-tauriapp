@@ -406,6 +406,10 @@ function DesktopSettingsPanel(): React.ReactElement {
   }
   // #110：卸载中的版本（行级禁用态；删除可能数秒，期间按钮显示「卸载中…」）
   const [removingVersion, setRemovingVersion] = useState<string | null>(null)
+  // 日志与诊断（#220）：挂载读一次摘要与日志路径，导出按钮只在点击时调 RPC
+  const [diagSummary, setDiagSummary] = useState<string | null>(null)
+  const [diagLogPath, setDiagLogPath] = useState<string | null>(null)
+  const [diagExport, setDiagExport] = useState<string | null>(null)
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
   const [dlProgress, setDlProgress] = useState<{
     version: string
@@ -472,6 +476,16 @@ function DesktopSettingsPanel(): React.ReactElement {
           invoke<DesktopData>('get_desktop_settings_data'),
         ])
         if (cancelled) return
+        // 诊断摘要与日志路径（失败只当没有——诊断读取不该挡住设置面板）
+        void invoke<{ diagnostics?: { summary?: string; logs?: { shell?: { path?: string } } } }>('get_diagnostics')
+          .then((r) => {
+            if (cancelled) return
+            const summary = r.diagnostics?.summary
+            if (typeof summary === 'string' && summary !== '') setDiagSummary(summary)
+            const path = r.diagnostics?.logs?.shell?.path
+            if (typeof path === 'string' && path !== '') setDiagLogPath(path)
+          })
+          .catch(() => {})
         setProxy({
           proxy_mode: (ns.proxy_mode as string) || p.proxy_mode || 'off',
           proxy_url: (ns.proxy_url as string) || p.proxy_url || '',
@@ -1241,6 +1255,42 @@ function DesktopSettingsPanel(): React.ReactElement {
       </SectionBox>
 
       {/* ── dsh 运行时（版本管理：下载/切换，#95）── */}
+      {/* ── 日志与诊断（#220）：一个按钮导出快照，用户报问题时直接发文件 ── */}
+      <SectionBox title="日志与诊断">
+        <div style={NOTE_STYLE}>{diagSummary === null ? '读取中…' : diagSummary}</div>
+        {diagLogPath !== null && <div style={NOTE_STYLE}>壳日志：{diagLogPath}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <PfBtn
+            variant="ghost"
+            onClick={() => {
+              void invoke<{ path: string; bytes: number }>('export_diagnostics')
+                .then((r) => {
+                  setDiagExport(r.path)
+                  showToast(`诊断已导出：${r.path}`, true)
+                })
+                .catch((e: unknown) => showToast(`导出失败：${String(e)}`, false))
+            }}
+          >
+            导出诊断
+          </PfBtn>
+          <PfBtn
+            variant="ghost"
+            onClick={() => {
+              void invoke<{ diagnostics?: { logs?: { shell?: { path?: string } } } }>('get_diagnostics')
+                .then((r) => {
+                  const path = r.diagnostics?.logs?.shell?.path
+                  if (typeof path === 'string' && path !== '') showToast(`壳日志：${path}`, true)
+                  else showToast('诊断里没有日志路径', false)
+                })
+                .catch((e: unknown) => showToast(`读取失败：${String(e)}`, false))
+            }}
+          >
+            显示日志路径
+          </PfBtn>
+        </div>
+        {diagExport !== null && <div style={NOTE_STYLE}>上次导出：{diagExport}</div>}
+      </SectionBox>
+
       <SectionBox title="dsh 运行时（版本下载 / 切换）">
         <ThemeSelect
           style={{ marginBottom: 8 }}
