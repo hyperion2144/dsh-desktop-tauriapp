@@ -130,11 +130,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const log = options.onLog ?? ((): void => {})
   const platform = options.platform ?? process.platform
   if (options.show === undefined) {
-    log(
-      `[notify] 未接原生通知（服务面 / 无窗口模式），回落到命令行${
-        platform === 'darwin' ? '（macOS 上会显示成「脚本编辑器」）' : ''
-      }`
-    )
+    log('[notify] 未接原生通知（服务面 / 无窗口模式，或平台没有原生通道）')
   }
   const appName = options.appName ?? 'DSH'
   const now = options.now ?? ((): Date => new Date())
@@ -142,6 +138,13 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const show =
     options.show ??
     ((payload: ShowNotificationOptions): void => {
+      // macOS：旧壳早已弃用 `osascript display notification`（会以「脚本编辑器」身份投递，
+      // 点横幅开错应用，见旧壳 notify_un.rs 头注释）。新壳同理：没接原生投递就只落日志，
+      // 由调用方去接 Electrobun 原生投递 / notify_un 桥。
+      if (platform === 'darwin') {
+        log(`[notify] macOS 未接原生投递，本条只落日志：${payload.title}：${payload.body}`)
+        return
+      }
       const command = shellNotificationCommand(platform, payload.title, payload.body)
       if (command === null) {
         log(`[notify] ${payload.title}：${payload.body}（本平台暂无投递实现）`)

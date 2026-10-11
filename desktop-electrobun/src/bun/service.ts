@@ -22,6 +22,8 @@ import { createArbiter } from '../shared/power-arbiter.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
+import { createNativeNotify, type NativeNotify } from './notify-un.ts'
+import { permissionHint, permissionLabel } from '../shared/notify-permission.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
 import { createCommandTable, type RuntimeSnapshot } from './commands.ts'
@@ -69,7 +71,8 @@ export interface ServiceOptions {
   /** 第二个实例请求把窗口带到前台（单实例激活） */
   onActivate?: () => void
   onLog?: (line: string) => void
-  /** 直接给定设置（测试/多窗口复用；缺省从磁盘读） */
+  /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
+  notifyBridge?: NativeNotify
   settings?: DesktopSettings
   /** 通知器（index.ts 注入 Electrobun 原生通道；缺省走命令行兜底） */
   notifier?: Notifier
@@ -120,6 +123,8 @@ export interface ShellService {
   runtime: () => RuntimeSnapshot
   /** 拉版本目录（失败不抛，回 {entries, error}） */
   fetchCatalog: (source: RuntimeSource) => Promise<{ entries: CatalogEntry[]; error?: string }>
+  /** 通知权限桥（托盘/面板共用：真实状态 + 主动申请） */
+  notify: NativeNotify
   /** 下载进度（托盘与设置面板共用同一个单飞状态） */
   downloadStatus: () => RuntimeDownloadStatus
   /** 下载并安装一个运行时（单飞） */
@@ -369,7 +374,36 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   // ---- 通知：决策在 notify-policy，这里只做「场景 → 投递」与宿主事件映射 ----
   // 旧壳 70 个调用点收敛到场景 id；新壳先接已有的调用点（宿主事件 + 服务健康 + 启动受阻）。
-  const notifier = options.notifier ?? createNotifier({ notifications: settings.notifications, home, onLog: log })
+  // 通知权限：macOS 走我们自己的 UN 桥（旧壳 notify_un.rs 的等价物）——能读真实授权状态、
+  // 能主动申请；Electrobun 只暴露投递，拿不到状态（面板上那个写死的「已授权」就是这么来的）。
+  const notifyBridge = options.notifyBridge ?? createNativeNotify({ log, env, execPath: process.execPath })
+  const notifier =
+    options.notifier ??
+    createNotifier({
+      notifications: settings.notifications,
+      home,
+      onLog: log,
+      show: notifyBridge.available
+        ? (payload) => {
+            const ok = notifyBridge.post({ title: payload.title, body: payload.body, sound: payload.silent !== true })
+            if (!ok) log(`[notify] 原生桥拒绝投递：${payload.title}`)
+          }
+        : undefined,
+    })
+  if (notifyBridge.available) {
+    notifyBridge.start()
+    // start() 是异步的（原生层要等系统回调），第一行日志只能报「当时快照」；
+    // 1.5s 后再报一次真实状态，诊断时一眼能看出到底是未决定还是被拒。
+    const announce = (): void => {
+      const permission = notifyBridge.status()
+      log(
+        `[notify-un] 通知权限：${permissionLabel(permission)}（${permissionHint(permission, options.platform ?? process.platform)}；err=${String(notifyBridge.lastError())}）`
+      )
+    }
+    log(`[notify-un] 原生通知桥已就绪：${String(notifyBridge.libPath)}（权限：${permissionLabel(notifyBridge.status())}）`)
+    announce()
+    setTimeout(announce, 1_500).unref?.()
+  }
   // ② 插件：把桌面壳插件（+ 手机侧，若在）挂进 profile 模块池，并写 `--patch` 注入清单。
   const staged = stagePlugins({
     home,
@@ -628,6 +662,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     state,
     paths,
     server,
+    notify: notifyBridge,
     settings: () => liveSettings,
     save: saveSettings,
     runtime: () => runtimeSnapshot(),
@@ -716,6 +751,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       pickSoundFile: options.pickSoundFile,
       importSound: (path) => importSoundFile(home, path),
       notifier,
+      // 通知 tab 的权限徽标 / 「申请权限」按钮：真值来自我们的 UN 桥（非 macOS 或没打包时回 unavailable）
+      notifyPermission: () => notifyBridge.status(),
+      notifyRequestPermission: () => notifyBridge.request(),
       dshStatus: () => dshStatusCode,
       dshVersion: () => paths.runtimeVersion ?? basename(paths.runtimeDir),
       runtime: () => runtimeSnapshot(),

@@ -8,6 +8,7 @@ import { systemLocale } from './locale.ts'
 import { installApplicationMenu } from './menu.ts'
 import { bootPreloadScript } from './preload.ts'
 import { startService, type ServiceOptions, type ShellService } from './service.ts'
+import { createNativeNotify } from './notify-un.ts'
 import type { RuntimeSnapshot } from './commands.ts'
 import type { RuntimeDownloadStatus } from './runtime-install.ts'
 import { SHELL_MENU_ACTIONS, contextMenuItems } from './context-menu.ts'
@@ -292,6 +293,8 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
     },
     notifier,
+    // 同一个 UN 桥实例（状态与投递都走它；面板的权限徽标也从这里读）
+    notifyBridge,
     pickSoundFile: pickSoundFileImpl,
     chooseDownloadDir: pickDownloadDirImpl,
     // 页面请求关窗（`close_current_window` / `exit_window_instance`）：关它自己那个窗口
@@ -579,12 +582,23 @@ if (!noWindow) {
   })
 }
 
-// 通知：决策在壳里（notify-policy），投递交给 Electrobun 的原生通道（无窗口时退到命令行）。
+// 通知：决策在壳里（notify-policy）；macOS 上投递走我们自己的 UN 桥（旧壳 `notify_un.rs` 的路子：
+// 进程自己就有 bundle 身份、状态可查、授权可申请），桥不可用或投递失败再退回 Electrobun 的原生通道。
+// 裸 dev 进程没有 bundle id，UN 会硬崩——所以只在 available 时才调。
+const notifyBridge = createNativeNotify({ log: (line) => console.log(line) })
 const notifier: Notifier = createNotifier({
   notifications: bootSettings.notifications,
   home: dshHome(),
   appName: APP_NAME,
-  show: (options) => Utils.showNotification?.(options),
+  show: (options) => {
+    if (
+      notifyBridge.available &&
+      notifyBridge.post({ title: options.title, body: options.body ?? '', sound: options.silent !== true })
+    ) {
+      return
+    }
+    Utils.showNotification?.(options)
+  },
   isFullscreen: () => mainWindow?.isFullScreen() ?? false,
   onLog: (line) => console.log(line),
 })

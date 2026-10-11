@@ -78,7 +78,8 @@ describe('桌面通知 tab 的数据面', () => {
     const h = harness()
     try {
       const state = (await h.table.get_notifications_state?.({})) as Record<string, unknown>
-      expect(state.permission).toBe('granted')
+      // 没有原生桥（非 macOS / 没打包 / 库缺失）时如实说 unavailable，不再像以前那样写死 granted
+      expect(state.permission).toBe('unavailable')
       expect(typeof state.config).toBe('object')
 
       const scenarios = state.scenarios as Array<Record<string, unknown>>
@@ -160,13 +161,39 @@ describe('试听：旧壳 preview_notification_sound(sound) 的语义', () => {
     }
   })
 
-  test('权限命令如实回答「没有查询面」，不假装查过系统', async () => {
+  test('没有原生桥时如实回答：不假装查过系统，也不假装申请过', async () => {
     const h = harness()
     try {
       const result = (await h.table.request_notification_permission_cmd?.({})) as Record<string, unknown>
-      expect(result.granted).toBe(true)
+      expect(result.granted).toBe(false)
+      expect(result.permission).toBe('unavailable')
       expect(result.prompted).toBe(false)
-      expect(h.calls.logs.some((line) => line.includes('第一条通知时申请'))).toBe(true)
+      expect(h.calls.logs.some((line) => line.includes('没有可用的授权申请通道'))).toBe(true)
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('有原生桥时：申请前后状态都报真值，并写日志（旧壳 notify_un.rs 的 permission_state）', async () => {
+    // 桩：第一次 status() 回 notDetermined，request() 之后回 granted
+    let permission: 'not_determined' | 'granted' = 'not_determined'
+    const h = harness({
+      notifyPermission: () => permission,
+      notifyRequestPermission: () => {
+        permission = 'granted'
+        return permission
+      },
+    })
+    try {
+      const before = (await h.table.get_notifications_state?.({})) as Record<string, unknown>
+      expect(before.permission).toBe('not_determined')
+
+      const result = (await h.table.request_notification_permission_cmd?.({})) as Record<string, unknown>
+      expect(result).toEqual({ granted: true, permission: 'granted', prompted: true })
+      expect(h.calls.logs.some((line) => line.includes('申请通知权限：not_determined → granted'))).toBe(true)
+
+      const after = (await h.table.get_notifications_state?.({})) as Record<string, unknown>
+      expect(after.permission).toBe('granted')
     } finally {
       h.cleanup()
     }

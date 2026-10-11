@@ -11,6 +11,7 @@ import type { CatalogEntry, InstalledRuntime } from '../shared/runtime-catalog.t
 import { NOTIFICATION_GROUPS, NOTIFICATION_SCENARIOS, serializeSettings } from '../shared/settings.ts'
 import { argNumber, argString, type RpcHandler } from './rpc.ts'
 import { listSounds, type Notifier } from './notifications.ts'
+import { permissionHint, type NotifyPermission } from '../shared/notify-permission.ts'
 import type { PortClaim } from '../shared/ports.ts'
 
 export interface CommandDeps {
@@ -49,6 +50,10 @@ export interface CommandDeps {
   /** 把音频文件收进 `$DSH_HOME/sounds/`，返回入库文件名（旧壳 sounds::import_file） */
   importSound?: (path: string) => string
   notifier?: Notifier
+  /** 系统通知授权状态（真实值，来自 notify-un 桥；缺省 unavailable） */
+  notifyPermission?: () => NotifyPermission
+  /** 主动申请通知授权（返回申请后的状态） */
+  notifyRequestPermission?: () => NotifyPermission
   /** 运行时快照：来源 / 内置版本 / 已装列表 / 外部 dsh 路径（命令表不自己碰文件系统） */
   runtime?: () => RuntimeSnapshot
   /** 拉取版本目录（github / npm；失败不抛，回 {entries, error}） */
@@ -398,9 +403,9 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       const config = deps.settings().notifications
       const chosen = config.scenarios ?? {}
       return {
-        // 旧壳在 macOS 上问 UNUserNotificationCenter 要授权状态；Electrobun 没暴露这个查询面，
-        // 授权由原生层在第一条通知时申请（申请失败后的回落会写日志，见 notifications.ts）。
-        permission: 'granted',
+        // 旧壳在 macOS 上问 UNUserNotificationCenter 要授权状态（notify_un.rs 的 permission_state）；
+        // 新壳走我们自己的 UN 桥（native/notify_un.m），这里的值是**真读出来的**，不再是写死的 granted。
+        permission: deps.notifyPermission?.() ?? 'unavailable',
         config,
         // 14 条场景的元数据（唯一事实源＝shared/settings.ts 的 NOTIFICATION_SCENARIOS）
         scenarios: NOTIFICATION_SCENARIOS.map((meta) => ({
@@ -424,12 +429,17 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return { config: next.notifications }
     },
     request_notification_permission_cmd: () => {
-      // 新壳没有系统授权状态的查询面（Electrobun 未暴露 UNUserNotificationCenter）：授权由原生层
-      // 在第一条通知时申请。这里如实说明，不让面板以为我们查过系统。
-      deps.log('[notify] 权限：由系统在第一条通知时申请（新壳无查询面，按可用上报）')
-      return { granted: true, prompted: false }
+      const request = deps.notifyRequestPermission
+      if (request === undefined) {
+        // 没有桥（非 macOS / 没打包 / 库缺失）：如实说，不让面板以为我们申请过
+        deps.log('[notify] 本平台没有可用的授权申请通道（面板只显示状态）')
+        return { granted: false, permission: deps.notifyPermission?.() ?? 'unavailable', prompted: false }
+      }
+      const before = deps.notifyPermission?.() ?? 'unavailable'
+      const permission = request()
+      deps.log(`[notify] 申请通知权限：${before} → ${permission}（${permissionHint(permission)}）`)
+      return { granted: permission === 'granted', permission, prompted: permission !== before || permission === 'not_determined' }
     },
-    // 试听：旧壳 `preview_notification_sound(sound)`——`none` 无操作、`default` 播系统音、
     // `custom:<名>`（或裸名）播 `$DSH_HOME/sounds/<名>`；客户端传的是 `{ sound }`。
     preview_notification_sound: (args) => {
       const raw = argString(args, 'sound') || argString(args, 'name')
