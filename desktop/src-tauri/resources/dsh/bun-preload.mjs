@@ -14,15 +14,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, existsSync, realpathSync, rmSync } from "node:fs";
 
 // ── Helper: resolve bare specifier through node_modules with exports support ──
-function _resolveBare(specifier, parentURL) {
+function _resolveBare(specifier, parentURL, H) {
+  const { join, dirname, resolve, fileURLToPath, pathToFileURL, existsSync, readFileSync } = H;
   // Try import.meta.resolve first
-  try { return import.meta.resolve(specifier); } catch {}
+  try { return H.esmResolve(specifier); } catch {}
   // Parse bare specifier: @scope/name/subpath or name/subpath
   const m = specifier.match(/^(@[^/]+\/[^/]+|[^/]+)(\/.*)?$/);
   if (!m) return null;
   const pkgName = m[1];
   const subpath = m[2] || '';
-  const _dshRoot = resolve(dirname(fileURLToPath(import.meta.url)));
+  const _dshRoot = resolve(dirname(fileURLToPath(H.selfUrl)));
   const dirs = [
     join(_dshRoot, 'node_modules'),
     parentURL ? join(fileURLToPath(parentURL), 'node_modules') : '',
@@ -81,6 +82,12 @@ if (typeof Module.stripTypeScriptTypes !== "function") {
 }
 
 // ── Patch 2: Intercept node-addon-require-builtin ──
+// Dependencies the stub needs when it is stringified into the package entry (Patch 9).
+const _stubDeps = {
+  join, dirname, resolve, fileURLToPath, pathToFileURL, existsSync, readFileSync,
+  esmResolve: (specifier) => import.meta.resolve(specifier),
+  selfUrl: import.meta.url,
+};
 const _origCreateRequire = Module.createRequire;
 
 Module.createRequire = function _patchedCreateRequire(filename) {
@@ -88,7 +95,7 @@ Module.createRequire = function _patchedCreateRequire(filename) {
 
   function patchedRequire(id) {
     if (id === "node-addon-require-builtin") {
-      return createAddonStub(origRequire);
+      return createAddonStub(origRequire, Module, _stubDeps);
     }
     return origRequire(id);
   }
@@ -108,7 +115,9 @@ Module.createRequire = function _patchedCreateRequire(filename) {
  * DSH uses these to intercept require/import for profile-specific resolution.
  * Under Bun, we provide stubs that pass validation but make installRuntimeInterception a no-op.
  */
-function createAddonStub(origRequire) {
+function createAddonStub(origRequire, nodeModule, H) {
+  const { join, dirname } = H;
+  const Module = nodeModule;
   // Try to get the real Module constructor for _resolveFilename
   let RealModule;
   try {
@@ -140,7 +149,7 @@ function createAddonStub(origRequire) {
                   }
                   // For bare specifiers, use _resolveBare helper
                   if (specifier) {
-                    const resolved = _resolveBare(specifier, parentURL);
+                    const resolved = _resolveBare(specifier, parentURL, H);
                     if (resolved) return { url: resolved, format: undefined, shortCircuit: true };
                   }
                   // For bare specifiers that couldn't be resolved, throw MODULE_NOT_FOUND
@@ -162,7 +171,7 @@ function createAddonStub(origRequire) {
                 },
                 resolve(specifier, parent, ...args) {
                   if (specifier && !specifier.startsWith('.') && !specifier.startsWith('file:') && !specifier.startsWith('http')) {
-                    const r = _resolveBare(specifier, parent);
+                    const r = _resolveBare(specifier, parent, H);
                     if (r) return Promise.resolve(r);
                   }
                   try { return Promise.resolve(new URL(specifier, parent).href); } catch { return Promise.resolve(specifier); }
@@ -172,7 +181,7 @@ function createAddonStub(origRequire) {
                     return await import(new URL(specifier, parentURL).href);
                   }
                   try { return await import(specifier); } catch {}
-                  const resolved = _resolveBare(specifier, parentURL);
+                  const resolved = _resolveBare(specifier, parentURL, H);
                   if (resolved) return await import(resolved);
                   throw new Error(`Cannot find package '${specifier}'`);
                 },
@@ -231,7 +240,7 @@ function createAddonStub(origRequire) {
             defaultResolve(specifier, context, conditions) {
               const parentURL = context?.parentURL;
               if (specifier && !specifier.startsWith('.') && !specifier.startsWith('file:') && !specifier.startsWith('http')) {
-                const r = _resolveBare(specifier, parentURL);
+                const r = _resolveBare(specifier, parentURL, H);
                 if (r) return { url: r, format: undefined, shortCircuit: true };
               }
               try {
@@ -251,6 +260,12 @@ function createAddonStub(origRequire) {
           console.warn(`[bun-preload] stub: unhandled internal module: ${name}`);
           return {};
       }
+    },
+    isAllowedInternalId() {
+      return true;
+    },
+    getBindingInfo() {
+      return { binding: "bun-preload-stub" };
     },
   };
 }
@@ -438,5 +453,54 @@ for (const target of packageTargets('@xterm/headless/lib-headless/xterm-headless
   _patches.push({ path: target, original: source });
   writeFileSync(target, patched);
   console.log(`[bun-preload] Patch 8: xterm.js sync write applied to ${target}`);
+}
+
+// ── Patch 9: node-addon-require-builtin dispatcher (works in every context) ──
+// Patch 2 only covers this process: Bun does not run --preload scripts in worker threads
+// (measured), and a worker's ESM `createRequire` binding ignores the monkey patch, so a
+// worker loading this package reaches the native addon and dies with
+// "node-addon-require-builtin unsupported: Unsupported/no-context" (experimental-inspector).
+// Rewriting the package entry makes the stub available to every consumer and context.
+const ADDON_STUB_MODULE_SOURCE = [_resolveBare.toString(), createAddonStub.toString()].join('\n');
+const ADDON_DISPATCHER_SOURCE = [
+  '"use strict";',
+  'Object.defineProperty(exports, "__esModule", { value: true });',
+  'const H = {',
+  '  join: require("node:path").join,',
+  '  dirname: require("node:path").dirname,',
+  '  resolve: require("node:path").resolve,',
+  '  fileURLToPath: require("node:url").fileURLToPath,',
+  '  pathToFileURL: require("node:url").pathToFileURL,',
+  '  existsSync: require("node:fs").existsSync,',
+  '  readFileSync: require("node:fs").readFileSync,',
+  '  esmResolve() { throw new Error("import.meta.resolve is unavailable in this context"); },',
+  `  selfUrl: ${JSON.stringify(import.meta.url)},`,
+  '};',
+  'if (typeof Bun === "undefined") {',
+  '  const original = require("./index.original.js");',
+  '  exports.requireBuiltin = original.requireBuiltin;',
+  '  exports.isAllowedInternalId = original.isAllowedInternalId;',
+  '  exports.getBindingInfo = original.getBindingInfo;',
+  '  exports.default = original.default;',
+  '} else {',
+  ADDON_STUB_MODULE_SOURCE,
+  '  const nodeModule = require("node:module").Module ?? require("node:module");',
+  '  const impl = createAddonStub(require, nodeModule, H);',
+  '  exports.requireBuiltin = (moduleId) => impl.requireBuiltin(moduleId);',
+  '  exports.isAllowedInternalId = () => impl.isAllowedInternalId();',
+  '  exports.getBindingInfo = () => impl.getBindingInfo();',
+  '  exports.default = { requireBuiltin: exports.requireBuiltin, isAllowedInternalId: exports.isAllowedInternalId, getBindingInfo: exports.getBindingInfo };',
+  '}',
+  ''
+].join('\n');
+for (const target of packageTargets('node-addon-require-builtin/lib/index.js')) {
+  const directory = dirname(target);
+  const originalPath = join(directory, 'index.original.js');
+  const dispatched = existsSync(originalPath);
+  const original = readFileSync(dispatched ? originalPath : target, 'utf8');
+  _patches.push({ path: target, original, remove: [originalPath] });
+  if (!dispatched) writeFileSync(originalPath, original);
+  writeFileSync(target, ADDON_DISPATCHER_SOURCE);
+  console.log(`[bun-preload] Patch 9: node-addon-require-builtin stub applied to ${target}`);
 }
 console.log("[bun-preload] Patches applied: stripTypeScriptTypes, node-addon-require-builtin stub, HMR disable, Bun.Terminal PTY");
