@@ -1,0 +1,121 @@
+name: Shell (Electrobun)
+
+# 新壳（desktop-electrobun，Electrobun + CEF + Bun）的三平台构建与产物断言。
+#
+# 为什么单开一个 workflow：现有 `ci.yml` / `release.yml` 是 **Tauri 壳**的（Rust + cargo +
+# pnpm + Tauri 打包），两者并存到切换完成（#220 决策 12/17：一次性换壳、迁移期旧壳冻结）。
+# 本 workflow 只碰 desktop-electrobun 与它依赖的几份共用资源。
+#
+# 为什么必须有产物断言这一步：Electrobun 的 `renderer: 'cef'` 在**没打 CEF** 时会静默回落
+# 系统 webview（mac `nativeWrapper.mm:8359` / win `nativeWrapper.cpp:8944` / linux
+# `nativeWrapper.cpp:591`），外观上完全看不出——但那就等于把 #200 那族 JavaScriptCore 崩溃
+# 原样带回来。所以打包后立刻用 `scripts/assert-artifact.mjs` 翻产物（见该脚本注释）。
+#
+# 未验证假设（分支推送前 CI 跑不起来，首次跑要盯这几处）：
+#   1. hutch CLI 在 Windows/Linux runner 上的安装与 PATH（这里用 Git Bash 跑官方 install.sh）；
+#   2. Windows/Linux 自带 tar 是否支持 `--zstd`（assert 脚本已退到 `-tf`，但没有 zstd 时
+#      tar 可能仍读不了 zst）；
+#   3. Windows/Linux 产物里 CEF 标志名与 payload 布局（按 Electrobun 源码推断，未实机验证）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop-electrobun/**'
+      - 'desktop/src-tauri/resources/dsh/bun-preload.mjs'
+      - 'desktop/src-tauri/icons/**'
+      - '.github/workflows/shell-electrobun.yml'
+#
+# 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
+# `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）还没接——自动更新的清单就是靠这两个资产名稳定地
+# 指到最新一版，缺了它们更新永远不可用。等切换窗口、允许打 tag 时再加一个 release job。
+  pull_request:
+    paths:
+      - 'desktop-electrobun/**'
+      - 'desktop/src-tauri/resources/dsh/bun-preload.mjs'
+      - 'desktop/src-tauri/icons/**'
+      - '.github/workflows/shell-electrobun.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 构建 + 产物断言（${{ matrix.label }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Electrobun 官方只发 macOS arm64（无 x64）、Windows x64/arm64、Linux x64/arm64。
+          # 规格 #220 的平台范围就是这三个（Windows ARM64 与 macOS x64 在 Out of Scope）。
+          - os: macos-14
+            label: macOS arm64
+          - os: windows-latest
+            label: Windows x64
+          - os: ubuntu-latest
+            label: Linux x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Bun 版本要跟 Electrobun 2.0.2 自带的那个对齐（Bun 1.4.0）。低版本缺
+      # `Bun.Terminal` / `Bun.spawn({terminal})` 等能力，node-pty 垫片会直接失效。
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      - name: 安装 hutch（Electrobun CLI）
+        shell: bash
+        run: |
+          curl -fsSL https://hutch.blackboard.sh/hutch/install.sh | sh
+          echo "$HOME/.hutch/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.hutch/bin:$PATH"
+          hutch --version
+
+      - name: 依赖（bun install）
+        working-directory: desktop-electrobun
+        run: bun install --frozen-lockfile
+
+      - name: 类型检查
+        working-directory: desktop-electrobun
+        run: bun run typecheck
+
+      # 默认不设 DSH_SHELL_TEST_RUNTIME ⇒ 需要真 dsh 运行时树的黑盒缝 ① 会自行跳过，
+      # 其余（策略、路由、台账、设置、guest、更新、通知……）全跑。
+      - name: 单元测试
+        working-directory: desktop-electrobun
+        run: bun test
+
+      - name: 准备（原生通知桥 + 包内资源）
+        working-directory: desktop-electrobun
+        run: |
+          bun run build:native
+          bun run prepare:bundle
+
+      - name: 打包（Electrobun，CEF）
+        working-directory: desktop-electrobun
+        shell: bash
+        run: |
+          hutch electrobun build --env=stable
+          # 封装签名只在 macOS 有意义（通知授权要一份绑了 Info.plist 的签名）；
+          # 脚本自身在非 macOS 会跳过，但 Windows/Linux 产物里没有 .app，这里就不调它。
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            bun run sign:app
+          fi
+
+      - name: 产物断言（CEF 运行时 + version.json）
+        working-directory: desktop-electrobun
+        run: bun run assert:artifact
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-shell-${{ matrix.label }}
+          path: |
+            desktop-electrobun/artifacts/**
+            desktop-electrobun/build/**/*.dmg
+            desktop-electrobun/build/**/Setup*.zip
+            desktop-electrobun/build/**/*.tar.gz
+          if-no-files-found: error

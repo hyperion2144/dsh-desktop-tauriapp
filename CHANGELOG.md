@@ -3,6 +3,10 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **三平台 CI 出包（Electrobun 壳）**：新增 `.github/workflows/shell-electrobun.yml`（macOS arm64 / Windows x64 / Linux x64 三平台矩阵，与 Tauri 壳的 `ci.yml`/`release.yml` 并存到切换完成）：`bun install --frozen-lockfile` → `bun run typecheck` → `bun test` → 原生通知桥 + 包内资源 → `hutch electrobun build --env=stable` → **产物断言** → 上传产物。`desktop-electrobun` 自带 `typescript` devDep 与 `typecheck` 脚本（CI 不再依赖仓根 `node_modules`）。
+  - **新增产物断言 `scripts/assert-artifact.mjs`（`bun run assert:artifact`）**：打开包内 payload 归档，断言 CEF 运行时标志齐全（mac `Chromium Embedded Framework.framework/Chromium Embedded Framework` + `libcef_sandbox.dylib`；win `libcef.dll` + `chrome_elf.dll`；linux `libcef.so` + `chrome-sandbox`）、`Resources/version.json` 的版本与 channel 非空、**stable 包必须带更新源**。为什么非要这道门：Electrobun 的 `renderer: 'cef'` 在没打 CEF 时会**静默回落系统 webview**（`nativeWrapper.mm:8359` 等），界面上看不出异常，但 #200 那族 JavaScriptCore 崩溃会原样回来。
+  - **本地实证**：对真 stable 构建 `bun run assert:artifact` → `version=0.1.0 channel=stable baseUrl=https://github.com/hyperion2144/dsh-desktop-tauriapp/releases/latest/download`，exit 0；负例（CEF 齐全但 `baseUrl` 空的手造包 `/tmp/gate-test/caseA`）只报 `stable 包没有 baseUrl（release.baseUrl 配错层了？）` 并 exit 1（判别有效）。不带 `DSH_SHELL_TEST_RUNTIME` 跑 `bun test` = **475 pass / 14 skip / 0 fail**（需真 dsh 运行时树的黑盒缝 ① 自行跳过，其余全跑）。
+  - **未验证假设（分支未推送 ⇒ CI 还没真跑过，首次跑要盯）**：① hutch CLI 在 Windows/Linux runner 上的安装与 PATH（现用 Git Bash 跑官方 `install.sh` + 追加 `$HOME/.hutch/bin`）；② Windows/Linux 自带 tar 对 `--zstd` 的支持（脚本已退到 `-tf`）；③ 非 macOS 产物里 CEF 标志名与 payload 布局（按 Electrobun 源码推断）。
 - **应用更新：接上 Electrobun 自带的 Updater（#220 决策 11——旧 Tauri 壳没有这个能力，是新增件）**：
   - **为什么不是「搬旧壳」**：`desktop/src-tauri/Cargo.toml` 里没有 `tauri-plugin-updater`，`src/client` 里也没有任何 update 命令 ⇒ 这是纯新增。框架那套更新器自带事务、回滚、补丁链与 Windows 计划任务，重写没有意义，我们只做接线与「把状态翻译成人话」。
   - **接线**：`electrobun.config.ts` 的**顶层** `release.baseUrl` 指向 GitHub Releases 的 `latest/download` 别名（每个资产名稳定指向最新一版）；`src/shared/update.ts` 是纯逻辑（29 个框架状态 → 9 个壳阶段、版本比较、进度/字节、按钮可点性），`src/bun/updater.ts` 包住框架 Updater 且**任何失败都不抛**；命令表新增 `get_update_state` / `check_update` / `download_update` / `apply_update`；设置面板「桌面设置」新增「应用更新」卡（当前版本 · 阶段 · 进度 · 检查/下载/重启并安装）。
