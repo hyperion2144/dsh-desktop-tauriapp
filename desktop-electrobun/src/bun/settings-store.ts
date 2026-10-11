@@ -140,9 +140,11 @@ export function saveSettings(home: string, settings: DesktopSettings): void {
 }
 
 /** 读改写：给「设置页改一项」「托盘切一项」用。 */
-export function updateSettings(home: string, patch: Partial<DesktopSettings>, log?: SettingsLogger): DesktopSettings {
+export function updateSettings(home: string, patch: Record<string, unknown>, log?: SettingsLogger): DesktopSettings {
   const { settings } = loadSettings({ home, log })
-  const next = normalizeSettings({ ...settings, ...patch })
+  // patch 可能来自页面（设置面板按旧壳习惯下 snake_case）或壳内部（camelCase）。先落成
+  // snake 再合，两种写法都能被 normalizeSettings 认出来，不会静默丢掉。
+  const next = normalizeSettings({ ...serializeSettings(settings), ...patch })
   saveSettings(home, next)
   return next
 }

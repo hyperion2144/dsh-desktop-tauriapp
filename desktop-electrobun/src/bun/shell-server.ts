@@ -50,6 +50,8 @@ export interface ShellServerOptions {
   onContextMenu?: (request: ContextMenuRequest) => void
   /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
   onActivate?: () => void
+  /** 壳 ↔ 页面 RPC（`/__shell__/rpc`）：调用方给命令表与错误语义，这里只管 HTTP */
+  onRpc?: (raw: string) => Promise<{ status: number; body: Record<string, unknown> }>
   onLog?: (line: string) => void
 }
 
@@ -164,6 +166,17 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           const payload = options.bootPayload()
           if (payload === null) return new Response('boot pending', { status: 503 })
           return Response.json(payload, { headers: { 'cache-control': 'no-store' } })
+        }
+        // 壳 ↔ 页面 RPC（旧壳 Tauri IPC 的等价物）：壳自己的客户端插件靠它拿环境、读写设置
+        if (decision.rel === 'rpc') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onRpc === undefined) return new Response('rpc unavailable', { status: 501 })
+          const raw = await request.text()
+          const result = await options.onRpc(raw)
+          return Response.json(result.body, {
+            status: result.status,
+            headers: { 'cache-control': 'no-store' },
+          })
         }
         // 外链：交给系统浏览器（页面里 window.open / 点击 / 中键都走这里）
         if (decision.rel === 'open-external') {

@@ -260,6 +260,10 @@ try {
     console.error(`[shell] 宿主守护器放弃重启（${reason}）；页面停在 ${state.pageUrl}`)
   },
   notifier,
+  // 页面请求关窗（`close_current_window` / `exit_window_instance`）：走窗口自己的关闭流程
+  onCloseWindow: () => {
+    mainWindow?.close()
+  },
   })
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error)

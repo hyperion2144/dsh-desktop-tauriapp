@@ -13,6 +13,7 @@
 import { chromeScript, type ShellPlatform } from './chrome.ts'
 import { contextMenuScript } from './context-menu.ts'
 import { externalLinksScript } from './external.ts'
+import { tauriIpcScript } from './tauri-ipc.ts'
 
 export const BOOT_ENDPOINT = '/__shell__/boot'
 
@@ -40,5 +41,8 @@ export function bootPreloadScript(locale: string, platform: ShellPlatform, selfO
     externalLinksScript(selfOrigin),
     // 右键菜单：CEF 不弹菜单，页面把上下文报给主进程，由它弹原生菜单。
     contextMenuScript(),
+    // 壳自己的客户端插件是照 Tauri 写的（`__TAURI_INTERNALS__.invoke`）：
+    // 这里把它接到壳的 RPC 端点上，桌面 chrome（设置面板/通知/下载…）才会激活。
+    tauriIpcScript(),
   ].join('\n')
 }

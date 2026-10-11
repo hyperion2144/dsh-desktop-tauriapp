@@ -53,6 +53,8 @@ export interface Notifier {
   decide: (scenarioId: string) => NotifyDecision
   /** 自定义音的绝对路径；名字非法或文件不合规时返回 null。 */
   soundPath: (name: string) => string | null
+  /** 试听：能放就放（返回是否真的放了） */
+  previewSound: (name: string) => boolean
 }
 
 /** 命令行兜底：把通知文本转义后交给平台工具。 */
@@ -152,5 +154,13 @@ export function createNotifier(options: NotifierOptions): Notifier {
       return decision
     },
     soundPath,
+    // 设置面板的「试听」：只放自定义音（OS 默认音由系统自己弹，试听没意义）
+    previewSound: (name: string): boolean => {
+      const path = soundPath(name)
+      if (path === null) return false
+      playCustom(path)
+      log(`[notify] 试听音效：${name}`)
+      return true
+    },
   }
 }

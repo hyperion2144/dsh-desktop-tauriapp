@@ -24,8 +24,15 @@ import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
 import { NOTIFY_TYPE_SCENARIOS, SCENARIO } from '../shared/notify-policy.ts'
 import { activeProfile, profileLanePort, profilePort, settingsSummary, type DesktopSettings } from '../shared/settings.ts'
+import { createCommandTable } from './commands.ts'
+import { createRpcRouter, dispatchRpc, type RpcRouter } from './rpc.ts'
+import { updateSettings } from './settings-store.ts'
 
 export interface ServiceOptions {
+  /** 平台（命令表要回给页面；缺省 process.platform） */
+  platform?: NodeJS.Platform
+  /** 页面请求关窗（`close_current_window` / `exit_window_instance`） */
+  onCloseWindow?: () => void
   clientVersion: string
   /** 覆盖 DSH_HOME 等；默认读 process.env */
   env?: Record<string, string | undefined>
@@ -306,6 +313,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     injections: [],
     streamBaseUrl: `http://127.0.0.1:${String(pagePort)}`,
   }
+  // 壳 ↔ 页面 RPC：命令表要等 service 对象建好才能回填（restart_dsh_service 直接打它）。
+  // 页面在服务就绪后才会来调，所以那时一定已装好；未装好则明确回 503。
+  let rpcRouter: RpcRouter | null = null
+  // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值
+  let liveSettings = settings
   const serverOptions: ShellServerOptions = {
     distDir: paths.distDir,
     token,
@@ -317,6 +329,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
     onLog: log,
+    onRpc: async (raw) => {
+      if (rpcRouter === null) return { status: 503, body: { ok: false, error: 'shell rpc not ready' } }
+      return await dispatchRpc(rpcRouter, raw)
+    },
   }
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
@@ -330,6 +346,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     startedAt: new Date().toISOString(),
   })
   await Bun.write(claimsFile, `${JSON.stringify(claims, null, 2)}\n`)
+  // 底部状态条轮询的 dsh 服务状态码（旧壳 0..7：2 运行中 / 4 重启中 / 5 服务异常 / 6 服务下线）。
+  // 页面重载后状态条要能立刻显示真值，所以每个阶段都得维护它。
+  let dshStatusCode = 2
 
   const state: ShellState = {
     pid: process.pid,
@@ -386,10 +405,12 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     const decision = ledger.decide(Date.now())
     log(`宿主 ${String(host.pid)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
+      dshStatusCode = 5
       options.onHostGiveUp?.(state, decision.reason)
       notifier.notify(SCENARIO.STARTUP_ERROR, `dsh 服务无法恢复：${decision.reason}`)
       return
     }
+    dshStatusCode = 4
     ledger.record(Date.now())
     await Bun.sleep(decision.delayMs)
     if (stopping) return
@@ -401,6 +422,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       options.onHostGiveUp?.(state, reason)
       return
     }
+    dshStatusCode = 2
     applyHost()
     log(`守护器已重启宿主：pid = ${String(host.pid)} | injections = ${String(bootPayload.injections.length)}`)
     notifier.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务已自动重启（${paths.profile}）`)
@@ -412,7 +434,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
 
-  return {
+  const service: ShellService = {
     state,
     paths,
     server,
@@ -423,6 +445,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     },
     stop: async () => {
       stopping = true
+      dshStatusCode = 6
       ledger.reset()
       server.stop()
       notifyServer.stop()
@@ -438,4 +461,33 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       } catch {}
     },
   }
+  // 命令表回填：页面侧的壳插件（设置面板/通知 tab/下载 tab/本地 chrome）靠它拿到壳的能力
+  rpcRouter = createRpcRouter(
+    createCommandTable({
+      home,
+      profile: paths.profile,
+      platform: options.platform ?? process.platform,
+      log,
+      settings: () => liveSettings,
+      save: (patch) => {
+        liveSettings = updateSettings(home, patch, log)
+        state.settings = liveSettings
+        state.settingsProvenance = { created: false, migrated: false, recovered: false }
+        void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+        return liveSettings
+      },
+      restartService: () => service.restartHost(),
+      status: () => ({ ...state }),
+      ports: () => ({ port: pagePort, lanePort }),
+      openExternal: options.onOpenExternal,
+      closeWindow: options.onCloseWindow,
+      playSound: (name) => {
+        notifier.previewSound(name)
+      },
+      notifier,
+      dshStatus: () => dshStatusCode,
+      dshVersion: () => basename(paths.runtimeDir),
+    }),
+  )
+  return service
 }
