@@ -6,6 +6,10 @@
 
 ### 桌面壳（Electrobun）
 
+- Windows 安装外壳应用图标（A2 第一步）：`win.icon` 指向仓内新增的 `resources/app-icon.ico`（由 `icon.png` 生成的 16/32/48/64/128/256 多尺寸 ICO，63KB；Electrobun 把它用于提取器安装外壳、桌面快捷方式与任务栏）；prepare-bundle 在仓内源缺失时退回旧壳单尺寸 icon.ico 并警告。
+
+### 桌面壳（Electrobun）
+
 - Windows/Linux 窗口控制（A5）：设置面板自绘三键（最小化/最大化/关闭）在新壳可用——新壳走壳内端点 `POST /__shell__/window`（shell-server 自答，主进程操作 BrowserWindow；未知动作 400、无窗口宿主 501、GET 405），旧 Tauri 壳回退原插件命令；拖拽改走 Electrobun 的 CSS 拖拽区（`electrobun-webkit-app-region-drag`，标题行挂 drag、内部交互元素挂 no-drag）；非 macOS 不再把中间列内容顶下来（控制三键只占右上角 138×28，logo 回到自然位置）；Windows 托盘优先 `.ico`（prepare-bundle 拷 icon.ico → resources/tray.ico → 包内 runtime/，win32 候选链 ico 优先 png 回退）。
 
 ### 桌面壳（Electrobun）

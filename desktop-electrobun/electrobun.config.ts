@@ -61,7 +61,7 @@ export default {
     // 并在启动时断言 BuildConfig.availableRenderers 含 cef（否则静默回落 WKWebView）。
     mac: { bundleCEF: true, defaultRenderer: 'cef' },
     linux: { bundleCEF: true, defaultRenderer: 'cef' },
-    win: { bundleCEF: true, defaultRenderer: 'cef' },
+    win: { bundleCEF: true, defaultRenderer: 'cef', icon: 'resources/app-icon.ico' },
     // 包内资源：宿主脚本（Bun 跑 dsh 的等价物）与 Bun 兼容层（由 scripts/prepare-bundle.mjs
     // 从仓内单一来源物化到 runtime/）。落地位置＝<app>/Contents/Resources/app/<dest>，
     // 与 runtime.ts 的 packagedRoot() 约定一致。

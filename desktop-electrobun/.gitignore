@@ -1,6 +1,7 @@
 node_modules/
 runtime/bun-preload.mjs
 resources/tray.png
+resources/tray.ico
 icon.iconset/
 build/
 artifacts/

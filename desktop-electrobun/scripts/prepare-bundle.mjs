@@ -69,6 +69,19 @@ if (existsSync(trayIcoSource)) {
   console.log(`[prepare-bundle] ${trayIcoSource}`)
   console.log(`            → ${trayIcoTarget}`)
 }
+// A2：Windows 安装程序/提取器外壳 + 快捷方式 + 任务栏的应用图标（Electrobun win.icon）。
+// resources/app-icon.ico 是仓内提交的多尺寸源（16..256，由 icon.png 生成）；缺失时退回旧壳单尺寸 icon.ico。
+const appIconSource = resolve(repoRoot, 'desktop', 'src-tauri', 'icons', 'icon.ico')
+const appIconTarget = join(projectRoot, 'resources', 'app-icon.ico')
+if (existsSync(appIconTarget)) {
+  console.log(`[prepare-bundle] 应用图标（多尺寸）：${appIconTarget}`)
+} else if (existsSync(appIconSource)) {
+  mkdirSync(dirname(appIconTarget), { recursive: true })
+  copyFileSync(appIconSource, appIconTarget)
+  console.warn('[prepare-bundle] 仓内 resources/app-icon.ico 缺失，退回单尺寸 icon.ico（安装外壳图标质量差）')
+} else {
+  console.warn('[prepare-bundle] 找不到应用图标，Windows 安装外壳将没有应用图标')
+}
 
 // ── 4. 内置 dsh 运行时（随包发出）───────────────────────────────────────
 // 为什么必须随包：ADR 0004 的页面资产取自「当前生效运行时」的 dist。以前新壳只有
