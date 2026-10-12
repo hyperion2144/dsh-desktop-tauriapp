@@ -160,6 +160,9 @@ const REQUIRED_PAYLOAD_FILES = [
   'plugins/dsh-desktop-tauriapp/package.json',
   'plugins/dsh-desktop-tauriapp/lib/client.js',
   'plugins/dsh-mobile-access/package.json',
+  // 内置 dsh 运行时树（goal 第 1 条）：缺了它，干净机器首启直接「找不到可用的 dsh 运行时」。
+  // 本地构建曾静默漏带（worktree 没装内置树 + 回退链查不到）⇒ 在门槛里拦住，不再靠肉眼。
+  'dsh/node_modules/@deepseek-ai/dsh/package.json',
 ]
 
 /** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
@@ -213,7 +216,7 @@ function inspect(archive, label, depth = 0) {
   // 贴进包里的壳插件：缺了就是「装完设置面板全空」（维护者实机报的），必须在门槛里拦住。
   for (const required of REQUIRED_PAYLOAD_FILES) {
     if (!norm.some((line) => line.endsWith(`/${required}`))) {
-      problems.push(`${label} 里缺 ${required}（壳插件没被打进包？）`)
+      problems.push(`${label} 里缺 ${required}（必需文件没被打进包）`)
     }
   }
   if (versionLine === undefined) {

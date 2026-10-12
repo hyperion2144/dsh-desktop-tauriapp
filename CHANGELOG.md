@@ -6,6 +6,7 @@
 
 ### 桌面壳（Electrobun）
 
+- 修复产物静默缺内置 dsh 运行时树：`assert:artifact` 把 `app/dsh/node_modules/@deepseek-ai/dsh/package.json` 列为必需标志（本地构建曾在内置树未装配时静默出包）；`prepare:bundle` 的本地回退链补回旧 bundle id 目录（`com.arcreel.dsh-desktop-tauriapp/runtimes`，只读）；CI 增加「装配内置 dsh 运行时」步骤（`prepare-builtin-runtime.mjs --variant latest`，与 Tauri release 管线同源）。
 - 打磨级四项（旧壳对齐）：P1 转发层慢请求/上游 5xx 日志（`[proxy] SLOW ttfb≥2s`，旧壳 stream_proxy 的 SLOW 口径）；P2 测试钩子 `DSH_DESKTOP_NO_SINGLETON`（跳过单实例互斥）/`DSH_DESKTOP_AUTO_QUIT`（就绪后延迟自动退出，可给毫秒数）；P4 `DSH_CLOUDFLARED_BIN` 按设置 `cloudflared_bin` 透传给 dsh（#164 手机访问公网隧道）；P8 托盘左键单击 = 聚焦最后活跃窗口（旧壳 tray.rs #181），没有窗口就开主 profile；P10 打包签名带上旧壳同款 entitlements（JIT/未签名可执行内存/库校验豁免——缺了 CEF/V8 初始化 Fatal OOM）。P3 rlimit（Bun.spawn 无 pre_exec，无法在 spawn 前设置，N/A 记账）；P7 页面自报探针（本地 dist 无上游 HTML 可探，N/A）；P9 MSI 由 NSIS 安装器承担；P5/P6 死命令确认两壳一致不迁。
 - 主窗导航守卫下沉到原生层（D1，旧壳 on_navigation 的等价物）：Electrobun 的 `navigationRules` 在原生代码里同步评估（不回调 Bun，覆盖 location 赋值/表单提交/meta refresh 等一切导航路径）；规则 = 阻断一切（`^*`）+ 放行页面 origin，外链由 open_external 走系统浏览器。规则构造抽成 `src/shared/nav-rules.ts`（注意「最后命中赢」：阻断必须排最前）。
 - 通知音效跨平台（D7，旧壳 rodio 的等价物）：`systemDefaultSoundCommand` 不再只认 macOS——Windows 用 PowerShell 播系统事件音（无需额外依赖），Linux 用 aplay 播 freedesktop 主题音（没有就静默）；自定义音仍按 `$DSH_HOME/sounds` 白名单。Windows/Linux 实际发声待 CI 产物实机确认。
