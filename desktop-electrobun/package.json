@@ -12,7 +12,7 @@
     "build:native": "bun run scripts/build-native.mjs",
     "build": "bun run build:native && bun run prepare:bundle && hutch electrobun build --env=stable && bun run scripts/sign-app.mjs",
     "sign:app": "bun run scripts/sign-app.mjs",
-    "assert:artifact": "bun run scripts/assert-artifact.mjs"
+    "build:installer": "bun run scripts/build-windows-installer.mjs"
   },
   "devDependencies": {
     "@types/bun": "^1.3.0",
