@@ -103,7 +103,7 @@ if (!existsSync(iconPath)) {
 // 应用目录可能上万文件（CEF），逐条 File /r 会爆命令行：改成在 NSIS 里对整目录 /r 递归。
 // OutFile 固定落 artifacts/（与 mac dmg 同一个交付目录）。
 const outFile = join(projectRoot, 'artifacts', 'windows-x64-DeepSeekHarnessDesktopBUN-setup.exe')
-const nsi = `
+const nsiTemplate = `
 !define APP_NAME "DeepSeek Harness Desktop BUN"
 !define APP_ID "DeepSeekHarnessDesktopBUN"
 !define APP_DIR_NAME "${nsiEscape(appDirName)}"
@@ -128,6 +128,7 @@ UninstPage instfiles
 Section "install"
   SetOutPath "$INSTDIR\\@@APP_DIR_NAME@@"
   File /r "${nsiEscape(appDir)}\\*.*"
+  @@PAYLOAD_RENAME@@  ; Windows 自解压约定：<launcher 同目录>/.installer/<stem>.tar.zst + <stem>.metadata.json
   WriteUninstaller "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
   WriteRegStr HKCU "Software\\@@APP_ID@@" "InstallDir" $INSTDIR
   WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayName" "@@APP_NAME@@"
@@ -147,7 +148,23 @@ Section "un.install"
   RMDir /r "$INSTDIR\\@@APP_DIR_NAME@@"
   DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
   DeleteRegKey HKCU "Software\\@@APP_ID@@"
-SectionEnd`.replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName)
+SectionEnd`
+  // Windows 自解压约定（extractor/main.zig extractFromSelf）：exe 同目录的 .installer/<stem>.tar.zst + <stem>.metadata.json，
+  // 退回同目录裸 <stem>.tar.zst/<stem>.metadata.json。hutch 产出的 payload 在 Resources/<hash>.tar.zst，装完就地改名挪过去。
+  const payloadDir = join(appDir, 'Resources')
+  const payloadListing = existsSync(payloadDir) ? readdirSync(payloadDir) : []
+  const payloadArchive = payloadListing.find((name) => name.endsWith('.tar.zst'))
+  const payloadMetadata = payloadListing.find((name) => name === 'metadata.json')
+  let payloadRename = '; 未找到 Resources/<hash>.tar.zst，跳过自解压重命名（无法首启自装）'
+  if (payloadArchive !== undefined && payloadMetadata !== undefined) {
+    const escapedPayload = nsiEscape(payloadArchive)
+    payloadRename = [
+      `  CreateDirectory "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer"`,
+      `  Rename "$INSTDIR\\@@APP_DIR_NAME@@\\Resources\\${escapedPayload}" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer\\launcher.tar.zst"`,
+      `  Rename "$INSTDIR\\@@APP_DIR_NAME@@\\Resources\\metadata.json" "$INSTDIR\\@@APP_DIR_NAME@@\\bin\\.installer\\launcher.metadata.json"`,
+    ].join('\n')
+  }
+const nsi = nsiTemplate.replaceAll('@@PAYLOAD_RENAME@@', payloadRename).replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName)
 
 const nsiPath = join(projectRoot, 'build', 'installer-windows.nsi')
 await Bun.write(nsiPath, nsi)
