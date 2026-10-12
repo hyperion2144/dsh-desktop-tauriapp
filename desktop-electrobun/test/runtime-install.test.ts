@@ -5,7 +5,7 @@
 
 import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
   OUTPUT_TAIL_LINES,
@@ -238,7 +238,8 @@ describe('installRuntime', () => {
     const options = fake.calls[0]?.options ?? {}
     expect(options.cwd).toBe(dir)
     const env = options.env as Record<string, string>
-    expect(env.PATH?.startsWith('/shim:')).toBe(true)
+    // 垫片目录接在 PATH 最前，分隔符按平台（Windows 是 `;`）
+    expect(env.PATH?.startsWith(`/shim${delimiter}`)).toBe(true)
     expect(env.FOO).toBe('bar')
   })
 
