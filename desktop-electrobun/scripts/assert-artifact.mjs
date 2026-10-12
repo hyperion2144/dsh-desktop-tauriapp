@@ -15,7 +15,7 @@
  * 退出码：0 = 通过；1 = 断言失败（缺 CEF / 缺 version.json / 读不出归档）。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -97,6 +97,25 @@ function tarExtract(archive, member) {
 const target = pickTarget()
 const platform = process.platform
 const payloads = findPayloads(target)
+
+/** version.json 的三条硬杠：有版本号、有 channel、stable 必须有更新源。 */
+function checkVersion(raw, label) {
+  try {
+    const parsed = JSON.parse(raw)
+    const channel = String(parsed.channel ?? '')
+    const baseUrl = String(parsed.baseUrl ?? '')
+    const version = String(parsed.version ?? '')
+    console.log(`[assert] ${label} → version=${version} channel=${channel} baseUrl=${baseUrl || '(空)'}`)
+    if (version === '') problems.push(`${label} 的 version.json 没有版本号`)
+    if (channel === '') problems.push(`${label} 的 version.json 没有 channel`)
+    // dev 构建本来就不带更新源（框架也拒绝更新 dev）；stable 必须带，否则自动更新永远不可用。
+    if (channel === 'stable' && baseUrl === '') {
+      problems.push(`${label}：stable 包没有 baseUrl（release.baseUrl 配错层了？）`)
+    }
+  } catch (error) {
+    problems.push(`${label} 的 version.json 解析失败：${String(error)}`)
+  }
+}
 const problems = []
 
 console.log(`[assert] 产物目录：${target}`)
@@ -104,6 +123,36 @@ console.log(`[assert] 平台：${platform}`)
 
 if (payloads.length === 0) {
   problems.push('产物里没有 payload 归档（*.tar.zst）——Electrobun 的包结构变了？')
+}
+
+/** app 目录布局里也可能有一份 version.json（Windows 的 launcher：exe 旁边就是 Resources\）。 */
+function findVersionJsonOnDisk(root, depth = 0) {
+  if (depth > 4) return []
+  const found = []
+  for (const entry of listDir(root)) {
+    if (entry === 'node_modules' || entry.startsWith('.')) continue
+    const full = join(root, entry)
+    let info
+    try {
+      info = statSync(full)
+    } catch {
+      continue
+    }
+    if (info.isDirectory()) {
+      found.push(...findVersionJsonOnDisk(full, depth + 1))
+      continue
+    }
+    if (entry === 'version.json') found.push(full)
+  }
+  return found
+}
+
+const diskVersionFiles = findVersionJsonOnDisk(target)
+// Windows 的产物是「exe + Resources/<hash>.tar.zst 载荷」两段式：version.json 落在 app 目录里，
+// 不在归档里。这时不再要求归档带它（CEF 标志仍必须在归档里），改验磁盘上那份。
+const needVersionInArchive = diskVersionFiles.length === 0
+if (diskVersionFiles.length > 0) {
+  console.log(`[assert] 磁盘上发现 ${String(diskVersionFiles.length)} 份 version.json（app 目录布局）`)
 }
 
 /** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
@@ -155,28 +204,30 @@ function inspect(archive, label, depth = 0) {
     if (!joined.includes(marker)) problems.push(`${label} 里缺 CEF 标志：${marker}`)
   }
   if (versionLine === undefined) {
-    problems.push(`${label} 里没有 version.json（更新与版本号都靠它）`)
+    const sample = norm
+      .slice(0, 20)
+      .map((line) => `      ${line}`)
+      .join('\n')
+    if (needVersionInArchive) {
+      problems.push(`${label} 里没有 version.json（更新与版本号都靠它）；前 20 条：\n${sample}`)
+    } else {
+      console.log(`[assert] ${label}：归档里没有 version.json（磁盘那份已代劳）`)
+    }
     return
   }
   const raw = tarExtract(archive, versionLine)
-  try {
-    const parsed = JSON.parse(raw ?? '')
-    const channel = String(parsed.channel ?? '')
-    const baseUrl = String(parsed.baseUrl ?? '')
-    const version = String(parsed.version ?? '')
-    console.log(`[assert] ${label} → version=${version} channel=${channel} baseUrl=${baseUrl || '(空)'}`)
-    if (version === '') problems.push(`${label} 的 version.json 没有版本号`)
-    if (channel === '') problems.push(`${label} 的 version.json 没有 channel`)
-    // dev 构建本来就不带更新源（框架也拒绍更新 dev）；stable 必须带，否则自动更新永远不可用。
-    if (channel === 'stable' && baseUrl === '') {
-      problems.push(`${label}：stable 包没有 baseUrl（release.baseUrl 配错层了？）`)
-    }
-  } catch (error) {
-    problems.push(`${label} 的 version.json 解析失败：${String(error)}`)
-  }
+  if (raw === null) problems.push(`${label} 的 version.json 读不出来`)
+  else checkVersion(raw, label)
 }
 
 for (const payload of payloads) inspect(payload, payload.slice(target.length + 1))
+for (const file of diskVersionFiles) {
+  try {
+    checkVersion(readFileSync(file, 'utf8'), `${file.slice(0, target.length + 1)}…（磁盘）`)
+  } catch (error) {
+    problems.push(`读不出 ${file}：${String(error)}`)
+  }
+}
 
 // 安装包形态也顺带报一下（dmg / Setup.zip / tar.gz 都是预期产物，缺了不判失败，只提示）。
 const installers = listDir(target).filter((name) => /\.(dmg|zip|tar\.gz|tar\.zst)$/.test(name))
