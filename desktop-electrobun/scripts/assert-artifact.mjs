@@ -180,11 +180,11 @@ function inspect(archive, label, depth = 0) {
     problems.push(`读不出归档列表：${label}（tar 不支持 zstd？装 zstd 或换 bsdtar）`)
     return
   }
-  const norm = listing.map((line) => line.replace(/\\/g, '/')).filter((line) => line !== '')
-  const versionLine = listing.find((line) => {
-    const normalized = line.replace(/\\/g, '/')
-    return normalized === 'version.json' || normalized.endsWith('/version.json')
-  })
+  // Windows 的 tar 列表是 CRLF：行尾的 `\r` 会把 `…/version.json` 判成不匹配（CI 实测）。
+  const norm = listing
+    .map((line) => line.replace(/\r$/, '').replace(/\\/g, '/'))
+    .filter((line) => line !== '')
+  const versionLine = norm.find((line) => line === 'version.json' || line.endsWith('/version.json'))
   const nested = norm.filter((line) => line.endsWith('.tar.zst'))
   if (versionLine === undefined && nested.length > 0 && depth < 2) {
     console.log(`[assert] ${label} → 包装层（内含 ${String(nested.length)} 份内层归档），逐份解出来再断言`)

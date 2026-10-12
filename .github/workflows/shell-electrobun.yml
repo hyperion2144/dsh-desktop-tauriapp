@@ -59,6 +59,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+
+      # macos-14 runner 自带 Android SDK（~9GB）等用不到的大件，而 CEF 构建 + 压缩 + DMG 要写出
+      # 2GB 以上——首次跑就撞过 `hdiutil: create failed - No space left on device`。
+      - name: 腾磁盘（macOS）
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /Users/runner/Library/Android/sdk /Users/runner/.rustup /Users/runner/.cargo /usr/local/share/dotnet 2>/dev/null || true
+          df -h /
       # Bun 版本要跟 Electrobun 2.0.2 自带的那个对齐（Bun 1.4.0）。低版本缺
       # `Bun.Terminal` / `Bun.spawn({terminal})` 等能力，node-pty 垫片会直接失效。
       - name: Setup Bun 1.4.0
