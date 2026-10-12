@@ -122,10 +122,39 @@ export function importSound(home: string, source: string): string {
   return name
 }
 
-/** 系统默认提示音（macOS：`afplay` 播系统音）——试听 `default` 档用。 */
+
+/**
+ * 系统默认提示音（D7，旧壳 rodio 的跨平台等价物；试听 `default` 档用）：
+ * macOS afplay 播 Ping.aiff；Windows 用 PowerShell 播系统事件音（无需额外依赖）；
+ * Linux 有 aplay 就播 freedesktop 主题音，没有就退 null（静默）。
+ */
 export function systemDefaultSoundCommand(platform: NodeJS.Platform): string[] | null {
-  if (platform !== 'darwin') return null
-  return ['afplay', '-t', String(MAX_SOUND_SECONDS), '/System/Library/Sounds/Ping.aiff']
+  if (platform === 'darwin') {
+    return ['afplay', '-t', String(MAX_SOUND_SECONDS), '/System/Library/Sounds/Ping.aiff']
+  }
+  if (platform === 'win32') {
+    // PowerShell 播系统事件音（无需额外依赖；-STA 避免 COM 报错）
+    return [
+      'powershell',
+      '-NoProfile',
+      '-STA',
+      '-Command',
+      '[System.Media.SystemSounds]::Asterisk.Play(); Start-Sleep -Milliseconds 600',
+    ]
+  }
+  if (platform === 'linux') {
+    const candidates = [
+      '/usr/share/sounds/freedesktop/stereo/complete.oga',
+      '/usr/share/sounds/freedesktop/stereo/bell.oga',
+    ]
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return ['aplay', '-q', candidate]
+      }
+    }
+    return null
+  }
+  return null
 }
 
 export function createNotifier(options: NotifierOptions): Notifier {

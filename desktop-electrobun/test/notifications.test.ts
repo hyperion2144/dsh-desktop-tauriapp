@@ -264,9 +264,9 @@ describe('音效格式表与系统音', () => {
     expect(soundFormatMatches('wav', new Uint8Array([0x52, 0x49, 0x46, 0x46]))).toBe(false)
   })
 
-  test('系统默认提示音只在 macOS 上有命令', () => {
+  test('系统默认提示音（D7）：三平台各有命令，Linux 无主题音则静默', () => {
     expect(systemDefaultSoundCommand('darwin')?.[0]).toBe('afplay')
-    expect(systemDefaultSoundCommand('win32')).toBeNull()
+    expect(systemDefaultSoundCommand('win32')?.[0]).toBe('powershell')
     expect(systemDefaultSoundCommand('linux')).toBeNull()
   })
 })

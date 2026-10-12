@@ -6,6 +6,7 @@
 
 ### 桌面壳（Electrobun）
 
+- 通知音效跨平台（D7，旧壳 rodio 的等价物）：`systemDefaultSoundCommand` 不再只认 macOS——Windows 用 PowerShell 播系统事件音（无需额外依赖），Linux 用 aplay 播 freedesktop 主题音（没有就静默）；自定义音仍按 `$DSH_HOME/sounds` 白名单。Windows/Linux 实际发声待 CI 产物实机确认。
 - 关窗回托盘首次提示（D5）与运行时回退通知（D6）：主窗关窗隐藏到托盘时，第一次发一条「窗口已最小化到托盘，点托盘图标可找回」（window.lifecycle 场景，每 profile 一次）；运行时解析回退（用户选的版本起不来/外部 dsh 找不到）不再只写日志，notifier 就绪后补发一条 config.error 通知。
 - 窗口几何记忆扩到每个 profile 窗口（D3）：此前只有主窗记 `window.json`，多窗口下其余 profile 窗口的位置/尺寸不落盘；现在按 profile 各存一份（主窗沿用 `window.json`，其余存 `window-<profile>.json`），还原/落盘/退出清理都按窗走，越界与坏数据校验同一套。
 - 守护器 TCP 判活（D2，旧壳 lib.rs 守护器的等价物）：新增 `desktop-electrobun/src/shared/watchdog.ts`（纯裁决：健康 = TCP 连接成功；运行中连不上一次即分流——远程/外部实例只提示不代拉，本地拉起的立即自愈；自愈每轮 3 次封顶、连续健康 ≥2 分钟才重置计数、同类提示 5 分钟节流）；service 每 5s 探测上游端口（远程模式探远程 host:port），判死本地实例交守护器杀旧拉新，放弃自愈发 service.health 通知。
