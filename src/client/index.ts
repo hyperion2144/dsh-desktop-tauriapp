@@ -4,7 +4,6 @@ import { applyAdvancedShell } from './advanced-shell.ts'
 import { registerDownloadsTab } from './downloads-tab.tsx'
 import { installDownloadInterceptor } from './download-intercept.ts'
 import { installDesktopBrowserBridge } from './desktop-browser-bridge.ts'
-import { installMobileRenderBudget, setRenderBudgetForDesktop } from './mobile-render-budget.ts'
 import { registerDesktopSettings } from './desktop-settings.tsx'
 import { registerNotificationsTab } from './notifications-tab.tsx'
 import { requestDesktopClientEnvironment } from './environment.ts'
@@ -123,20 +122,10 @@ export function apply(ctx: ClientContext): void {
     // 即使非 advanced 模式（普通浏览器直访 dsh）也装，便于离线调试。
     installWebviewConsoleMirror()
     step = '橡皮筋滚动'
-    // WebView 橡皮筋滚动对齐浏览器（禁 rubber-band）
     installNoRubberBand()
     step = '输入框控制字符守护'
     // 输入框控制字符守护（#188）：capture 阶段拦下带控制字符的 beforeinput。
     installComposerInputGuard()
-    step = '移动端渲染预算'
-    // 移动端渲染预算（#147 路线 B）：窄屏 + 触摸时给会话滚动容器做视觉窗口化；
-    // 只在本仓做，不动 dsh-mobile-nav 子模块；命中不了容器则整体 no-op。
-    const renderBudgetEnv = requestDesktopClientEnvironment()
-    // 壳下发开关优先；未下发（纯浏览器/查询失败）时保持缺省开。
-    void renderBudgetEnv.then((environment) => {
-      if (environment?.renderBudget === false) setRenderBudgetForDesktop(false)
-      installMobileRenderBudget()
-    })
     step = '下载管理器 tab'
     // 下载管理器（#72）：右侧边栏 tab + header 按钮（无 sidebarRightTabs 服务时静默不注册）
     registerDownloadsTab(ctx)

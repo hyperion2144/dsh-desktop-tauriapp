@@ -1,0 +1,12 @@
+node_modules/
+runtime/bun-preload.mjs
+resources/tray.png
+resources/tray.ico
+icon.iconset/
+build/
+artifacts/
+.hutch/
+.cottontail-tmp/
+# 通知桥是构建产物：由 `bun run build:native` 从 native/notify_un.m 编出来（dev 与 build 都会先编）
+native/libdsh-notify.dylib
+builtin-runtime/

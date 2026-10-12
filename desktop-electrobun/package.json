@@ -1,0 +1,22 @@
+{
+  "name": "dsh-desktop-shell",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "DSH 桌面壳（Electrobun + CEF + Bun 运行时）——迁移自 desktop/src-tauri（Rust + Tauri 2）",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "bun run build:native && hutch electrobun dev",
+    "prepare:bundle": "bun run scripts/prepare-bundle.mjs",
+    "build:native": "bun run scripts/build-native.mjs",
+    "build": "bun run build:native && bun run prepare:bundle && hutch electrobun build --env=stable && bun run scripts/sign-app.mjs",
+    "sign:app": "bun run scripts/sign-app.mjs",
+    "build:installer": "bun run scripts/build-windows-installer.mjs",
+    "assert:artifact": "bun run scripts/assert-artifact.mjs"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.6.0"
+  }
+}

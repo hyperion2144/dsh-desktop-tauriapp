@@ -1,0 +1,20 @@
+const list = await (await fetch("http://127.0.0.1:9222/json")).json();
+const page = list.find((t) => t.type === "page" && /127\.0\.0\.1:\d+/.test(t.url) && !t.url.includes("9222"));
+const ws = new WebSocket(page.webSocketDebuggerUrl);
+let seq = 0; const pending = new Map();
+const send = (m, p = {}) => new Promise((r) => { const i = ++seq; pending.set(i, r); ws.send(JSON.stringify({ id: i, method: m, params: p })); });
+ws.addEventListener("message", (e) => { const m = JSON.parse(e.data); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } });
+await new Promise((r) => ws.addEventListener("open", r));
+const expr = `(() => {
+  const out = {};
+  const ta = [...document.querySelectorAll("textarea")];
+  out.textareas = ta.map(t => ({ ph: t.placeholder, cls: t.className, disabled: t.disabled, visible: !!(t.offsetWidth||t.offsetHeight) }));
+  const ce = [...document.querySelectorAll("[contenteditable=true]")];
+  out.contenteditables = ce.map(t => ({ cls: t.className, ph: t.getAttribute("data-placeholder") || t.getAttribute("aria-label") }));
+  out.buttons = [...document.querySelectorAll("button")].map(b => (b.innerText||b.getAttribute("aria-label")||"").trim().slice(0,26)).filter(Boolean).slice(0,40);
+  out.bodyShort = (document.body.innerText||"").replace(/\\n+/g," | ").slice(0, 400);
+  return out;
+})()`;
+const res = await send("Runtime.evaluate", { expression: expr, returnByValue: true });
+console.log(JSON.stringify(res.result?.result?.value ?? res.result, null, 1));
+ws.close();

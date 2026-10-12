@@ -8,6 +8,10 @@
 
 > **来源与致谢**：本仓库 fork 自 [happpsee/dsh-desktop-app](https://github.com/happpsee/dsh-desktop-app)，现由 [hyperion2144/dsh-desktop-tauriapp](https://github.com/hyperion2144/dsh-desktop-tauriapp) 独立演进维护；感谢原作者的开创性工作。
 
+## 新栈壳（Electrobun 版，开发中）
+
+`desktop-electrobun/` 是迁移中的新桌面壳（Electrobun/Bun 主进程 + CEF 渲染，替代 WKWebView/JSC，根因修复 #200 白屏刷新），能力已与旧壳对齐（清单见 issue [#220](https://github.com/hyperion2144/dsh-desktop-tauriapp/issues/220)），三平台 CI 每次构建出全套产物。构建与开发见 [desktop-electrobun/README.md](desktop-electrobun/README.md)，使用指南见 [desktop-electrobun/GUIDE.md](desktop-electrobun/GUIDE.md)；迁移独立仓 `dsh-desktop-bun` 的执行方案见 [docs/research/electrobun-repo-migration.md](docs/research/electrobun-repo-migration.md）。
+
 ## 主要看点
 
 1. **内置运行时，零前置依赖**：Node sidecar + dsh 依赖树随安装包分发，双击即用；也可随时切换到自己装的外部 `dsh`

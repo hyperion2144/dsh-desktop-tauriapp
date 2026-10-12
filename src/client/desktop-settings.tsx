@@ -59,8 +59,6 @@ interface DesktopData {
   mux_heartbeat_ms?: number | null
   /** #147 路线 A：手机端是否改用桌面布局 */
   desktop_layout_on_phones?: boolean | null
-  /** #147 路线 B：桌面是否启用视觉窗口化（缺省 true；关掉可排除它带来的观感差异） */
-  desktop_render_budget?: boolean | null
   /** #186 防休眠：有会话在跑时阻止系统休眠（缺省 true；屏幕仍会照常熄灭） */
   prevent_sleep?: boolean | null
 }
@@ -88,6 +86,40 @@ interface RuntimeCatalog {
   /** #107：目录拉取失败时的降级标记（此时 catalog 为空、installed 为本地全部已装） */
    mode?: 'builtin' | 'external'
   error?: string
+  /** 当前真正在跑的那棵树（override | external | installed | builtin）：标记「运行中」并禁掉它的下载/卸载 */
+  running?: { kind: string; version: string | null; dir: string | null } | null
+}
+
+/** 应用更新（#220 决策 11）：壳把框架 Updater 的状态机翻成这个视图，客户端只负责渲染 */
+interface UpdateSnapshotLike {
+  available: boolean
+  reason: string
+  view: {
+    phase: string
+    label: string
+    message: string
+    current: string
+    latest: string
+    channel: string
+    progress: number | null
+    bytesDownloaded: number | null
+    totalBytes: number | null
+    error: string
+    updateReady: boolean
+  }
+  actions: { canCheck: boolean; canDownload: boolean; canApply: boolean; hint: string }
+}
+
+function fmtBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
 }
 
 interface MigrationStatus {
@@ -323,7 +355,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147 路线 A：手机端是否改用桌面布局（不注入 dsh-web-mobile）；#144：网关 mux 心跳覆盖
   const [muxHeartbeatInput, setMuxHeartbeatInput] = useState<string>('30000')
   const [desktopLayoutOnPhones, setDesktopLayoutOnPhones] = useState(false)
-  const [desktopRenderBudget, setDesktopRenderBudget] = useState(true)
   // #186：有会话在跑时阻止系统休眠（缺省开）
   const [preventSleep, setPreventSleep] = useState(true)
   const [preventSleepNote, setPreventSleepNote] = useState<string | null>(null)
@@ -331,7 +362,6 @@ function DesktopSettingsPanel(): React.ReactElement {
   // #147/#144：壳键状态从持久化值回填（设置弹窗每次挂载都重读；只写不回填 = 关掉再进就丢）
   useEffect(() => {
     setDesktopLayoutOnPhones(desktop.desktop_layout_on_phones === true)
-    setDesktopRenderBudget(desktop.desktop_render_budget !== false)
     setPreventSleep(desktop.prevent_sleep !== false)
     const hb = desktop.mux_heartbeat_ms
     setMuxHeartbeatInput(typeof hb === 'number' ? String(hb) : '30000')
@@ -408,6 +438,45 @@ function DesktopSettingsPanel(): React.ReactElement {
   }
   // #110：卸载中的版本（行级禁用态；删除可能数秒，期间按钮显示「卸载中…」）
   const [removingVersion, setRemovingVersion] = useState<string | null>(null)
+  // 日志与诊断（#220）：挂载读一次摘要与日志路径，导出按钮只在点击时调 RPC
+  const [diagSummary, setDiagSummary] = useState<string | null>(null)
+  const [diagLogPath, setDiagLogPath] = useState<string | null>(null)
+  const [diagExport, setDiagExport] = useState<string | null>(null)
+  // 应用更新（#220 决策 11，壳的新增能力）：挂载读一次，检查/下载/安装期间 1s 轮询
+  const [updateState, setUpdateState] = useState<UpdateSnapshotLike | null>(null)
+  const updateBusy =
+    updateState !== null &&
+    (updateState.view.phase === 'checking' ||
+      updateState.view.phase === 'downloading' ||
+      updateState.view.phase === 'preparing')
+  const runUpdate = (cmd: 'check_update' | 'download_update' | 'apply_update'): void => {
+    void invoke<UpdateSnapshotLike>(cmd)
+      .then((snapshot) => {
+        setUpdateState(snapshot)
+        showToast(snapshot.view.label, snapshot.view.phase !== 'error')
+      })
+      .catch((e: unknown) => showToast(`更新失败：${String(e)}`, false))
+  }
+  useEffect(() => {
+    let cancelled = false
+    void invoke<UpdateSnapshotLike>('get_update_state')
+      .then((snapshot) => {
+        if (!cancelled) setUpdateState(snapshot)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (!updateBusy) return
+    const timer = setInterval(() => {
+      void invoke<UpdateSnapshotLike>('get_update_state')
+        .then(setUpdateState)
+        .catch(() => {})
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [updateBusy])
   // pnpm 安装进度（后端轮询；remote 页 event.listen 不可用）
   const [dlProgress, setDlProgress] = useState<{
     version: string
@@ -474,6 +543,16 @@ function DesktopSettingsPanel(): React.ReactElement {
           invoke<DesktopData>('get_desktop_settings_data'),
         ])
         if (cancelled) return
+        // 诊断摘要与日志路径（失败只当没有——诊断读取不该挡住设置面板）
+        void invoke<{ diagnostics?: { summary?: string; logs?: { shell?: { path?: string } } } }>('get_diagnostics')
+          .then((r) => {
+            if (cancelled) return
+            const summary = r.diagnostics?.summary
+            if (typeof summary === 'string' && summary !== '') setDiagSummary(summary)
+            const path = r.diagnostics?.logs?.shell?.path
+            if (typeof path === 'string' && path !== '') setDiagLogPath(path)
+          })
+          .catch(() => {})
         setProxy({
           proxy_mode: (ns.proxy_mode as string) || p.proxy_mode || 'off',
           proxy_url: (ns.proxy_url as string) || p.proxy_url || '',
@@ -491,7 +570,6 @@ function DesktopSettingsPanel(): React.ReactElement {
           port: (ns.port as number) || d.port || 3080,
           mux_heartbeat_ms: d.mux_heartbeat_ms ?? null,
           desktop_layout_on_phones: d.desktop_layout_on_phones ?? null,
-          desktop_render_budget: d.desktop_render_budget ?? null,
           prevent_sleep: d.prevent_sleep ?? null,
         })
         // 迁移 select 默认填充：源取第一个，目标取另一个（保持原 fillDst 行为）。
@@ -725,17 +803,6 @@ function DesktopSettingsPanel(): React.ReactElement {
       .catch((e) => setDownloadBoxNote(`保存失败：${String(e)}`))
   }
 
-  /** #147 路线 B：桌面视觉窗口化开关（即时保存；**下次启动桌面壳客户端生效**）。 */
-  const handleToggleRenderBudget = (next: boolean): void => {
-    setDesktopRenderBudget(next)
-    void nsSave({ desktop_render_budget: next }).then(() =>
-      setDownloadBoxNote(
-        next
-          ? '已保存：桌面启用视觉窗口化（缓解页面内存导致的自动刷新），下次启动生效。'
-          : '已保存：桌面关闭视觉窗口化，下次启动生效。'
-      )
-    )
-  }
 
   /** #186：防休眠开关（即时保存；壳侧状态机立刻生效，不需要重启）。 */
   const handleTogglePreventSleep = (next: boolean): void => {
@@ -1255,6 +1322,96 @@ function DesktopSettingsPanel(): React.ReactElement {
       </SectionBox>
 
       {/* ── dsh 运行时（版本管理：下载/切换，#95）── */}
+      {/* ── 日志与诊断（#220）：一个按钮导出快照，用户报问题时直接发文件 ── */}
+      <SectionBox title="日志与诊断">
+        <div style={NOTE_STYLE}>{diagSummary === null ? '读取中…' : diagSummary}</div>
+        {diagLogPath !== null && <div style={NOTE_STYLE}>壳日志：{diagLogPath}</div>}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <PfBtn
+            variant="ghost"
+            onClick={() => {
+              void invoke<{ path: string; bytes: number }>('export_diagnostics')
+                .then((r) => {
+                  setDiagExport(r.path)
+                  showToast(`诊断已导出：${r.path}`, true)
+                })
+                .catch((e: unknown) => showToast(`导出失败：${String(e)}`, false))
+            }}
+          >
+            导出诊断
+          </PfBtn>
+          <PfBtn
+            variant="ghost"
+            onClick={() => {
+              void invoke<{ diagnostics?: { logs?: { shell?: { path?: string } } } }>('get_diagnostics')
+                .then((r) => {
+                  const path = r.diagnostics?.logs?.shell?.path
+                  if (typeof path === 'string' && path !== '') showToast(`壳日志：${path}`, true)
+                  else showToast('诊断里没有日志路径', false)
+                })
+                .catch((e: unknown) => showToast(`读取失败：${String(e)}`, false))
+            }}
+          >
+            显示日志路径
+          </PfBtn>
+        </div>
+        {diagExport !== null && <div style={NOTE_STYLE}>上次导出：{diagExport}</div>}
+      </SectionBox>
+
+      {/* ── 应用更新（#220 决策 11）：旧 Tauri 壳没这个能力，是新增件；走框架自带的 Updater ── */}
+      <SectionBox title="应用更新">
+        <div style={NOTE_STYLE}>
+          {updateState === null
+            ? '读取中…'
+            : `当前版本 ${updateState.view.current || '未知'}${
+                updateState.view.channel ? `（${updateState.view.channel}）` : ''
+              } · ${updateState.view.label}`}
+        </div>
+        {updateState !== null && updateState.view.message !== '' && (
+          <div style={NOTE_STYLE}>{updateState.view.message}</div>
+        )}
+        {updateState !== null && updateState.actions.hint !== '' && (
+          <div style={NOTE_STYLE}>{updateState.actions.hint}</div>
+        )}
+        {updateState !== null && !updateState.available && updateState.reason !== '' && (
+          <div style={NOTE_STYLE}>{updateState.reason}</div>
+        )}
+        {updateState !== null && updateState.view.error !== '' && (
+          <div style={DANGER_NOTE_STYLE}>{updateState.view.error}</div>
+        )}
+        {updateBusy && updateState !== null && updateState.view.progress !== null && (
+          <div style={NOTE_STYLE}>
+            进度 {updateState.view.progress}%
+            {updateState.view.totalBytes !== null
+              ? `（${fmtBytes(updateState.view.bytesDownloaded)} / ${fmtBytes(
+                  updateState.view.totalBytes
+                )}）`
+              : ''}
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <PfBtn
+            variant="ghost"
+            disabled={updateState === null || !updateState.actions.canCheck}
+            onClick={() => runUpdate('check_update')}
+          >
+            检查更新
+          </PfBtn>
+          <PfBtn
+            disabled={updateState === null || !updateState.actions.canDownload}
+            onClick={() => runUpdate('download_update')}
+          >
+            下载更新
+          </PfBtn>
+          <PfBtn
+            disabled={updateState === null || !updateState.actions.canApply}
+            onClick={() => runUpdate('apply_update')}
+          >
+            重启并安装
+          </PfBtn>
+        </div>
+      </SectionBox>
+
       <SectionBox title="dsh 运行时（版本下载 / 切换）">
         <ThemeSelect
           style={{ marginBottom: 8 }}
@@ -1285,7 +1442,9 @@ function DesktopSettingsPanel(): React.ReactElement {
                       }`
                     : runtimeCatalog.builtin
                       ? `当前使用：内置 dsh ${runtimeCatalog.builtin}（兜底）`
-                      : '当前无可用 dsh'}
+                      : runtimeCatalog.running?.version
+                        ? `当前使用：运行时 ${runtimeCatalog.running.version}（${runtimeCatalog.running.kind}）`
+                        : '当前无可用 dsh'}
               </div>
               {(() => {
                 // 折叠（#95）：默认只显示各渠道头版 + 已下载版本，其余收进「展开全部」
@@ -1325,7 +1484,14 @@ function DesktopSettingsPanel(): React.ReactElement {
                       const installed = runtimeCatalog.installed.some((i) => i.version === c.version)
                       // #113：内置随包分发（不在 installed 数组）——可切换、标「内置」、不显示下载
                       const isBuiltin = runtimeCatalog.builtin === c.version
-                      const available = installed || isBuiltin
+                      // 运行中的那棵树（多为 dev 用 DSH_SHELL_RUNTIME_DIR 指着的树）：它不是「可下载」的东西，
+                      // 也不该显示下载按钮（用户报：内置正在用的版本还能下载）
+                      const isRunning =
+                        runtimeCatalog.mode !== 'external' &&
+                        runtimeCatalog.running?.version !== null &&
+                        runtimeCatalog.running?.version !== undefined &&
+                        runtimeCatalog.running.version === c.version
+                      const available = installed || isBuiltin || isRunning
                       // 当前使用：selected 有值按号匹配；selected 为空 = 内置兜底（内置行即「使用中」）
                       // 当前使用：仅来源=内置时按号匹配（selected 空 = 内置兜底行）；
                       // 外部 CLI 模式下没有哪个下载版本「使用中」（#135，卸载不再被锁死）
@@ -1334,11 +1500,12 @@ function DesktopSettingsPanel(): React.ReactElement {
                           ? false
                           : runtimeCatalog.selected
                             ? runtimeCatalog.selected === c.version
-                            : isBuiltin
+                            : isBuiltin || isRunning
                       const tags: string[] = []
                       if (c.channel) tags.push(c.channel)
                       if (isBuiltin) tags.push('内置')
                       else if (installed) tags.push('已下载')
+                      if (isRunning) tags.push('运行中')
                       const downloadState = runtimeDownloading[c.version]
                       const failedReason = typeof downloadState === 'object' ? downloadState.failed : ''
                       const pct =
@@ -1380,13 +1547,20 @@ function DesktopSettingsPanel(): React.ReactElement {
                                 </PfBtn>
                                 <PfBtn
                                   variant="danger"
-                                  disabled={removingVersion !== null || runtimeCatalog.selected === c.version || c.version === runtimeCatalog.builtin}
+                                  disabled={
+                                    removingVersion !== null ||
+                                    isRunning ||
+                                    runtimeCatalog.selected === c.version ||
+                                    c.version === runtimeCatalog.builtin
+                                  }
                                   title={
-                                    runtimeCatalog.selected === c.version
-                                      ? '使用中的版本不可卸载，请先切换'
-                                      : c.version === runtimeCatalog.builtin
-                                        ? '内置版本随应用分发，不可卸载'
-                                        : '删除本地已下载的运行时'
+                                    isRunning
+                                      ? '正在运行的版本不可卸载'
+                                      : runtimeCatalog.selected === c.version
+                                        ? '使用中的版本不可卸载，请先切换'
+                                        : c.version === runtimeCatalog.builtin
+                                          ? '内置版本随应用分发，不可卸载'
+                                          : '删除本地已下载的运行时'
                                   }
                                   onClick={() => handleRemoveRuntime(c.version)}
                                 >
@@ -1547,15 +1721,6 @@ function DesktopSettingsPanel(): React.ReactElement {
               onChange={(e) => setDesktopLayoutOnPhones(e.target.checked)}
             />
             手机端改用桌面布局（不加载移动布局插件）
-          </label>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="checkbox"
-              data-desktop-settings="desktop-render-budget"
-              checked={desktopRenderBudget}
-              onChange={(e) => handleToggleRenderBudget(e.target.checked)}
-            />
-            桌面启用视觉窗口化（缓解页面内存导致的自动刷新；缺省开）
           </label>
           <PfBtn variant="ghost" onClick={handleSaveMobileLayout}>保存</PfBtn>
         </div>

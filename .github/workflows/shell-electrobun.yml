@@ -1,0 +1,257 @@
+name: Shell (Electrobun)
+
+# 新壳（desktop-electrobun，Electrobun + CEF + Bun）的三平台构建与产物断言。
+#
+# 为什么单开一个 workflow：现有 `ci.yml` / `release.yml` 是 **Tauri 壳**的（Rust + cargo +
+# pnpm + Tauri 打包），两者并存到切换完成（#220 决策 12/17：一次性换壳、迁移期旧壳冻结）。
+# 本 workflow 只碰 desktop-electrobun 与它依赖的几份共用资源。
+#
+# 为什么必须有产物断言这一步：Electrobun 的 `renderer: 'cef'` 在**没打 CEF** 时会静默回落
+# 系统 webview（mac `nativeWrapper.mm:8359` / win `nativeWrapper.cpp:8944` / linux
+# `nativeWrapper.cpp:591`），外观上完全看不出——但那就等于把 #200 那族 JavaScriptCore 崩溃
+# 原样带回来。所以打包后立刻用 `scripts/assert-artifact.mjs` 翻产物（见该脚本注释）。
+#
+# 未验证假设（分支推送前 CI 跑不起来，首次跑要盯这几处）：
+#   1. hutch CLI 在 Windows/Linux runner 上的安装与 PATH（这里用 Git Bash 跑官方 install.sh）；
+#   2. Windows/Linux 自带 tar 是否支持 `--zstd`（assert 脚本已退到 `-tf`，但没有 zstd 时
+#      tar 可能仍读不了 zst）；
+#   3. Windows/Linux 产物里 CEF 标志名与 payload 布局（按 Electrobun 源码推断，未实机验证）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop-electrobun/**'
+      - 'desktop/src-tauri/resources/dsh/bun-preload.mjs'
+      - 'desktop/src-tauri/icons/**'
+      - '.github/workflows/shell-electrobun.yml'
+#
+# 注：这里只做「构建 + 断言 + 存 CI 产物」。真正的发布（把安装包与 `<platformPrefix>-update.json` +
+# `<platformPrefix>-*.app.tar.zst` 作为 Release 资产传上去）还没接——自动更新的清单就是靠这两个资产名稳定地
+# 指到最新一版，缺了它们更新永远不可用。等切换窗口、允许打 tag 时再加一个 release job。
+  pull_request:
+    paths:
+      - 'desktop-electrobun/**'
+      - 'desktop/src-tauri/resources/dsh/bun-preload.mjs'
+      - 'desktop/src-tauri/icons/**'
+      - '.github/workflows/shell-electrobun.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 构建 + 产物断言（${{ matrix.label }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Electrobun 官方只发 macOS arm64（无 x64）、Windows x64/arm64、Linux x64/arm64。
+          # 规格 #220 的平台范围就是这三个（Windows ARM64 与 macOS x64 在 Out of Scope）。
+          - os: macos-14
+            label: macOS arm64
+          - os: windows-latest
+            label: Windows x64
+          - os: ubuntu-latest
+            label: Linux x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+
+      # macos-14 runner 自带 Android SDK（~9GB）等用不到的大件，而 CEF 构建 + 压缩 + DMG 要写出
+      # 2GB 以上——首次跑就撞过 `hdiutil: create failed - No space left on device`。
+      - name: 腾磁盘（macOS）
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /Users/runner/Library/Android/sdk /Users/runner/.rustup /Users/runner/.cargo /usr/local/share/dotnet 2>/dev/null || true
+          df -h /
+      # Bun 版本要跟 Electrobun 2.0.2 自带的那个对齐（Bun 1.4.0）。低版本缺
+      # `Bun.Terminal` / `Bun.spawn({terminal})` 等能力，node-pty 垫片会直接失效。
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+
+      # hutch 官方 install.sh 的 uname 分支只认 Darwin/Linux（Windows 的 Git Bash 会报
+      # unsupported platform），所以 Windows 走官方 install.ps1；两条路都把 bin 目录
+      # 写进 GITHUB_PATH，后面的步骤才看得见 `hutch`。
+      - name: 安装 hutch（Electrobun CLI，非 Windows）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          curl -fsSL https://hutch.blackboard.sh/hutch/install.sh | sh
+          echo "$HOME/.hutch/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.hutch/bin:$PATH"
+          hutch --version
+
+      - name: 安装 hutch（Electrobun CLI，Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://hutch.blackboard.sh/hutch/install.ps1 -OutFile "$env:TEMP\hutch-install.ps1"
+          & "$env:TEMP\hutch-install.ps1" -NoModifyPath
+          $bin = Join-Path $HOME '.hutch\bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & (Join-Path $bin 'hutch.exe') --version
+
+      - name: 依赖（bun install）
+        working-directory: desktop-electrobun
+        run: bun install --frozen-lockfile
+
+      # 内置 dsh 运行时树（goal 第 1 条）：必须在 prepare:bundle 之前装好（它会把树拷进包内资源）；
+      # 不准备的话产物里没有 app/dsh，干净机器首启直接「找不到可用的 dsh 运行时」。
+      # assert-artifact 已把这条列为必需标志，缺了就红（首轮实测拦住过）。
+      - name: 装配内置 dsh 运行时（随包）
+        # 注意：装配脚本会整目录重进 resources/dsh（rmSync + npm 装），把 tracked 的
+        # bun-preload.mjs（Bun 兼容层单一来源）也一起抹掉 —— 装完立刻从 git 恢复它，
+        # 否则下一步 prepare:bundle 找不到来源直接失败（run 38291291385 实测）。
+        run: |
+          node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
+          git checkout -- desktop/src-tauri/resources/dsh/bun-preload.mjs
+
+      # 原生通知桥（native/libdsh-notify.dylib）也是单测的输入之一（「dylib 就位」那条），
+      # 所以先准备好再跑测试；非 macOS 上 build:native 自己跳过。
+      - name: 准备（原生通知桥 + 包内资源）
+        working-directory: desktop-electrobun
+        run: |
+          bun run build:native
+          bun run prepare:bundle
+
+      - name: 类型检查
+        working-directory: desktop-electrobun
+        run: bun run typecheck
+
+      # 默认不设 DSH_SHELL_TEST_RUNTIME ⇒ 需要真 dsh 运行时树的黑盒缝 ① 会自行跳过，
+      # 其余（策略、路由、台账、设置、guest、更新、通知……）全跑。
+      - name: 单元测试
+        working-directory: desktop-electrobun
+        run: bun test
+
+      - name: 打包（Electrobun，CEF）
+        working-directory: desktop-electrobun
+        shell: bash
+        run: |
+          # hdiutil 在 runner 上偶发 Resource busy（实测 run 38294201295）：重试三次
+          for attempt in 1 2 3; do
+            hutch electrobun build --env=stable && break
+            echo "打包第 $attempt 次失败，重试…"
+            [ "$attempt" = "3" ] && exit 1
+            sleep 30
+          done
+          # 封装签名只在 macOS 有意义（通知授权要一份绑了 Info.plist 的签名）；
+          # 脚本自身在非 macOS 会跳过，但 Windows/Linux 产物里没有 .app，这里就不调它。
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            bun run sign:app
+          fi
+
+      - name: 产物断言（CEF 运行时 + version.json）
+        working-directory: desktop-electrobun
+        run: bun run assert:artifact
+
+      # Windows 交付物 = 可直接执行的安装程序（A2）+ 可选安装目录（A4）。Electrobun 自身只出
+      # 构建目录 + payload 归档，这里用 NSIS 包一层：每用户安装、目录选择页、开始菜单快捷方式、
+      # 卸载器；图标用与 win.icon 同源的 resources/app-icon.ico。GitHub windows-latest 镜像自带
+      # NSIS，万一镜像瘦身没了再 choco 兜底。
+      - name: Windows 安装器（NSIS）
+        if: runner.os == 'Windows'
+        working-directory: desktop-electrobun
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          bun run build:installer
+
+      - name: 静默安装（NSIS /S，装到固定目录）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem desktop-electrobun\artifacts -Recurse -Filter *-setup.exe | Select-Object -First 1
+          if ($null -eq $setup) { throw '找不到 setup.exe' }
+          $env:ELECTROBUN_INSTALLER_UI_AUTOCLOSE = '1'
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S','/D=C:\dsh-smoke' -Wait
+          if (-not (Test-Path 'C:\dsh-smoke')) { throw '静默安装后没有安装目录' }
+          Get-ChildItem C:\dsh-smoke | Select-Object -First 12 | ForEach-Object { $_.Name }
+          # 诊断：装出来的树里 payload 归档/版本文件在哪（launcher 报 No metadata marker 时用它定位）
+          Get-ChildItem C:\dsh-smoke -Recurse -Include *.tar.zst,version.json,build.json -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host ("{0}  {1}" -f $_.FullName, $_.Length) }
+          # 诊断 2：装出来的树全貌（深度 3），看 launcher 旁边的 Resources 里有没有 main.js/build.json
+          Get-ChildItem C:\dsh-smoke -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 | ForEach-Object { Write-Host $_.FullName }
+      - name: 无窗口启动 + SHELL-READY 断言
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Windows 版式：launcher.exe 与 metadata.json 同层（应用根），bin\ 下那个不是自解压入口
+          $appRoot = Get-ChildItem C:\dsh-smoke -Directory | Select-Object -First 1
+          $app = Get-ChildItem $appRoot.FullName -Filter launcher.exe | Select-Object -First 1
+          if ($null -eq $app) { $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1 }
+          if ($null -eq $app) { throw '安装树里找不到 launcher.exe' }
+          # 内置树随包断言：Windows 是两段式（安装位 = launcher + payload 归档，app\dsh
+          # 要等首次启动自解压才物化），所以放到 SHELL-READY 之后断言（见下方）。
+          $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
+          $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
+          $env:DSH_HOME = $smokeHome
+          $env:DSH_SHELL_PROFILE_MODE = 'fresh'
+          $env:DSH_SHELL_NO_WINDOW = '1'
+          $env:DSH_SHELL_PAGE_PORT = '6451'
+          $env:DSH_DESKTOP_PORT = '6452'
+          $env:DSH_MOBILE_LANE_PORT = '6453'
+          $env:DSH_DESKTOP_AUTO_QUIT = '20000'
+          $env:DSH_DESKTOP_NO_SINGLETON = '1'
+          # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
+          # 提速：runner 的 Defender 实时扫描会把 31k 文件的解压拖到分钟级
+          $elevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host ("冒烟：elevated={0}" -f $elevated)
+          if ($elevated) {
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath 'C:\dsh-smoke' -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun') -ErrorAction SilentlyContinue
+            Write-Host ("冒烟：Defender realtime={0}" -f (Get-MpPreference).DisableRealtimeMonitoring)
+          }
+          $extractRoot = Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun'
+          Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
+          # launcher 要先把 399MB payload（31k 文件）解压安装完才拉起应用：轮询等 SHELL-READY（最长 50 分钟），每分钟报一次解压进度
+          $ready = $false
+          foreach ($i in 1..1500) {
+            Start-Sleep -Seconds 2
+            $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
+            if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
+            if ($i % 30 -eq 0) {
+              $n = (Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+              Write-Host ("冒烟：等待中 {0}s，已解压文件 {1}" -f ($i * 2), $n)
+            }
+          }
+          if (-not $ready) {
+            Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
+            Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
+            throw '3000 秒内未拿到 SHELL-READY'
+          }
+          (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
+          # 首启自解压完成后，内置 dsh 树必须已物化（goal 第 1 条的 Windows 半边）
+          $roots = @('C:\dsh-smoke', (Join-Path $env:LOCALAPPDATA 'DeepSeekHarnessDesktopBUN'))
+          $dshTree = $null
+          foreach ($root in $roots) {
+            if (-not (Test-Path $root)) { continue }
+            $dshTree = Get-ChildItem $root -Recurse -Filter bin.js -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like '*app\dsh\node_modules\@deepseek-ai\dsh\lib*' } | Select-Object -First 1
+            if ($null -ne $dshTree) { break }
+          }
+          if ($null -eq $dshTree) { throw '启动后没有物化内置 dsh 运行时树（app\dsh）' }
+          Write-Host "内置 dsh 树：$($dshTree.FullName)"
+          # 等 AUTO_QUIT 收尾（再给 60 秒），然后确认没有残留的 bun/launcher 服务进程
+          Start-Sleep -Seconds 60
+          $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' -or $_.Path -like "$env:LOCALAPPDATA*" }
+          if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
+          Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-shell-${{ matrix.label }}
+          path: |
+            desktop-electrobun/artifacts/**
+            desktop-electrobun/build/**/*.dmg
+            desktop-electrobun/build/**/Setup*.zip
+            desktop-electrobun/build/**/*.tar.gz
+          if-no-files-found: error
