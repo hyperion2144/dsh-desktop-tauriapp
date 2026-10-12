@@ -3,6 +3,10 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **代理注入（B2，旧壳 `network/proxy.rs` 的等价物；设置面板的代理不再是摆设）**：
+  - **检测**（`src/shared/system-proxy.ts` + `src/bun/system-proxy.ts`）：manual 用设置里的 URL；system 按平台问真代理——macOS `scutil --proxy`（只认 `*Enable == 1`；**PAC 生效时只给 NO_PROXY、不猜 URL**；https 代理写 `http://` 且默认 443；SOCKS 进 ALL_PROXY）、Windows `reg query …Internet Settings`（`ProxyEnable != 1` 视为未启用；`ProxyServer` 单值对 http/https 同效、`http=…;https=…;socks=…` 分协议；`ProxyOverride` 进 NO_PROXY，`<local>` 就地展开成回环保底）、其余回落环境变量；检测失败/没代理 ⇒ 不注入（**用户自己设的代理变量不被动**）。
+  - **注入**（`child-env.ts`）：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` 大小写各写一份；socks5 只写 ALL_PROXY 并清掉基线里残留的 HTTP(S)_PROXY；凭据拼接复用 F3 抽出的 `proxy-env.ts`。每次 spawn 现算，面板改完重启服务面即生效；设置面板 `effective` 展示与真实注入**同源**（一样走三级检测）。
+  - **测试**：`test/proxy-keybindings.test.ts` 扩到 24 例（scutil/注册表/PAC/单值与分协议解析、detectSystemProxy 注入 run、大小写写入、socks5 清残留、缺省不动基线）；全量 `bun test` **553 pass / 0 fail**，`tsc --noEmit` 干净。
 - **启动与打包修复（用户报的 0/1/3/9）+ 命令形状对齐（D 段 B3/B4/F1/F2/F3）**：
   - **重启后点不开（0）**：单实例锁只记 pid，重启后 pid 被系统复用（实测 pid 546 = `mobiletimerd`）⇒ 第二个实例只发一次激活请求就退出。锁文件加 `bootId` + 进程身份校验（命令行含本包标识），bootId 变了就忽略旧锁并接管。
   - **内置运行时随包（1）**：`prepare:bundle` 把 `desktop/src-tauri/resources/dsh` 物化到 `desktop-electrobun/builtin-runtime/`，`build.copy` 落到包内 `Resources/app/dsh`；启动时优先用随包树，只有下载的运行时才走 `<appSupport>/runtimes`。

@@ -15,6 +15,13 @@ import {
   resolveProxyEnv,
   systemProxyFromEnv,
 } from '../src/shared/proxy-env.ts'
+import {
+  parseScutilProxy,
+  parseWindowsProxyRegistry,
+  parseWindowsProxyServer,
+} from '../src/shared/system-proxy.ts'
+import { detectSystemProxy } from '../src/bun/system-proxy.ts'
+import { buildChildEnv } from '../src/shared/child-env.ts'
 import { dependencyMismatch, pnpmFromModulesYaml, pnpmMajor } from '../src/shared/profile-ops.ts'
 import { builtinPnpmVersion, profileDependencyRows, readRecordedPnpm } from '../src/bun/profile-manager.ts'
 import { KEYBINDINGS_FILE, MAX_KEYBINDINGS_BYTES, readKeybindings, writeKeybindings } from '../src/bun/keybindings.ts'
@@ -200,5 +207,120 @@ describe('桌面档快捷键偏好（旧壳 shortcuts.rs）', () => {
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
+  })
+})
+
+describe('系统代理解析（旧壳 parse_scutil_proxy / 注册表）', () => {
+  test('scutil：只认 Enable==1；https 代理写 http:// 且默认 443；SOCKS 进 ALL_PROXY', () => {
+    const text = [
+      '<dictionary> {',
+      '  HTTPEnable : 1',
+      '  HTTPPort : 7890',
+      '  HTTPProxy : 127.0.0.1',
+      '  HTTPSEnable : 1',
+      '  HTTPSPort : 7891',
+      '  HTTPSProxy : 127.0.0.1',
+      '  SOCKSEnable : 1',
+      '  SOCKSPort : 7892',
+      '  SOCKSProxy : 127.0.0.1',
+      '  ExceptionsList : <array> {',
+      '    0 : *.corp',
+      '    1 : 169.254/16',
+      '  }',
+      '  ProxyAutoConfigEnable : 0',
+      '}',
+    ].join('\n')
+    expect(parseScutilProxy(text)).toEqual({
+      http: 'http://127.0.0.1:7890',
+      https: 'http://127.0.0.1:7891',
+      all: 'socks5://127.0.0.1:7892',
+      no_proxy: '.corp,localhost,127.0.0.1,::1',
+    })
+  })
+
+  test('scutil：PAC 生效 ⇒ 只给 NO_PROXY（不猜代理 URL）；禁用的键不算数', () => {
+    const pac = ['<dictionary> {', '  ProxyAutoConfigEnable : 1', '  ProxyAutoConfigURLString : http://wpad/wpad.dat', '  HTTPEnable : 0', '  HTTPProxy : 1.2.3.4', '}'].join('\n')
+    expect(parseScutilProxy(pac)).toEqual({ http: null, https: null, all: null, no_proxy: 'localhost,127.0.0.1,::1' })
+    expect(parseScutilProxy('')).toBeNull()
+  })
+
+  test('Windows ProxyServer：单值对 http/https 同效；分协议只取写出项', () => {
+    expect(parseWindowsProxyServer('127.0.0.1:7890')).toEqual({
+      http: 'http://127.0.0.1:7890',
+      https: 'http://127.0.0.1:7890',
+      all: null,
+    })
+    expect(parseWindowsProxyServer('http=h:1;https=h:2;socks=h:3')).toEqual({
+      http: 'http://h:1',
+      https: 'http://h:2',
+      all: 'socks5://h:3',
+    })
+    expect(parseWindowsProxyServer('https=h:2')).toEqual({ http: null, https: 'http://h:2', all: null })
+  })
+
+  test('Windows 注册表：ProxyEnable 不为 1 视为未启用；AutoConfigURL 存在只管 NO_PROXY', () => {
+    const enabled = [
+      'HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings',
+      '    ProxyEnable    REG_DWORD    0x1',
+      '    ProxyOverride  REG_SZ    <local>;*.corp',
+      '    ProxyServer    REG_SZ    http=h:1',
+    ].join('\r\n')
+    expect(parseWindowsProxyRegistry(enabled)).toEqual({
+      http: 'http://h:1',
+      https: null,
+      all: null,
+      no_proxy: 'localhost,127.0.0.1,::1,.corp', // `<local>` 就地展开，`.corp` 跟在后面
+    })
+    const disabled = '    ProxyEnable    REG_DWORD    0x0\r\n    ProxyServer    REG_SZ    h:1'.replace('\\r\\n', '\r\n')
+    expect(parseWindowsProxyRegistry(disabled)).toBeNull()
+  })
+
+  test('detectSystemProxy：注入 run 替掉真进程；失败回落环境变量', () => {
+    const scutilOut = ['<dictionary> {', '  HTTPEnable : 1', '  HTTPProxy : 10.0.0.1', '  HTTPPort : 8080', '}'].join('\n')
+    expect(
+      detectSystemProxy({ platform: 'darwin', env: {}, run: () => ({ status: 0, stdout: scutilOut }) })?.http,
+    ).toBe('http://10.0.0.1:8080')
+    expect(
+      detectSystemProxy({
+        platform: 'darwin',
+        env: { HTTP_PROXY: 'http://env:1' },
+        run: () => ({ status: 1, stdout: '' }),
+      })?.http,
+    ).toBe('http://env:1')
+    expect(detectSystemProxy({ platform: 'linux', env: {} })).toBeNull()
+  })
+})
+
+describe('代理注入进子进程环境（旧壳 apply_proxy_env）', () => {
+  const base = () => ({ PATH: '/usr/bin', DSH_HOME: '/tmp/h' })
+  const common = { base: base(), clientVersion: '0.1.0', profile: 'desktop', home: '/tmp/h' }
+
+  test('大小写各写一份；no_proxy 照写', () => {
+    const env = buildChildEnv({
+      ...common,
+      proxy: { http: 'http://u:p@127.0.0.1:7890', https: 'http://u:p@127.0.0.1:7890', all: null, no_proxy: 'localhost,127.0.0.1,::1' },
+    })
+    expect(env.HTTP_PROXY).toBe('http://u:p@127.0.0.1:7890')
+    expect(env.http_proxy).toBe('http://u:p@127.0.0.1:7890')
+    expect(env.HTTPS_PROXY).toBe('http://u:p@127.0.0.1:7890')
+    expect(env.NO_PROXY).toBe('localhost,127.0.0.1,::1')
+    expect(env.no_proxy).toBe('localhost,127.0.0.1,::1')
+    expect('ALL_PROXY' in env).toBe(false)
+  })
+
+  test('socks5：只有 ALL_PROXY；基线里残留的 HTTP_PROXY 被清掉', () => {
+    const env = buildChildEnv({
+      ...common,
+      base: { ...base(), HTTP_PROXY: 'http://stale:1' },
+      proxy: { http: null, https: null, all: 'socks5://127.0.0.1:7891', no_proxy: 'localhost' },
+    })
+    expect(env.ALL_PROXY).toBe('socks5://127.0.0.1:7891')
+    expect('HTTP_PROXY' in env).toBe(false)
+    expect('HTTPS_PROXY' in env).toBe(false)
+  })
+
+  test('proxy 缺省/为 null ⇒ 不动基线环境（用户自己设的代理不被动）', () => {
+    const env = buildChildEnv({ ...common, base: { ...base(), HTTP_PROXY: 'http://mine:1' } })
+    expect(env.HTTP_PROXY).toBe('http://mine:1')
   })
 })

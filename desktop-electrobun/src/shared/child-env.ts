@@ -1,4 +1,5 @@
 import { delimiter } from 'node:path'
+import type { ProxyEnv } from './proxy-env.ts'
 
 // 注入给 dsh 子进程的环境与资源条件（规格第 10 条：整表视为「不变」，逐项对照现状）。
 //
@@ -64,6 +65,8 @@ export interface ChildEnvInput {
   upstreamPort?: number | undefined
   /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`，默认 desktop 3092） */
   lanePort?: number | undefined
+  /** 代理注入（旧壳 `resolved_proxy_env` + `apply_proxy_env`）：大小写各一份；null/缺省 = 不动基线环境 */
+  proxy?: ProxyEnv | null
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -110,6 +113,24 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   } else {
     delete env.DSH_MOBILE_LANE_PORT
     delete env.DSH_MOBILE_ENABLED
+  }
+  // 代理（旧壳 network/proxy.rs + lifecycle.rs:419-420）：大小写都写——不少工具只认小写；
+  // proxy 为 null 时**不动**基线环境（旧壳也只写不删，尊重用户自己在环境里设的代理）。
+  if (input.proxy != null) {
+    const applyProxy = (name: 'HTTP_PROXY' | 'HTTPS_PROXY' | 'ALL_PROXY' | 'NO_PROXY', value: string | null): void => {
+      const lower = name.toLowerCase()
+      if (value === null || value === '') {
+        delete env[name]
+        delete env[lower]
+        return
+      }
+      env[name] = value
+      env[lower] = value
+    }
+    applyProxy('HTTP_PROXY', input.proxy.http)
+    applyProxy('HTTPS_PROXY', input.proxy.https)
+    applyProxy('ALL_PROXY', input.proxy.all)
+    applyProxy('NO_PROXY', input.proxy.no_proxy)
   }
   return env
 }

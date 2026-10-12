@@ -6,6 +6,7 @@
 
 import { buildChildEnv, assertChildEnv } from '../shared/child-env.ts'
 import type { ShellLayout } from './runtime.ts'
+import type { ProxyEnv } from '../shared/proxy-env.ts'
 
 export interface HostReady {
   url: string
@@ -32,6 +33,8 @@ export interface StartHostInput {
   upstreamPort?: number | undefined
   /** 手机访问 lane 端口（旧壳 `DSH_MOBILE_LANE_PORT`） */
   lanePort?: number | undefined
+  /** 代理注入（旧壳 `resolved_proxy_env`）；null/缺省 = 不注入 */
+  proxy?: ProxyEnv | null
 }
 
 export interface HostHandle {
@@ -67,7 +70,8 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     patchFiles: input.patchFiles,
     notify: input.notify,
     upstreamPort: input.upstreamPort,
-    lanePort: input.lanePort
+    lanePort: input.lanePort,
+    proxy: input.proxy
   })
   assertChildEnv(env)
 

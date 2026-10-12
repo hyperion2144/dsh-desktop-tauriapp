@@ -19,7 +19,9 @@ import { loadSettings } from './settings-store.ts'
 import { scaffoldProfile } from './profile-scaffold.ts'
 import { cleanupStagedPlugins, stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
-import { resolveProxyEnv, systemProxyFromEnv } from '../shared/proxy-env.ts'
+import { resolveProxyEnv } from '../shared/proxy-env.ts'
+import { detectSystemProxy } from './system-proxy.ts'
+import type { ProxyEnv } from '../shared/proxy-env.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
@@ -458,6 +460,15 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let host!: Awaited<ReturnType<typeof startHost>>
   let cookie = ''
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
+  // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
+  let liveSettings = settings
+  /**
+   * 代理注入（旧壳 `resolved_proxy_env` + `system_proxy_env`）：manual 用设置里的 URL，
+   * system 问系统（macOS `scutil` / Windows 注册表 / 其余环境变量），off 不注入。
+   * 每次 spawn 现算——面板改完代理重启服务面就生效。
+   */
+  const childProxy = (): ProxyEnv | null =>
+    resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log }))
   const connect = async (): Promise<void> => {
     try {
       host = await startHost({
@@ -469,6 +480,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         patchFiles,
         upstreamPort,
         lanePort,
+        proxy: childProxy(),
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     } catch (error) {
@@ -491,6 +503,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         patchFiles,
         upstreamPort,
         lanePort,
+        proxy: childProxy(),
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }
@@ -518,8 +531,6 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 壳 ↔ 页面 RPC：命令表要等 service 对象建好才能回填（restart_dsh_service 直接打它）。
   // 页面在服务就绪后才会来调，所以那时一定已装好；未装好则明确回 503。
   let rpcRouter: RpcRouter | null = null
-  // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值
-  let liveSettings = settings
   // 启动检查的进程内状态（旧壳 DshState：skip_startup_check 与 pending_active_profile 都不落盘）
   let startupChecked = false
   let pendingProfile: string | null = null
@@ -982,7 +993,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         read: () => readKeybindings(home),
         write: (raw) => writeKeybindings(home, raw),
       },
-      proxyEffective: () => resolveProxyEnv(liveSettings, systemProxyFromEnv(childEnv)),
+      // 面板展示与真实注入同源：一样走 scutil / 注册表 / 环境变量三级检测。
+      proxyEffective: () => resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log })),
     }),
   )
   return service
