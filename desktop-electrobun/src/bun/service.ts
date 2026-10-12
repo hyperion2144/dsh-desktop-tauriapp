@@ -17,8 +17,9 @@ import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 import { loadSettings } from './settings-store.ts'
 import { scaffoldProfile } from './profile-scaffold.ts'
-import { stagePlugins } from './plugin-staging.ts'
+import { cleanupStagedPlugins, stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
+import { resolveProxyEnv, systemProxyFromEnv } from '../shared/proxy-env.ts'
 import { createKeepAwake } from './keep-awake.ts'
 import { startNotifyServer } from './notify-server.ts'
 import { createNotifier, importSound as importSoundFile, systemDefaultSoundCommand, type Notifier } from './notifications.ts'
@@ -41,7 +42,8 @@ import { exportDiagnostics } from './diagnostics.ts'
 import { classifyLevel, mirrorToShellLog, pageLogLines } from '../shared/log-file.ts'
 import { revealPath } from './downloads.ts'
 import { release as osRelease, cpus as osCpus, freemem as osFreemem, totalmem as osTotalmem } from 'node:os'
-import { createTaskTracker, installProfileDependencies, migrateProfile, profileHealth, testProxyConnectivity } from './profile-manager.ts'
+import { builtinPnpmVersion, createTaskTracker, installProfileDependencies, migrateProfile, profileDependencyRows, profileHealth, testProxyConnectivity } from './profile-manager.ts'
+import { readKeybindings, writeKeybindings } from './keybindings.ts'
 import type { CatalogEntry } from '../shared/runtime-catalog.ts'
 import type { RuntimeSource } from '../shared/settings.ts'
 import {
@@ -354,8 +356,14 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   const hostMode = env.DSH_SHELL_PROFILE_MODE === 'fresh' ? 'fresh' : 'existing'
 
-  /** 选中运行时的版本号（目录名，如 0.2.1-alpha.2）：决定 connection 的两代 inject 契约 */
-  const runtimeVersion = basename(paths.runtimeDir)
+  /**
+   * 选中运行时的版本号：优先用运行时树自报的 package.json 版本，目录名只当兜底。
+   *
+   * 为什么不能只看目录名：内置树落在 `<Resources>/app/dsh`（目录名就是 `dsh`），
+   * 目录名当版本号会让 `versionAtLeast('dsh', …)` 判否 ⇒ 注入清单退回旧的 `webRuntime`
+   * 契约 ⇒ 宿主报 `connection (required) webRuntime` 而启动失败（实测）。
+   */
+  const runtimeVersion = paths.runtimeVersion ?? basename(paths.runtimeDir)
   // ---- profile 脚手架 + 插件 staging（都必须在起宿主之前，这次 spawn 就要能看到）----
   // ① profile：上游 `loadProfile()` 只认「目录里已有 package.json」的 profile，缺了就报
   //    `dsh: profile "desktop" does not exist`——全新 DSH_HOME 能起壳就是因为这一步。
@@ -763,6 +771,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
 
   /** profile 依赖重建（旧壳 profiles.rs 的 pnpm_install_profile）：内置 pnpm install --no-frozen-lockfile */
   const rebuildProfileDependencies = async (profile: string): Promise<string> => {
+    // 新 profile 先落四份模板（没有 package.json 时 pnpm install 直接报错）——旧壳在 repair 前也会先补模板。
+    scaffoldProfile(home, profile)
     const result = await installProfileDependencies({
       home,
       profile,
@@ -820,6 +830,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       arbiter.clear()
       downloads.stop()
       updater.stop()
+      // 插件链接要拆掉（item 9，旧壳 cleanup_desktop_plugin_links 的等价物）：
+      // 不拆的话，用户回头用旧壳/别的安装时 profile 池里会留一份悬空 symlink。
+      try {
+        cleanupStagedPlugins(staged.staged, log)
+      } catch (error) {
+        log(`[exit] 清理插件链接失败：${String(error)}`)
+      }
       try {
         await host.stop()
       } catch {}
@@ -946,6 +963,26 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       testProxy: (url) => testProxyConnectivity(url),
       guests: options.guests,
       updater,
+      dependencyRows: async () => {
+        const builtinPnpm = builtinPnpmVersion({
+          env: childEnv,
+          runtimeRoot: paths.runtimeDir,
+          appSupport: paths.appSupport,
+        })
+        const claimed = pruneClaims(parseClaims(await readClaims()), isAlivePid)
+        return profileDependencyRows({
+          home,
+          profiles: listProfiles(home, paths.profile),
+          builtinPnpm,
+          running: (name) => claimFor(claimed, name) !== undefined,
+        })
+      },
+      taskStatus: () => taskTracker.status(),
+      keybindings: {
+        read: () => readKeybindings(home),
+        write: (raw) => writeKeybindings(home, raw),
+      },
+      proxyEffective: () => resolveProxyEnv(liveSettings, systemProxyFromEnv(childEnv)),
     }),
   )
   return service

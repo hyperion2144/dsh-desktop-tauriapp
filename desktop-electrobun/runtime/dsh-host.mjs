@@ -11,7 +11,7 @@
 // 环境：DSH_HOME 由壳注入（buildChildEnv），另有 DSH_CLIENT_VERSION 等（见 src/shared/child-env.ts）
 
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { watchParent } from './parent-watch.mjs'
 
@@ -32,7 +32,7 @@ const { runProfile } = await import(pathToFileURL(join(libDir, 'profile-boot.js'
 function patchFiles() {
   const raw = process.env.DSH_SHELL_PATCH_FILES ?? ''
   const files = raw
-    .split(':')
+    .split(delimiter)
     .map((entry) => entry.trim())
     .filter((entry) => entry !== '')
   if (files.length > 0) console.log(`[host] 注入清单：${files.join('、')}`)

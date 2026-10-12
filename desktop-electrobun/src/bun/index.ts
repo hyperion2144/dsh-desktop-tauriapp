@@ -544,12 +544,24 @@ async function switchRuntimeFromTray(action: TrayAction): Promise<void> {
   refreshTray()
 }
 
-/** 下载中每秒刷一次托盘：菜单上那条「（下载中…）」会自己更新，下载结束就停。 */
+/**
+ * 下载中的托盘刷新：**事件驱动**——只在「在下载 / 下载完」这类状态跳变时下发菜单，
+ * 不每秒重建（菜单开着时反复 setMenu 会把它顶掉，用户口径明确要求不要定时刷新）。
+ */
 let downloadTimer: ReturnType<typeof setInterval> | null = null
+function downloadTrayKey(): string {
+  const status = downloadStatusSafe()
+  return `${status.active ? '1' : '0'}|${status.version}`
+}
 function pollDownload(): void {
   if (downloadTimer !== null) return
+  let lastKey = downloadTrayKey()
   downloadTimer = setInterval(() => {
-    tray?.setState(trayState())
+    const key = downloadTrayKey()
+    if (key !== lastKey) {
+      lastKey = key
+      refreshTray()
+    }
     if (!downloadStatusSafe().active && downloadTimer !== null) {
       clearInterval(downloadTimer)
       downloadTimer = null

@@ -17,7 +17,7 @@
  */
 import { Module } from "node:module";
 import { Transpiler } from "bun";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname, join, delimiter } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readFileSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 
@@ -457,7 +457,7 @@ function nodeModulesRoots() {
     roots.push(root);
   };
   add(join(_dshRoot, 'node_modules'));
-  for (const extra of (process.env.DSH_BUN_PRELOAD_TREES ?? '').split(':')) {
+  for (const extra of (process.env.DSH_BUN_PRELOAD_TREES ?? '').split(delimiter)) {
     if (extra !== '') add(join(resolve(extra), 'node_modules'));
   }
   for (const start of [process.argv[1], process.cwd()]) {
@@ -718,4 +718,35 @@ for (const target of packageTargets('@deepseek-ai/cordis-plugin-loader/lib/index
   console.log(`[bun-preload] Patch 11: 插件说明符按 baseUrl 解析 applied to ${target}`);
 }
 
-console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析（不还原）`);
+// ── Patch 12: experimental-inspector 容忍 fetch 访问器 ──
+// 缘起：「@deepseek-ai/dsh-experimental-inspector 内置插件启动失败」——第三方插件
+// billion-context（bili-native）为了在别的插件替换掉 fetch 后重新爬到链顶，把
+// `globalThis.fetch` 装成带 get/set 的**访问器**；而 inspector 取保守策略：描述符不是数据属性
+// 就直接拒绝启动（lib/index.js 的 installFetchObserver 开头）。两边单看都有道理，凑在一起就是内置
+// 插件永远起不来。这里把那一行改成「先归一成数据属性再观察」：值就是当时的 fetch（也就是
+// billion-context 的链），跟 Node 下 fetch 本来就是数据属性的形态一致。
+// 上游文本一旦变了（没命中），只警告不报错，后续版本自会回到「拒绝启动」的原生行为。
+const INSPECTOR_FETCH_GUARD =
+  '\tif (descriptor !== void 0 && !("value" in descriptor)) throw new Error("inspector: globalThis.fetch is an accessor and cannot be observed safely");';
+const INSPECTOR_FETCH_MARK = 'bun-preload: fetch 访问器归一';
+const INSPECTOR_FETCH_NORMALIZE = [
+  `\t// ${INSPECTOR_FETCH_MARK}（billion-context 装的是访问器，inspector 原本会硬拒）`,
+  '\tif (descriptor !== void 0 && !("value" in descriptor)) {',
+  '\t\tObject.defineProperty(globalThis, "fetch", { value: original, writable: true, configurable: true, enumerable: descriptor.enumerable ?? true });',
+  '\t}',
+].join('\n');
+for (const target of packageTargets('@deepseek-ai/dsh-experimental-inspector/lib/index.js')) {
+  const source = readFileSync(target, 'utf8');
+  if (source.includes(INSPECTOR_FETCH_MARK)) {
+    console.log(`[bun-preload] Patch 12: ${REV_MARK} 已就位 ${target}`);
+    continue;
+  }
+  if (!source.includes(INSPECTOR_FETCH_GUARD)) {
+    console.warn(`[bun-preload] Patch 12: 未找到上游 accessor 检查文本，跳过 ${target}（上游版本不符）`);
+    continue;
+  }
+  writePatch(target, source.replace(INSPECTOR_FETCH_GUARD, INSPECTOR_FETCH_NORMALIZE));
+  console.log(`[bun-preload] Patch 12: fetch 访问器归一 applied to ${target}`);
+}
+
+console.log(`[bun-preload] ${REV_MARK} 应用完成：stripTypeScriptTypes / node-addon-require-builtin 桩 / HMR 关闭 / Bun.Terminal PTY / xterm 同步写 / 插件展示元数据解析 / 插件说明符 baseUrl 解析 / inspector fetch 访问器归一（不还原）`);

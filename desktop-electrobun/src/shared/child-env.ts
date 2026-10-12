@@ -1,3 +1,5 @@
+import { delimiter } from 'node:path'
+
 // 注入给 dsh 子进程的环境与资源条件（规格第 10 条：整表视为「不变」，逐项对照现状）。
 //
 // 现状壳（Rust desktop/src-tauri）在 spawn 时注入的键，缺一即视为回归：
@@ -81,7 +83,8 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
   if (input.parentPid !== undefined) env.DSH_SHELL_PARENT_PID = String(input.parentPid)
   else delete env.DSH_SHELL_PARENT_PID
   if (input.patchFiles !== undefined && input.patchFiles.length > 0) {
-    env.DSH_SHELL_PATCH_FILES = input.patchFiles.join(':')
+    // 用平台分隔符：Windows 的路径自带 `C:`，写死 ':' 会把 C:\… 切成两半（item 3）
+    env.DSH_SHELL_PATCH_FILES = input.patchFiles.join(delimiter)
   } else {
     delete env.DSH_SHELL_PATCH_FILES
   }

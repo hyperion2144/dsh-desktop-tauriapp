@@ -162,3 +162,51 @@ export function stagePlugins(options: {
   )
   return { pool, injectFile, staged, missing }
 }
+
+/**
+ * 退出时把本实例挂进 profile 池的链接拆掉（旧壳 `cleanup_desktop_plugin_links` 的等价物）。
+ *
+ * 为什么必须拆：dsh 的 `--patch` 注入清单是我们自己生成的，链接却留在用户 profile 里；
+ * 不拆的话，用户回到旧 Tauri 壳（或换回安装版）时，profile 池里会挂着一份**已经不存在的**
+ * 包目录（新壳被删除/移动后 symlink 悬空）⇒ 插件解析失败。
+ *
+ * 只删「还指向本实例自己那份包目录」的链接：升级窗口期/并行实例下不动别人的。
+ * 不穿透实体目录：只有 readlink 能读出目标时才动（复制体不动）。
+ */
+export interface CleanupResult {
+  removed: string[]
+  kept: string[]
+}
+
+export function cleanupStagedPlugins(
+  staged: readonly StagedPlugin[],
+  log: (line: string) => void = (): void => {},
+): CleanupResult {
+  const removed: string[] = []
+  const kept: string[] = []
+  for (const entry of staged) {
+    let target = ''
+    try {
+      target = readlinkSync(entry.link)
+    } catch {
+      // 不是链接（复制体、或已经被删）：不碰
+      kept.push(entry.link)
+      continue
+    }
+    const absolute = resolve(dirname(entry.link), target)
+    if (absolute !== resolve(entry.dir)) {
+      log(`[exit] 跳过他实例的插件链接 ${entry.link} -> ${target}`)
+      kept.push(entry.link)
+      continue
+    }
+    try {
+      rmSync(entry.link, { force: true })
+      removed.push(entry.link)
+    } catch (error) {
+      log(`[exit] 清理插件链接失败 ${entry.link}：${String(error)}`)
+      kept.push(entry.link)
+    }
+  }
+  if (removed.length > 0) log(`[exit] 已清理插件链接 ${removed.length} 个：${removed.join('、')}`)
+  return { removed, kept }
+}

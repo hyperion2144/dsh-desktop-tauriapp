@@ -25,6 +25,9 @@ import {
   type StartupHealth,
   type TaskSnapshot,
   EMPTY_TASK,
+  dependencyMismatch,
+  pnpmFromModulesYaml,
+  type ProfileDependencyRow,
 } from '../shared/profile-ops.ts'
 import { parseSimpleYaml } from './settings-store.ts'
 import { profileDirOf } from './profile-scaffold.ts'
@@ -106,6 +109,8 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
   const log = input.log ?? ((): void => {})
   const env = input.env ?? process.env
   const dir = profileDirOf(input.home, input.profile)
+  // 新建 profile 时目录还不存在：`Bun.spawn` 的 cwd 指向不存在的目录会直接抛 ENOENT（旧壳先 mkdir）。
+  mkdirSync(dir, { recursive: true })
   const pnpmCjs = resolvePnpmCjs({
     env,
     runtimeRoot: input.runtimeRoot ?? null,
@@ -132,7 +137,7 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
   try {
     child = Bun.spawn([bunPath, pnpmCjs, ...args], {
       cwd: dir,
-      env: { ...env, CI: 'true', PATH: pathParts.join(':') },
+      env: { ...env, CI: 'true', PATH: pathParts.join(delimiter) },
       stdout: 'pipe',
       stderr: 'pipe',
       timeout: input.timeoutMs ?? INSTALL_TIMEOUT_MS,
@@ -405,4 +410,55 @@ export async function testProxyConnectivity(
   } finally {
     if (timer !== null) clearTimeout(timer)
   }
+}
+
+/** 该 profile 的 node_modules 记录的 pnpm 版本（旧壳 `profiles::profile_recorded_pnpm`）。 */
+export function readRecordedPnpm(home: string, profile: string): string | null {
+  try {
+    const text = readFileSync(join(profileDirOf(home, profile), 'node_modules', '.modules.yaml'), 'utf8')
+    return pnpmFromModulesYaml(text)
+  } catch {
+    return null
+  }
+}
+
+/** 内置 pnpm 的版本号（读 `pnpm.cjs` 上层 package.json；找不到回 null）。 */
+export function builtinPnpmVersion(input: {
+  env?: Record<string, string | undefined>
+  runtimeRoot?: string | null
+  builtinDir?: string | null
+  appSupport: string
+}): string | null {
+  const pnpmCjs = resolvePnpmCjs({
+    env: input.env ?? process.env,
+    runtimeRoot: input.runtimeRoot ?? null,
+    builtinDir: input.builtinDir ?? null,
+    appSupport: input.appSupport,
+  })
+  if (pnpmCjs === null) return null
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(dirname(pnpmCjs)), 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof pkg.version === 'string' ? pkg.version : null
+  } catch {
+    return null
+  }
+}
+
+/** `list_profile_dependency_status` 的行（旧壳只比 pnpm 大版本，小版本差异 store 同代）。 */
+export function profileDependencyRows(input: {
+  home: string
+  profiles: readonly string[]
+  builtinPnpm: string | null
+  running: (profile: string) => boolean
+}): ProfileDependencyRow[] {
+  return input.profiles.map((profile) => {
+    const recorded = readRecordedPnpm(input.home, profile)
+    return {
+      profile,
+      recordedPnpm: recorded,
+      builtinPnpm: input.builtinPnpm,
+      needsRebuild: dependencyMismatch(recorded, input.builtinPnpm),
+      running: input.running(profile),
+    }
+  })
 }

@@ -3,6 +3,17 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+- **启动与打包修复（用户报的 0/1/3/9）+ 命令形状对齐（D 段 B3/B4/F1/F2/F3）**：
+  - **重启后点不开（0）**：单实例锁只记 pid，重启后 pid 被系统复用（实测 pid 546 = `mobiletimerd`）⇒ 第二个实例只发一次激活请求就退出。锁文件加 `bootId` + 进程身份校验（命令行含本包标识），bootId 变了就忽略旧锁并接管。
+  - **内置运行时随包（1）**：`prepare:bundle` 把 `desktop/src-tauri/resources/dsh` 物化到 `desktop-electrobun/builtin-runtime/`，`build.copy` 落到包内 `Resources/app/dsh`；启动时优先用随包树，只有下载的运行时才走 `<appSupport>/runtimes`。
+  - **路径分隔符（3）**：`child-env` / `dsh-host` / `bun-preload` / `profile-manager` / `runtime-install` 全部改用 `delimiter`（Windows 的 `C:\Users\…` 曾被 `:` 切成 `C` + `\Users\…`）。
+  - **插件链接（9）**：桌面三插件随包 + 启动 link、退出 unlink（`plugin-staging` + `cleanupStagedPlugins`）。
+  - **新建 profile 不再必然失败（B4）**：先 `mkdir` 再 `scaffoldProfile` 补四份模板（此前 `Bun.spawn` 的 cwd 不存在 ⇒ ENOENT）。
+  - **`list_profile_dependency_status`（F2）**：改回 `{profiles:[{profile,recordedPnpm,builtinPnpm,needsRebuild,running}]}`（只比 pnpm **大版本**，旧壳 #124 判据；面板此前读到 `undefined`）。
+  - **`get_proxy_settings`（F3）**：补 `proxy_user`/`proxy_pass`，`effective` 改回对象（旧壳形状，此前是字符串且保存会清凭据）；代理解析抽成 `src/shared/proxy-env.ts`（旧的 `resolved_proxy_env` 等价物：socks5 只写 ALL_PROXY、NO_PROXY 归一 + 回环保底、凭据拼接）。
+  - **新增 `task_status`（F1）与快捷键读写（B3）**：迁移/重建进度卡不再恒空；`read_desktop_keybindings`/`write_desktop_keybindings` 只做 256 KiB 上限 + 原子写（不解析 JSON，未知字段原样保留）。
+  - **托盘刷新改事件驱动**（用户口径）：菜单更新只走 `setMenu`、**不重建托盘**；内容没变就不重复下发（菜单开着时反复 `setMenu` 会把它顶掉）；下载中的托盘只在「在下载 / 下载完」跳变时刷新，不再每秒重建。
+  - **测试**：新增 `test/proxy-keybindings.test.ts`（16 例）+ `rpc.test.ts` 四条命令形状（4 例）；并修掉一个**会打断人的测试缺陷**——`downloads.test.ts` 的「定位文件」调了真 `revealPath`，跑全量测试时会真的弹 Finder，现把 `revealFile` 注入化（默认真实现，测试必接）。全量 `bun test` **545 pass / 0 fail**（32 文件、1894 expect）；`tsc --noEmit` 干净。
 - **dsh 系统命令注册（旧壳 `register/` 的等价物；#220 第 8 条点名的「注册 dsh 命令」自写项）**：
   - **三态检测**：拿用户**真实登录 shell** 解析 `dsh`（macOS 先问 `dscl` 拿 UserShell，回落 `$SHELL` → `/bin/zsh`；`-ilc 'command -v dsh'` + `DISABLE_AUTO_UPDATE=true` + 8s 超时——GUI 进程的 PATH 不等于终端 PATH），与本壳 shim 比 realpath：命中 = 已注册、解析到别人 = 冲突（记下目标）、解析不到或 shim 未物化 = 未注册；超时/失败 = 没探出，保持旧结论。
   - **shim 维护**：`<appSupport>/runtime/bin-dsh/dsh[.cmd]`，内容＝`exec '<bun>' --no-install --preload '<preload>' '<dshLibDir>/bin.js' "$@"`（跟着当前运行时走）；**别人放的同名文件不覆盖**（判词 ours / stale / foreign / absent）。

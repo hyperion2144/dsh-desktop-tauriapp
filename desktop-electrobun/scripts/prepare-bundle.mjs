@@ -7,7 +7,8 @@
 // 单一来源仍是 desktop/src-tauri/ 下的资源（Tauri 壳与新壳共用），这里只做转换/拷贝 ——
 // 不要在这里改内容，否则两条壳路径会漂移。
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 
@@ -58,4 +59,70 @@ if (existsSync(traySource)) {
   console.log(`            → ${trayTarget}`)
 } else {
   console.warn(`[prepare-bundle] 找不到托盘图标：${traySource}，本次构建不建托盘`)
+}
+
+// ── 4. 内置 dsh 运行时（随包发出）───────────────────────────────────────
+// 为什么必须随包：ADR 0004 的页面资产取自「当前生效运行时」的 dist。以前新壳只有
+// “下载的运行时”，干净机器上首次启动直接报「找不到可用的 dsh 运行时」（实测），
+// 内置树随包后才有兜底（与旧 Tauri 壳的 resources/dsh 同语义）。
+//
+// 来源优先级：DSH_SHELL_BUILTIN_SOURCE > 仓内 Tauri 树 > 本机已下载运行时（开发便利）。
+// 找不到就只警告：CI 上由工作流先准备好 Tauri 树，本地开发可以只测壳。
+const builtinTarget = join(projectRoot, 'builtin-runtime')
+const binMarker = (dir) => join(dir, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+const isRuntimeTree = (dir) => existsSync(binMarker(dir))
+
+function newestDownloadedRuntime() {
+  const roots = [
+    process.env.DSH_HOME === undefined ? null : join(process.env.DSH_HOME, 'runtimes'),
+    join(homedir(), 'Library', 'Application Support', 'com.arcreel.dsh-desktop-tauriapp', 'runtimes'),
+  ].filter((entry) => entry !== null)
+  for (const root of roots) {
+    if (!existsSync(root)) continue
+    const versions = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => entry.name)
+      .sort()
+    for (const version of versions.reverse()) {
+      const candidate = join(root, version)
+      if (isRuntimeTree(candidate)) return candidate
+    }
+  }
+  return null
+}
+
+const builtinSource = (() => {
+  const explicit = process.env.DSH_SHELL_BUILTIN_SOURCE
+  if (explicit !== undefined && explicit !== '' && isRuntimeTree(explicit)) return explicit
+  const repoTree = resolve(repoRoot, 'desktop', 'src-tauri', 'resources', 'dsh')
+  if (isRuntimeTree(repoTree)) return repoTree
+  return newestDownloadedRuntime()
+})()
+
+if (builtinSource === null) {
+  rmSync(builtinTarget, { recursive: true, force: true })
+  console.warn('[prepare-bundle] 没有可用的内置运行时树（DSH_SHELL_BUILTIN_SOURCE / 仓内 Tauri 树 / 已下载运行时都没有），本次构建不带内置 dsh')
+} else {
+  rmSync(builtinTarget, { recursive: true, force: true })
+  cpSync(builtinSource, builtinTarget, {
+    recursive: true,
+    dereference: true,
+    filter: (src) => {
+      const name = src.split(/[\\/]/).pop() ?? ''
+      return name !== '.DS_Store' && !name.startsWith('._') && name !== '.git'
+    },
+  })
+  const version = (() => {
+    try {
+      const raw = JSON.parse(readFileSync(join(builtinTarget, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'), 'utf8'))
+      return typeof raw.version === 'string' ? raw.version : 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  })()
+  const counted = spawnSync('sh', ['-c', `find ${JSON.stringify(builtinTarget)} -type f | wc -l`], { encoding: 'utf8' })
+  const files = (counted.stdout ?? '').trim()
+  writeFileSync(join(builtinTarget, '.builtin-runtime.json'), `${JSON.stringify({ version, source: builtinSource, files: Number(files) || 0 }, null, 2)}\n`)
+  console.log(`[prepare-bundle] ${builtinSource}`)
+  console.log(`            → ${builtinTarget}（内置 dsh ${version}，${files} 个文件）`)
 }

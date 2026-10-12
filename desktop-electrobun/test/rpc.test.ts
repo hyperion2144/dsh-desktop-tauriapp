@@ -13,6 +13,7 @@ import { startShellServer } from '../src/bun/shell-server.ts'
 import { createCommandTable, type CommandDeps } from '../src/bun/commands.ts'
 import { createRpcRouter, dispatchRpc, parseRpcRequest, rpcCommands, type RpcContext } from '../src/bun/rpc.ts'
 import { defaultSettings, type DesktopSettings } from '../src/shared/settings.ts'
+import { resolveProxyEnv } from '../src/shared/proxy-env.ts'
 import { loadSettings, saveSettings, updateSettings } from '../src/bun/settings-store.ts'
 
 function tempHome(): string {
@@ -664,4 +665,103 @@ describe('profile 运维与启动检查', () => {
       bare.cleanup()
     }
   })
+
+describe('本轮补的四条命令形状（对齐旧壳，F1/F2/F3/B3）', () => {
+  test('get_proxy_settings 回六字段，effective 是对象而不是字符串', () => {
+    const h = harness()
+    try {
+      const off = h.table['get_proxy_settings']?.({}) as Record<string, unknown>
+      expect(Object.keys(off).sort()).toEqual(['effective', 'no_proxy', 'proxy_mode', 'proxy_pass', 'proxy_url', 'proxy_user'])
+      expect(off['proxy_user']).toBe('')
+      expect(off['proxy_pass']).toBe('')
+      expect(off['effective']).toBeNull()
+      // 真壳里这条由 service 接（设置面板看到的 effective 就是它算的）
+      h.deps.proxyEffective = () => resolveProxyEnv(h.deps.settings())
+      h.deps.save({ proxy_mode: 'manual', proxy_url: 'http://127.0.0.1:7890', proxy_user: 'u', proxy_pass: 'p' })
+      const manual = h.table['get_proxy_settings']?.({}) as Record<string, unknown>
+      expect(manual['effective']).toEqual({
+        http: 'http://u:p@127.0.0.1:7890',
+        https: 'http://u:p@127.0.0.1:7890',
+        all: null,
+        no_proxy: 'localhost,127.0.0.1,::1',
+      })
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('list_profile_dependency_status 回 {profiles:[…]}（面板读的就是这个键）', async () => {
+    const h = harness({
+      dependencyRows: async () => [
+        { profile: 'desktop', recordedPnpm: '11.16.0', builtinPnpm: '11.16.0', needsRebuild: false, running: true },
+      ],
+    })
+    try {
+      const value = (await h.table['list_profile_dependency_status']?.({})) as { profiles: unknown[] }
+      expect(value.profiles).toHaveLength(1)
+      expect(value.profiles[0]).toEqual({
+        profile: 'desktop',
+        recordedPnpm: '11.16.0',
+        builtinPnpm: '11.16.0',
+        needsRebuild: false,
+        running: true,
+      })
+    } finally {
+      h.cleanup()
+    }
+  })
+
+  test('task_status 回九字段；壳未接时回空任务而不是 undefined', async () => {
+    const bare = harness()
+    const wired = harness({
+      taskStatus: () => ({
+        running: true,
+        finished: false,
+        kind: 'migrate',
+        title: '迁移 profile',
+        stage: '复制文件',
+        done: 3,
+        total: 9,
+        error: '',
+        result: '',
+      }),
+    })
+    try {
+      expect(await wired.table['task_status']?.({})).toMatchObject({ kind: 'migrate', done: 3, total: 9 })
+      expect(await bare.table['task_status']?.({})).toEqual({
+        running: false,
+        finished: false,
+        kind: '',
+        title: '',
+        stage: '',
+        done: 0,
+        total: 0,
+        error: '',
+        result: '',
+      })
+    } finally {
+      bare.cleanup()
+      wired.cleanup()
+    }
+  })
+
+  test('快捷键偏好：读写透传原始文本；壳未接时读回 null、写报错', async () => {
+    const writes: string[] = []
+    const h = harness({
+      keybindings: { read: () => '{"schemaVersion":1}', write: (raw) => writes.push(raw) },
+    })
+    const bare = harness()
+    try {
+      expect(await h.table['read_desktop_keybindings']?.({})).toBe('{"schemaVersion":1}')
+      expect(await h.table['write_desktop_keybindings']?.({ raw: '{}\n' })).toEqual({})
+      expect(writes).toEqual(['{}\n'])
+      expect(() => h.table['write_desktop_keybindings']?.({})).toThrow('raw 必须是字符串')
+      expect(await bare.table['read_desktop_keybindings']?.({})).toBeNull()
+      expect(() => bare.table['write_desktop_keybindings']?.({ raw: '{}' })).toThrow('壳未接快捷键偏好')
+    } finally {
+      h.cleanup()
+      bare.cleanup()
+    }
+  })
+})
 })

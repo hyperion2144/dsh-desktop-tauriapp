@@ -4,7 +4,7 @@
 // 所以断言直接对着旧壳写死的内容（bundle 列表、心跳块、三行 insert、pnpm 白名单）。
 
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -19,7 +19,7 @@ import {
 } from '../src/shared/inject-yml.ts'
 import { PROFILE_BUNDLES, profileFiles, profilePackageJson } from '../src/shared/profile-template.ts'
 import { profileExists, scaffoldProfile } from '../src/bun/profile-scaffold.ts'
-import { materializePoolPackage, stagePlugins } from '../src/bun/plugin-staging.ts'
+import { cleanupStagedPlugins, materializePoolPackage, stagePlugins } from '../src/bun/plugin-staging.ts'
 
 const tempDir = (): string => mkdtempSync(join(tmpdir(), 'dsh-staging-'))
 
@@ -243,5 +243,60 @@ describe('stagePlugins（端到端：池 + 注入清单）', () => {
       runtimeVersion: '0.2.1-alpha.2',
     })
     expect(readlinkSync(join(result.pool, 'dsh-desktop-tauriapp'))).toBe(packaged)
+  })
+})
+
+// 退出时要把本实例挂进 profile 池的链接拆掉（旧壳 cleanup_desktop_plugin_links 的等价物）：
+// 不拆的话，用户回到旧 Tauri 壳时 profile 池里会留一份指向「已不存在的新壳包目录」的悬空 symlink。
+describe('退出时拆插件链接', () => {
+  test('删掉指向自己包目录的链接，保留他实例的链接与实体目录', () => {
+    const root = tempDir()
+    const home = join(root, 'home')
+    const pluginDir = fakePackage(join(root, 'app', 'plugins', 'dsh-desktop-tauriapp'), 'dsh-desktop-tauriapp')
+    // 手机侧也从仓库挂：让 staged 里出现第二条，便于验证「他实例的链接不动」
+    fakePackage(join(root, 'repo', 'mobile', 'dsh-mobile-access'), 'dsh-mobile-access')
+    const result = stagePlugins({
+      home,
+      profile: 'desktop',
+      appSupport: join(root, 'app-support'),
+      paths: { repoRoot: join(root, 'repo'), resourcesDir: null },
+      env: { DSH_DESKTOP_PLUGIN: pluginDir },
+    })
+    const own = join(result.pool, 'dsh-desktop-tauriapp')
+    const foreignLink = join(result.pool, 'dsh-mobile-access')
+    expect(existsSync(own)).toBe(true)
+    expect(result.staged.map((entry) => entry.name)).toContain('dsh-mobile-access')
+
+    // 模拟「另一个实例（另一份安装）挂下的链接」：把它改指别处
+    const foreignDir = fakePackage(join(root, 'other-app', 'dsh-mobile-access'), 'dsh-mobile-access')
+    rmSync(foreignLink, { force: true })
+    symlinkSync(foreignDir, foreignLink, 'dir')
+
+    const lines: string[] = []
+    const cleaned = cleanupStagedPlugins(result.staged, (line) => lines.push(line))
+    expect(cleaned.removed).toContain(own)
+    expect(existsSync(own)).toBe(false)
+    expect(existsSync(foreignLink)).toBe(true)
+    expect(lines.some((line) => line.includes('跳过他实例'))).toBe(true)
+  })
+
+  test('实体目录（复制体）不动：readlink 失败就跳过', () => {
+    const root = tempDir()
+    const pool = join(root, 'pool')
+    mkdirSync(pool, { recursive: true })
+    const entity = join(pool, 'dsh-desktop-tauriapp')
+    mkdirSync(entity, { recursive: true })
+    const cleaned = cleanupStagedPlugins([{ name: 'dsh-desktop-tauriapp', dir: entity, link: entity }])
+    expect(cleaned.removed).toHaveLength(0)
+    expect(cleaned.kept).toContain(entity)
+    expect(existsSync(entity)).toBe(true)
+  })
+
+  test('已经被删掉的链接不报错', () => {
+    const root = tempDir()
+    const cleaned = cleanupStagedPlugins([
+      { name: 'dsh-desktop-tauriapp', dir: join(root, 'gone'), link: join(root, 'pool', 'dsh-desktop-tauriapp') },
+    ])
+    expect(cleaned.removed).toHaveLength(0)
   })
 })

@@ -15,8 +15,9 @@ import type { GuestPush } from '../shared/guest-policy.ts'
 import { listSounds, type Notifier } from './notifications.ts'
 import { permissionHint, type NotifyPermission } from '../shared/notify-permission.ts'
 import type { PortClaim } from '../shared/ports.ts'
-import { startupAction, validProfileName, type MigrationStatus, type StartupHealth } from '../shared/profile-ops.ts'
+import { EMPTY_TASK, startupAction, validProfileName, type MigrationStatus, type ProfileDependencyRow, type StartupHealth, type TaskSnapshot } from '../shared/profile-ops.ts'
 import type { ShellUpdater } from './updater.ts'
+import type { ProxyEnv } from '../shared/proxy-env.ts'
 
 export interface CommandDeps {
   home: string
@@ -105,6 +106,14 @@ export interface CommandDeps {
   testProxy?: (url: string) => Promise<number>
   /** 应用更新（`src/bun/updater.ts` 包住的框架 Updater）；无窗口单测可以不接 */
   updater?: ShellUpdater
+  /** 桌面档快捷键偏好（旧壳 `shortcuts.rs`；壳只做上限 + 原子写，不解析 JSON） */
+  keybindings?: { read: () => string | null; write: (raw: string) => void }
+  /** 各 profile 的依赖状态（`list_profile_dependency_status`；旧壳比 pnpm 大版本） */
+  dependencyRows?: () => Promise<ProfileDependencyRow[]>
+  /** 任务快照（`task_status`；迁移/重建的进度卡轮询它） */
+  taskStatus?: () => TaskSnapshot
+  /** 当前生效的代理注入预览（`get_proxy_settings.effective`） */
+  proxyEffective?: () => ProxyEnv | null
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -209,13 +218,16 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       return { settings: serializeSettings(next) }
     },
 
+    // 代理设置回显（旧壳 get_proxy_settings 的六字段）：凭据单独回吐（F3），effective 是对象
     get_proxy_settings: () => {
       const settings = deps.settings()
       return {
         proxy_mode: settings.proxyMode ?? 'off',
         proxy_url: settings.proxyUrl ?? '',
         no_proxy: settings.noProxy ?? '',
-        effective: settings.proxyMode === 'manual' ? settings.proxyUrl ?? '' : '',
+        proxy_user: settings.proxyUser ?? '',
+        proxy_pass: settings.proxyPass ?? '',
+        effective: deps.proxyEffective?.() ?? null,
       }
     },
 
@@ -352,8 +364,22 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
       })
     },
 
-    list_profile_dependency_status: () => {
-      return [{ profile: profileOf(deps), ready: true, note: '依赖树来自当前运行时（#209 reconcile）' }]
+    // 各 profile 的依赖状态（旧壳回 `{profiles:[…]}`；此前回的是裸数组 ⇒ 面板读到 undefined）
+    list_profile_dependency_status: async () => ({
+      profiles: (await deps.dependencyRows?.()) ?? [],
+    }),
+
+    // 迁移/重建的进度卡（旧壳 profiles::task_status 的九字段）
+    task_status: () => deps.taskStatus?.() ?? { ...EMPTY_TASK },
+
+    // 桌面档快捷键偏好（#187）：壳只做上限 + 原子写，页面侧解析与序列化
+    read_desktop_keybindings: () => deps.keybindings?.read() ?? null,
+    write_desktop_keybindings: (args) => {
+      const raw = args['raw']
+      if (typeof raw !== 'string') throw new Error('write_desktop_keybindings: raw 必须是字符串')
+      if (deps.keybindings === undefined) throw new Error('write_desktop_keybindings：壳未接快捷键偏好')
+      deps.keybindings.write(raw)
+      return {}
     },
 
     // ---- 下载 tab（管理器在 src/bun/downloads.ts；旧壳 download/{manager,transfer}.rs 的等价物）----

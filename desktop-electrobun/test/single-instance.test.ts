@@ -18,6 +18,8 @@ import {
   readInstance,
   releaseInstance,
   updateInstance,
+  defaultIsOurProcess,
+  readBootId,
   type InstanceRecord,
 } from '../src/bun/single-instance.ts'
 import { SPLASH_HEIGHT, SPLASH_WIDTH, splashFailScript, splashHtml, splashStageScript } from '../src/bun/splash.ts'
@@ -34,6 +36,7 @@ function record(overrides: Partial<InstanceRecord> = {}): InstanceRecord {
     pageUrl: 'http://127.0.0.1:6390/tok/',
     profile: 'desktop',
     startedAt: '2026-10-11T00:00:00.000Z',
+    bootId: '',
     ...overrides,
   }
 }
@@ -57,6 +60,7 @@ describe('单实例锁', () => {
     writeFileSync(file, JSON.stringify(record()))
     const result = acquireInstance(file, 'desktop', {
       isAlive: (pid) => pid === 4242,
+      isOurProcess: () => true,
       identity: { pid: 999 },
     })
     expect(result.acquired).toBe(false)
@@ -254,5 +258,70 @@ describe('启动阶段与启动界面', () => {
     // 启动界面完全离线：不许有外部资源（起不来时就该只依赖本地）
     expect(html).not.toContain('http://')
     expect(html).not.toContain('https://')
+  })
+})
+
+// 系统重启后 pid 会被复用（实测：pid 546 变成了 mobiletimerd）——锁文件里只有 pid 时，
+// 误判「已有实例在跑」会让 App 点开就退出，用户看到的是「点了没反应」。
+describe('单实例锁：重启 / pid 复用', () => {
+  test('锁记录来自上一次开机（bootId 不同）时接管，不误判', () => {
+    const dir = tempDir()
+    const file = join(dir, 'shell-instance.json')
+    writeFileSync(file, `${JSON.stringify(record({ pid: 546, bootId: '1759' }))}\n`)
+    const result = acquireInstance(file, 'desktop', {
+      isAlive: () => true, // 546 这个 pid 现在确实被别家进程占着
+      isOurProcess: () => true, // 即使进程身份也像
+      bootId: '1800', // 但是另一次开机了
+      identity: { pid: 111, startedAt: 'now' },
+    })
+    expect(result.acquired).toBe(true)
+    expect(result.record.bootId).toBe('1800')
+    expect(readInstance(file)?.pid).toBe(111)
+  })
+
+  test('同一次开机但那个 pid 不是我们的壳进程 ⇒ 接管', () => {
+    const dir = tempDir()
+    const file = join(dir, 'shell-instance.json')
+    writeFileSync(file, `${JSON.stringify(record({ pid: 546, bootId: '1759' }))}\n`)
+    const result = acquireInstance(file, 'desktop', {
+      isAlive: () => true,
+      isOurProcess: () => false, // ps 看到的 comm 是 mobiletimerd
+      bootId: '1759',
+      identity: { pid: 111, startedAt: 'now' },
+    })
+    expect(result.acquired).toBe(true)
+  })
+
+  test('同一次开机 + 确实是我们的壳进程 ⇒ 不接管（原有行为不变）', () => {
+    const dir = tempDir()
+    const file = join(dir, 'shell-instance.json')
+    writeFileSync(file, `${JSON.stringify(record({ pid: 546, bootId: '1759' }))}\n`)
+    const result = acquireInstance(file, 'desktop', {
+      isAlive: () => true,
+      isOurProcess: () => true,
+      bootId: '1759',
+      identity: { pid: 111, startedAt: 'now' },
+    })
+    expect(result.acquired).toBe(false)
+    expect(result.previous?.pid).toBe(546)
+  })
+
+  test('老记录（没有 bootId）靠进程身份兜底', () => {
+    const dir = tempDir()
+    const file = join(dir, 'shell-instance.json')
+    writeFileSync(file, `${JSON.stringify(record({ pid: 546 }))}\n`)
+    expect(readInstance(file)?.bootId).toBe('')
+    const ours = acquireInstance(file, 'desktop', { isAlive: () => true, isOurProcess: () => true, bootId: '1759' })
+    expect(ours.acquired).toBe(false)
+    const foreign = acquireInstance(file, 'desktop', { isAlive: () => true, isOurProcess: () => false, bootId: '1759' })
+    expect(foreign.acquired).toBe(true)
+  })
+
+  test('readBootId / defaultIsOurProcess 在异常输入下不抛', () => {
+    const bootId = readBootId()
+    expect(typeof bootId).toBe('string')
+    if (process.platform !== 'darwin') expect(bootId).toBe('')
+    // 不存在的 pid ⇒ false（而不是抛）
+    expect(defaultIsOurProcess(999_999_999)).toBe(false)
   })
 })

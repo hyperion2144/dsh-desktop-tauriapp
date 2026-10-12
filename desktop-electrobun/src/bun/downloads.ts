@@ -72,6 +72,8 @@ export interface DownloadManagerOptions {
   /** 默认下载目录（旧壳 `~/Downloads`；测试注入临时目录）。 */
   downloadDir?: string
   now?: () => number
+  /** 在文件管理器里定位（默认真跑 `open -R` / explorer / xdg-open；测试必接，否则会真弹窗） */
+  revealFile?: (path: string) => boolean
 }
 
 export interface DownloadManager {
@@ -104,6 +106,7 @@ export function tasksFileOf(home: string): string {
 
 export function createDownloadManager(options: DownloadManagerOptions): DownloadManager {
   const log = options.log
+  const revealFile = options.revealFile ?? ((path: string): boolean => revealPath(path, log))
   const now = options.now ?? ((): number => Math.floor(Date.now() / 1000))
   const fetchImpl: FetchLike = options.fetchImpl ?? ((url, init) => fetch(url, init))
   const downloadDir = options.downloadDir ?? join(home0(), 'Downloads')
@@ -512,7 +515,7 @@ export function createDownloadManager(options: DownloadManagerOptions): Download
     reveal: (id) => {
       const task = find(id)
       if (task === undefined || task.status !== 'completed' || !existsSync(task.targetPath)) return false
-      return revealPath(task.targetPath, log)
+      return revealFile(task.targetPath)
     },
 
     stop: () => {

@@ -1,6 +1,48 @@
 import type { ElectrobunConfig } from 'electrobun'
 import { APP_NAME } from './src/shared/app.ts'
 import { DEFAULT_UPDATE_BASE_URL } from './src/shared/update.ts'
+import { existsSync, readdirSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+
+const repoDir = resolve(import.meta.dir, '..')
+
+/** 递归列文件（返回相对给定目录的 POSIX 相对路径；目录不存在就空数组）。 */
+function listFiles(root: string, rel = ''): string[] {
+  const abs = rel === '' ? root : join(root, rel)
+  if (!existsSync(abs)) return []
+  const out: string[] = []
+  for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    const child = rel === '' ? entry.name : `${rel}/${entry.name}`
+    if (entry.isDirectory()) out.push(...listFiles(root, child))
+    else out.push(child)
+  }
+  return out
+}
+
+/**
+ * 把仓内的插件包摊成 `build.copy` 映射（源 → 包内 `plugins/<name>/…`）。
+ *
+ * 为什么要逐文件列、并且只列真的存在的：
+ *   · 打包态的壳插件必须住在 `Contents/Resources/app/plugins/<name>/`，否则 runtime.ts 的
+ *     `packagedResources()` 返回 null，`stagePlugins()` 找不到包 —— 界面上就是「装了新包但桌面插件
+ *     没注入、各项设置全空」（维护者实机报的）；
+ *   · Electrobun 的 copy 没有「源缺就跳过」，写死一个不存在的路径就 `CopySourceMissing`
+ *     直接构建失败（Windows/Linux CI 上踩过）；
+ *   · `mobile/dsh-mobile-nav` 是子模块，本地常常是空的。
+ */
+function pluginCopy(sourceDir: string, packageName: string, files: readonly string[]): Record<string, string> {
+  const map: Record<string, string> = {}
+  for (const rel of files) {
+    const source = join(sourceDir, rel)
+    if (existsSync(source)) map[source] = `plugins/${packageName}/${rel}`
+  }
+  return map
+}
+
+const desktopPluginDir = repoDir
+const desktopPluginFiles = ['package.json', 'index.js', 'cordis.patch.yml', 'README.md', 'LICENSE', ...listFiles(repoDir, 'lib')]
+const mobileAccessDir = join(repoDir, 'mobile', 'dsh-mobile-access')
+const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobileAccessDir, 'lib'), ...listFiles(mobileAccessDir, 'client')]
 
 export default {
   app: {
@@ -35,6 +77,15 @@ export default {
       // 报 `error: CopySourceMissing`（Electrobun 的 copy 不会「源缺就跳过」）。
       ...(process.platform === 'darwin'
         ? { 'native/libdsh-notify.dylib': 'runtime/libdsh-notify.dylib' }
+        : {}),
+      // 壳插件与手机访问插件：装到 `<app>/Contents/Resources/app/plugins/`，运行时再挂进 profile 池。
+      ...pluginCopy(desktopPluginDir, 'dsh-desktop-tauriapp', desktopPluginFiles),
+      ...pluginCopy(mobileAccessDir, 'dsh-mobile-access', mobileAccessFiles),
+      // 内置 dsh 运行时（随包发出，item 1）：prepare:bundle 把一棵可用的运行时树物化到
+      // builtin-runtime/（来源：仓内 Tauri 树 / 已下载运行时 / DSH_SHELL_BUILTIN_SOURCE）。
+      // 只在真的物化成功时声明：Electrobun 的 copy 不会「源缺就跳过」，写死会 CopySourceMissing。
+      ...(existsSync(join(import.meta.dir, 'builtin-runtime', 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'))
+        ? { 'builtin-runtime': 'dsh' }
         : {}),
     },
     // 关窗不退出：托盘在的时候，关掉最后一个窗口只是隐藏（与旧 Tauri 壳同行为）。

@@ -38,9 +38,16 @@ export function createTray(options: CreateTrayOptions): TrayHandle | null {
     return null
   }
 
+  // 菜单更新一律走 setMenu，**不重建托盘**；内容没变就不重复下发——菜单正开着时
+  // 反复 setMenu 会把它顶掉（用户口径：刷新要事件驱动，别让菜单消失）。
+  let lastMenu = ''
   const apply = (state: TrayState): void => {
     try {
-      tray.setMenu(trayMenu(state))
+      const menu = trayMenu(state)
+      const serialized = JSON.stringify(menu)
+      if (serialized === lastMenu) return
+      lastMenu = serialized
+      tray.setMenu(menu)
     } catch (error) {
       log(`[shell] 托盘菜单更新失败：${String(error)}`)
     }

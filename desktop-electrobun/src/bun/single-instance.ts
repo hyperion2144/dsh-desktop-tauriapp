@@ -3,7 +3,7 @@
 // 为什么自己写：Electrobun 2.0.2 没有单实例 API（旧 Tauri 壳用 tauri-plugin-single-instance）。
 // 锁文件放**应用支持目录**而不是 DSH_HOME——同一台机器上一个 App 只该有一份，与 profile 无关。
 //
-// 内容：{pid, origin, pageUrl, profile, startedAt}。
+// 内容：{pid, origin, pageUrl, profile, startedAt, bootId}。
 // 流程：启动时 acquire；失败 ⇒ POST 已有实例的 /__shell__/activate（走它自己的 loopback 服务面，
 // 不占端口、不起宿主），然后本进程退出。origin 要等服务面起来才知道，所以先登记 pid，就绪后再回填。
 
@@ -19,6 +19,8 @@ export interface InstanceRecord {
   pageUrl: string | null
   profile: string
   startedAt: string
+  /** 开机标识（macOS `kern.boottime` 的秒值）。重启后 pid 会被复用，靠它认出「上次开机的记录」 */
+  bootId: string
 }
 
 export function parseInstanceRecord(text: string): InstanceRecord | null {
@@ -33,6 +35,7 @@ export function parseInstanceRecord(text: string): InstanceRecord | null {
       pageUrl: typeof record.pageUrl === 'string' ? record.pageUrl : null,
       profile: typeof record.profile === 'string' ? record.profile : 'desktop',
       startedAt: typeof record.startedAt === 'string' ? record.startedAt : '',
+      bootId: typeof record.bootId === 'string' ? record.bootId : '',
     }
   } catch {
     return null
@@ -52,6 +55,39 @@ export function defaultIsAlive(pid: number): boolean {
   }
 }
 
+/** 壳进程的 comm 里可能出现的片段（打包后是 launcher / bun，dev 下是 bun） */
+export const OUR_PROCESS_HINTS = ['bun', 'launcher', 'electrobun', 'dsh-desktop-bun'] as const
+
+/** 开机标识：macOS 用 `kern.boottime` 的秒值；拿不到就回空串（此时只靠进程身份判断） */
+export function readBootId(): string {
+  if (process.platform !== 'darwin') return ''
+  try {
+    const result = Bun.spawnSync(['sysctl', '-n', 'kern.boottime'], { stdout: 'pipe', stderr: 'ignore' })
+    const text = new TextDecoder().decode(result.stdout ?? new Uint8Array())
+    const match = /\{\s*sec\s*=\s*(\d+)/.exec(text)
+    return match?.[1] ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 这个 pid 看起来还是我们的壳吗？
+ *
+ * 系统重启后 pid 会被复用（实测：一个 16GB 的 macOS 启动后 pid 546 变成了 mobiletimerd），
+ * 所以「pid 活着」远不足以判定「上个实例还在跑」——必须再看进程身份。
+ */
+export function defaultIsOurProcess(pid: number, needles: readonly string[] = OUR_PROCESS_HINTS): boolean {
+  try {
+    const result = Bun.spawnSync(['ps', '-p', String(pid), '-o', 'comm='], { stdout: 'pipe', stderr: 'ignore' })
+    const comm = new TextDecoder().decode(result.stdout ?? new Uint8Array()).trim().toLowerCase()
+    if (comm === '') return false
+    return needles.some((needle) => comm.includes(needle.toLowerCase()))
+  } catch {
+    return false
+  }
+}
+
 export interface InstanceIdentity {
   pid: number
   profile: string
@@ -60,6 +96,10 @@ export interface InstanceIdentity {
 
 export interface AcquireOptions {
   isAlive?: (pid: number) => boolean
+  /** 当前开机标识（默认自己读）；测试可覆盖 */
+  bootId?: string
+  /** 判断某个 pid 是否还是我们的壳进程（默认 `ps -o comm=`）；测试可覆盖 */
+  isOurProcess?: (pid: number) => boolean
   /** 覆盖身份，便于单测 */
   identity?: Partial<InstanceIdentity>
 }
@@ -98,16 +138,24 @@ export function acquireInstance(
   const isAlive = options.isAlive ?? defaultIsAlive
   const pid = options.identity?.pid ?? process.pid
   const startedAt = options.identity?.startedAt ?? new Date().toISOString()
+  const bootId = options.bootId ?? readBootId()
+  const isOurProcess = options.isOurProcess ?? defaultIsOurProcess
   const mine: InstanceRecord = {
     pid,
     origin: '',
     pageUrl: null,
     profile: options.identity?.profile ?? profile,
     startedAt,
+    bootId,
   }
   const existing = readInstance(file)
+  // 「已有实例还活着」要同时满足三条：pid 活着、仍是我们的壳进程、且不是上次开机留下的记录。
+  // 只看 pid 会在系统重启后被别家进程（pid 复用）骗过去 ⇒ 用户看到的症状是「点了没反应」。
   if (existing !== null && existing.pid !== pid && isAlive(existing.pid)) {
-    return { acquired: false, previous: existing, record: existing }
+    const sameBoot = bootId === '' || existing.bootId === '' || existing.bootId === bootId
+    if (sameBoot && isOurProcess(existing.pid)) {
+      return { acquired: false, previous: existing, record: existing }
+    }
   }
   writeInstance(file, mine)
   return { acquired: true, previous: existing, record: mine }

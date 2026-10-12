@@ -198,3 +198,40 @@ export function migrationSummary(input: {
 export function migratedPackageName(dest: string): string {
   return `dsh-profile-${dest}`
 }
+
+/** 从 `.modules.yaml` 里抠出 pnpm 版本（旧壳 `profiles::profile_recorded_pnpm` 的行级判据）。 */
+export function pnpmFromModulesYaml(text: string): string | null {
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    const rest = trimmed.startsWith('"packageManager":')
+      ? trimmed.slice('"packageManager":'.length)
+      : trimmed.startsWith('packageManager:')
+        ? trimmed.slice('packageManager:'.length)
+        : null
+    if (rest === null) continue
+    const raw = rest.trim().replace(/,$/, '').trim().replace(/^"/, '').replace(/"$/, '')
+    if (raw.startsWith('pnpm@')) return raw.slice('pnpm@'.length)
+  }
+  return null
+}
+
+/** pnpm 大版本（旧壳 #124：只比 major，小版本差异 store 同代、不触发 UNEXPECTED_STORE）。 */
+export function pnpmMajor(version: string): string {
+  const [head] = version.split('.')
+  return head === undefined || head === '' ? version : head
+}
+
+/** 依赖树是否与内置 pnpm 不同代（任一侧读不到就不判不一致）。 */
+export function dependencyMismatch(recorded: string | null, builtin: string | null): boolean {
+  if (recorded === null || builtin === null) return false
+  return pnpmMajor(recorded) !== pnpmMajor(builtin)
+}
+
+/** `list_profile_dependency_status` 的一行（设置面板的依赖卡逐行渲染它）。 */
+export interface ProfileDependencyRow {
+  profile: string
+  recordedPnpm: string | null
+  builtinPnpm: string | null
+  needsRebuild: boolean
+  running: boolean
+}

@@ -387,6 +387,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     const home = tempDir('dsh-dl-home-')
     const dir = tempDir('dsh-dl-target-')
     const saved: number[] = []
+    const revealed: string[] = []
     const manager = createDownloadManager({
       home,
       downloadDir: dir,
@@ -394,6 +395,11 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
       saveConcurrency: (value) => saved.push(value),
       chooseDirectory: async () => dir,
       fetchImpl: async () => new Response('ok', { status: 200 }),
+      // 绝不能真弹 Finder（会打断人）：定位走注入的探针
+      revealFile: (path) => {
+        revealed.push(path)
+        return true
+      },
     })
     expect(manager.setConcurrency(99)).toBe(32)
     expect(manager.setConcurrency(0)).toBe(1)
@@ -401,6 +407,7 @@ describe('下载：管理器（真文件系统 + fetch 桩）', () => {
     await manager.startUrl('http://h/done.bin', 'done.bin')
     await waitFor(() => manager.list()[0]?.status === 'completed')
     expect(manager.reveal(manager.list()[0]?.id ?? 0)).toBe(true)
+    expect(revealed).toEqual([join(dir, 'done.bin')])
     expect(manager.clearFinished()).toBe(1)
     expect(manager.list()).toEqual([])
     // 未完成的任务不给定位

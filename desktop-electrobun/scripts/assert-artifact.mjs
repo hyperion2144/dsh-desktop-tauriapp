@@ -155,6 +155,13 @@ if (diskVersionFiles.length > 0) {
   console.log(`[assert] 磁盘上发现 ${String(diskVersionFiles.length)} 份 version.json（app 目录布局）`)
 }
 
+/** 打包时贴进 `Contents/Resources/app/plugins/` 的壳插件：壳运行时要靠它们注入桌面功能。 */
+const REQUIRED_PAYLOAD_FILES = [
+  'plugins/dsh-desktop-tauriapp/package.json',
+  'plugins/dsh-desktop-tauriapp/lib/client.js',
+  'plugins/dsh-mobile-access/package.json',
+]
+
 /** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
 function tarExtractTo(archive, member, dest) {
   for (const args of [['--zstd', '-xOf'], ['-xOf']]) {
@@ -202,6 +209,12 @@ function inspect(archive, label, depth = 0) {
   const joined = norm.join('\n')
   for (const marker of cefMarkers(platform)) {
     if (!joined.includes(marker)) problems.push(`${label} 里缺 CEF 标志：${marker}`)
+  }
+  // 贴进包里的壳插件：缺了就是「装完设置面板全空」（维护者实机报的），必须在门槛里拦住。
+  for (const required of REQUIRED_PAYLOAD_FILES) {
+    if (!norm.some((line) => line.endsWith(`/${required}`))) {
+      problems.push(`${label} 里缺 ${required}（壳插件没被打进包？）`)
+    }
   }
   if (versionLine === undefined) {
     const sample = norm
