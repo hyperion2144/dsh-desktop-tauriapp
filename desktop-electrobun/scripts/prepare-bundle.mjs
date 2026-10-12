@@ -75,7 +75,7 @@ const isRuntimeTree = (dir) => existsSync(binMarker(dir))
 function newestDownloadedRuntime() {
   const roots = [
     process.env.DSH_HOME === undefined ? null : join(process.env.DSH_HOME, 'runtimes'),
-    join(homedir(), 'Library', 'Application Support', 'com.arcreel.dsh-desktop-tauriapp', 'runtimes'),
+    join(homedir(), 'Library', 'Application Support', 'com.hyperion.dsh-desktop-bun', 'runtimes'),
   ].filter((entry) => entry !== null)
   for (const root of roots) {
     if (!existsSync(root)) continue

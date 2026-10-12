@@ -213,6 +213,30 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
   return items
 }
 
+
+/**
+ * 托盘菜单限宽（目标 A6）：Electrobun 的菜单项没有 width 概念，超长 label 会把菜单
+ * 拉到很宽（运行时路径/远程地址/冲突路径都可能很长）。按码点截断加省略号，
+ * 保留动作语义（action 不变）；子菜单 label 同样处理。
+ */
+export const TRAY_LABEL_MAX = 48
+export function truncateTrayLabel(label: string, max = TRAY_LABEL_MAX): string {
+  const chars = Array.from(label)
+  if (chars.length <= max) return label
+  return `${chars.slice(0, Math.max(1, max - 1)).join('')}…`
+}
+
+/** 菜单树遍历：对每个普通项的 label 限宽；子菜单递归。 */
+function truncateMenu(items: TrayMenuItem[]): TrayMenuItem[] {
+  return items.map((item) => {
+    if (item.type !== 'normal') return item
+    const next: TrayMenuItem = { ...item, label: truncateTrayLabel(item.label) }
+    if ('submenu' in item && item.submenu !== undefined) {
+      ;(next as { submenu?: TrayMenuItem[] }).submenu = truncateMenu(item.submenu)
+    }
+    return next
+  })
+}
 export function trayMenu(state: TrayState): TrayMenuItem[] {
   const profiles = orderedProfiles(state)
   const items: TrayMenuItem[] = [
@@ -261,7 +285,7 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     { type: 'divider' },
     { type: 'normal', label: '退出', action: TRAY_MENU_ACTIONS.quit },
   )
-  return items
+  return truncateMenu(items)
 }
 
 /** 托盘图标的悬停/无障碍标题：一眼能看出「哪个 profile」 */

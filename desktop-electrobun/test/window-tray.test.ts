@@ -15,6 +15,7 @@ import {
   trayMenu,
   trayTitle,
 } from '../src/bun/tray-menu.ts'
+import { TRAY_LABEL_MAX, truncateTrayLabel } from '../src/bun/tray-menu.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -332,5 +333,35 @@ describe('window-state', () => {
   test('默认尺寸仍然大于最小尺寸', () => {
     expect(DEFAULT_WINDOW_WIDTH).toBeGreaterThan(MIN_WINDOW_WIDTH)
     expect(DEFAULT_WINDOW_HEIGHT).toBeGreaterThan(MIN_WINDOW_HEIGHT)
+  })
+})
+
+describe('托盘菜单限宽（A6）', () => {
+  test('短 label 原样返回', () => {
+    expect(truncateTrayLabel('退出')).toBe('退出')
+  })
+  test('超长 label 截断加省略号，长度不超过 max', () => {
+    const long = '/Users/mutou/Library/Application Support/com.arcreel.dsh-desktop-tauriapp/runtimes/0.2.1-alpha.2'
+    const out = truncateTrayLabel(long)
+    expect(Array.from(out).length).toBeLessThanOrEqual(TRAY_LABEL_MAX)
+    expect(out.endsWith('…')).toBe(true)
+    expect(out.startsWith('/Users/mutou')).toBe(true)
+  })
+  test('CJK 按码点计数不劈开代理对', () => {
+    const emoji = '🚀'.repeat(60)
+    const out = truncateTrayLabel(emoji)
+    expect(Array.from(out).length).toBe(TRAY_LABEL_MAX)
+  })
+  test('自定义上限', () => {
+    expect(truncateTrayLabel('abcdef', 3)).toBe('ab…')
+  })
+  test('菜单树整体限宽：长 label 项被截断且 action 保留', () => {
+    const state = baseState({ runtimeLabel: 'x'.repeat(80) })
+    const menu = trayMenu(state)
+    const runtime = menu.find((item) => item.type === 'normal' && item.label.startsWith('运行时：'))
+    expect(runtime).toBeDefined()
+    if (runtime?.type !== 'normal') throw new Error('unreachable')
+    expect(Array.from(runtime.label).length).toBeLessThanOrEqual(TRAY_LABEL_MAX)
+    expect(runtime.enabled).toBe(false)
   })
 })

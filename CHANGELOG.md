@@ -6,6 +6,11 @@
 
 ### 桌面壳（Electrobun）
 
+- 托盘菜单限宽（A6）：Electrobun 菜单项没有 width 概念，超长 label（运行时路径/冲突路径/远程地址）会把菜单拉到很宽——现在所有普通项与子菜单项按码点截断到 48 字符加省略号（不劈开代理对），action 语义不变；`truncateTrayLabel`/`TRAY_LABEL_MAX` 单测 5 例。
+- 换 bundle id（A7）：`com.arcreel.dsh-desktop-tauriapp` → `com.hyperion.dsh-desktop-bun`（electrobun.config.ts identifier + 壳侧默认 `~/Library/Application Support/<id>` 与 prepare-bundle 的 runtimes 回退路径同步改；CEF 用户数据/端口台账/单实例锁随新 id 独立成目录，不与旧 Tauri 壳互踩）。
+
+### 桌面壳（Electrobun）
+
 - 远程 dsh 服务地址消费（旧壳 `network/remote.rs` 的 B1 等价物，核心链路）：设置 `remote_addr` 存了就进入远程模式——页面文档仍由本机 dist 出（ADR 0005 构建闸门后续接），数据面反代指向远程 origin；URL 里的 `?token=` 换会话 cookie（拿不到照常起服务面，由 dsh 自行展示鉴权错误页，旧壳同口径）；远程模式不 spawn 本地宿主、跳过本地端口认领弹框；`restart_dsh_service` 支持远程/本地互切（远程→本地无宿主时立即拉起）。新增 `src/shared/remote.ts`（normalizeRemoteUrl / remoteDisplay / remoteHostPort / remoteOrigin）与 `test/remote.test.ts`（12 例）。实测：dummy 远程 dsh 303+set-cookie → 壳 `[remote] 换 cookie：auth 303`；页面 origin 反代 `/api/*` 到远程并带上 cookie；`state.hostPid = 0`。
 
 ### 桌面壳（Electrobun）

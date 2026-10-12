@@ -47,7 +47,7 @@ const mobileAccessFiles = ['package.json', 'cordis.patch.yml', ...listFiles(mobi
 export default {
   app: {
     name: APP_NAME,
-    identifier: 'com.arcreel.dsh-desktop-tauriapp',
+    identifier: 'com.hyperion.dsh-desktop-bun',
     version: '0.1.0',
   },
   build: {

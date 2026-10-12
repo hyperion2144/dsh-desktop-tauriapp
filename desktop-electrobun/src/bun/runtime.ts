@@ -21,7 +21,7 @@ import {
 import { isRuntimeVersion, selectRuntimeVersion } from '../shared/runtime-catalog.ts'
 import type { DshMode } from '../shared/settings.ts'
 
-export const APP_SUPPORT = 'Library/Application Support/com.arcreel.dsh-desktop-tauriapp'
+export const APP_SUPPORT = 'Library/Application Support/com.hyperion.dsh-desktop-bun'
 
 export interface ShellLayout {
   /** ~/.dsh 或 DSH_HOME */
