@@ -6,6 +6,8 @@
 
 ### 桌面壳（Electrobun）
 
+- 手机稳定接入点 lane 转发器（F4，旧壳 `network/forwarder.rs` #94 的等价物）：新增 `desktop-electrobun/src/bun/lane-forwarder.ts`，壳在遗留 lane 端口（settings 的 `lane_port`，默认 3091）监听并把 TCP 原样双向转发到焦点实例的 lane——手机旧配置零改动，新连接落焦点实例、存量长连接不切换；外部 dsh 占了端口时警告后退场（手机直连它即可）。窗口焦点切换/关闭时更新目标；多实例下只有先起的服务面持有转发器。
+
 - Windows 可执行安装程序（A2/A4）：新增 `desktop-electrobun/scripts/build-windows-installer.mjs`，把 Electrobun 的 Windows 构建产物（launcher.exe + Resources）用 NSIS 包成 `artifacts/windows-x64-DeepSeekHarnessDesktopBUN-setup.exe`——每用户安装（无需管理员）、目录选择页（InstallDirRegKey 记住自定义目录）、开始菜单快捷方式、控制面板卸载项与卸载器；图标同 `resources/app-icon.ico`。CI（shell-electrobun.yml）Windows job 在产物断言后跑 `bun run build:installer`（镜像缺 makensis 时 choco 兜底），setup.exe 随 artifacts/** 上传。
 
 - Windows/Linux 布局对齐旧壳（维护者口径）：中间列顶部保留整条 chrome 条（拖拽区 + 窗口三键，内容 padding 顶下、右侧 panel 覆写 top）——回退 round 3 里「三键只占右上角」的布局改动；仅保留 Electrobun CSS 拖拽区与壳端点三键。侧栏顶部间隔（macOS 红绿灯腾位）在代码里本就是 darwin 独占：stock 布局的 `--dsh-frame-top-clearance:48px` 只挂在 `html[data-platform=darwin]`，壳的侧栏 padding 也只在 darwin 分支。

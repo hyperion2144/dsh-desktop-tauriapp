@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { decideClaim, extractTokenFromUrl } from '../shared/port-claim.ts'
+import { startLaneForwarder, type LaneForwarder } from './lane-forwarder.ts'
 import { normalizeRemoteUrl, remoteDisplay, remoteOrigin } from '../shared/remote.ts'
 import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
@@ -143,6 +144,8 @@ export interface ShellService {
   state: ShellState
   paths: ShellLayout
   server: ShellServer
+  /** 手机稳定接入点（遗留 lane 端口 → 本实例 lane）；多实例下只有先起的服务面持有（其余 null） */
+  laneForwarder: LaneForwarder | null
   /** 停止：摘服务、SIGTERM→SIGKILL 停宿主、上台账与端口回收 */
   stop: () => Promise<void>
   /** 手动重启宿主（守护器会接住退出并把服务面切到新宿主） */
@@ -670,6 +673,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
   bootPayload.injections = [...hostInjections]
+  // 手机稳定接入点（旧壳 forwarder.rs #94）：监听遗留 lane 端口（settings.lanePort，默认 3091），
+  // 新连接落本实例的 lane；外部 dsh 占了端口时退场（手机直连它即可）。多实例下只有先起的那份
+  // 服务面拿得到转发器（同端口第二绑定必失败），index.ts 的焦点切换会找到它更新目标。
+  const forwarder = startLaneForwarder({ port: settings.lanePort ?? 3091, log })
+  forwarder?.setTarget(lanePort)
   const pageUrl = `${server.origin}/${token}/`
 
   // 写入前重读磁盘：多窗口下台账被所有服务面共享，内存副本可能是旧的（否则会覆盖掉别人的行）。
@@ -908,6 +916,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     state,
     paths,
     server,
+    laneForwarder: forwarder,
     notify: notifyBridge,
     settings: () => liveSettings,
     save: saveSettings,
@@ -957,6 +966,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       ledger.reset()
       server.stop()
       notifyServer.stop()
+      forwarder?.stop()
       keepAwake.stop()
       arbiter.clear()
       downloads.stop()

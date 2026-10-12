@@ -38,6 +38,7 @@ import {
 import { loadSettings } from './settings-store.ts'
 import { activeProfile, type DesktopSettings } from '../shared/settings.ts'
 import { closeAction, offsetFrame, planWindowOpen, windowKey } from '../shared/window-targets.ts'
+import type { LaneForwarder } from './lane-forwarder.ts'
 import { createNotifier, type Notifier } from './notifications.ts'
 import { SCENARIO } from '../shared/notify-policy.ts'
 import { join } from 'node:path'
@@ -454,6 +455,10 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
   })
   win.on('focus', () => {
     focusedProfile = profile
+    // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）
+    // lane 稳定接入点跟随焦点（旧壳 forwarder.rs：新连接落焦点实例，存量不动）。
+    // 转发器挂在先起的那份服务面上，这里找到它再指目标。
+    focusedLaneForwarder()?.setTarget(services.get(profile)?.state.lanePort ?? 0)
     refreshTray()
   })
   // 关窗回托盘：原生层会先问 `will-close`，回 response.allow=false 就不关（旧 Tauri 壳同行为）。
@@ -482,7 +487,10 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     // 窗口里的 guest 子 webview 跟着窗口一起回收（否则会留在窗口之外无法关闭）
     const released = guests.releaseHost(windowKey(profile))
     if (released > 0) console.log(`[shell] 随窗口回收 guest：${released} 个（${profile}）`)
-    if (focusedProfile === profile) focusedProfile = null
+    if (focusedProfile === profile) {
+      focusedProfile = null
+      focusedLaneForwarder()?.setTarget(0)
+    }
     refreshTray()
   })
   // 位置/尺寸记忆只记主窗（多窗口共用一份 window.json；按 profile 各记一份是另一件事）
@@ -720,6 +728,13 @@ const notifier: Notifier = createNotifier({
   onLog: (line) => console.log(line),
 })
 let service: ShellService
+/** 找到持有 lane 转发器的那份服务面（多实例下只有先起的那份非 null）。 */
+const focusedLaneForwarder = (): LaneForwarder | null => {
+  for (const svc of services.values()) {
+    if (svc.laneForwarder !== null) return svc.laneForwarder
+  }
+  return null
+}
 try {
   service = await ensureService(instanceProfile)
 } catch (error) {
