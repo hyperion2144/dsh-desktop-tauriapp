@@ -8,6 +8,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import {
   hasBundleIdentity,
   resolveNotifyLib,
@@ -26,6 +27,11 @@ import {
 const APP_EXEC = '/Applications/DeepSeek Harness Desktop.app/Contents/MacOS/bun'
 const BARE_EXEC = '/Users/x/.hutch/toolchains/bun/1.4.0/macos-arm64/bun'
 
+
+// 这条断言依赖仓内 native/libdsh-notify.dylib（build:native 的产物，不入库）。
+// 本地/CI 里没先跑 build:native、或本就不是 macOS 时跳过，而不是判失败。
+const REPO_NATIVE_LIB = join(import.meta.dir, '..', 'native', NOTIFY_LIB_NAME)
+const dylibBuilt = existsSync(REPO_NATIVE_LIB)
 describe('授权状态映射（旧壳 notify_un.rs 的 permission_state）', () => {
   test('原生码 → 状态：3 已授权、2 已拒绝、1 未决定、其余不可用', () => {
     expect(permissionFromCode(3)).toBe('granted')
@@ -175,7 +181,7 @@ describe('库定位顺序（环境变量 > 包内 runtime > 可执行体同级 >
     expect(resolveNotifyLib({ env: {}, execPath: BARE_EXEC, resourcesDir: null, exists: () => false })).toBeNull()
   })
 
-  test('本仓的 dylib 就位：dev .app 身份下桥可用（只 dlopen，不调 UN）', () => {
+  test.skipIf(!dylibBuilt)('本仓的 dylib 就位：dev .app 身份下桥可用（只 dlopen，不调 UN）', () => {
     const logs: string[] = []
     const bridge = createNativeNotify({ platform: 'darwin', execPath: APP_EXEC, log: (l) => logs.push(l) })
     expect(bridge.available).toBe(true)

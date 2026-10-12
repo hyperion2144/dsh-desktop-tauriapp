@@ -66,7 +66,11 @@ jobs:
         with:
           bun-version: 1.4.0
 
-      - name: 安装 hutch（Electrobun CLI）
+      # hutch 官方 install.sh 的 uname 分支只认 Darwin/Linux（Windows 的 Git Bash 会报
+      # unsupported platform），所以 Windows 走官方 install.ps1；两条路都把 bin 目录
+      # 写进 GITHUB_PATH，后面的步骤才看得见 `hutch`。
+      - name: 安装 hutch（Electrobun CLI，非 Windows）
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           curl -fsSL https://hutch.blackboard.sh/hutch/install.sh | sh
@@ -74,9 +78,27 @@ jobs:
           export PATH="$HOME/.hutch/bin:$PATH"
           hutch --version
 
+      - name: 安装 hutch（Electrobun CLI，Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://hutch.blackboard.sh/hutch/install.ps1 -OutFile "$env:TEMP\hutch-install.ps1"
+          & "$env:TEMP\hutch-install.ps1" -NoModifyPath
+          $bin = Join-Path $HOME '.hutch\bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & (Join-Path $bin 'hutch.exe') --version
+
       - name: 依赖（bun install）
         working-directory: desktop-electrobun
         run: bun install --frozen-lockfile
+
+      # 原生通知桥（native/libdsh-notify.dylib）也是单测的输入之一（「dylib 就位」那条），
+      # 所以先准备好再跑测试；非 macOS 上 build:native 自己跳过。
+      - name: 准备（原生通知桥 + 包内资源）
+        working-directory: desktop-electrobun
+        run: |
+          bun run build:native
+          bun run prepare:bundle
 
       - name: 类型检查
         working-directory: desktop-electrobun
@@ -87,12 +109,6 @@ jobs:
       - name: 单元测试
         working-directory: desktop-electrobun
         run: bun test
-
-      - name: 准备（原生通知桥 + 包内资源）
-        working-directory: desktop-electrobun
-        run: |
-          bun run build:native
-          bun run prepare:bundle
 
       - name: 打包（Electrobun，CEF）
         working-directory: desktop-electrobun
