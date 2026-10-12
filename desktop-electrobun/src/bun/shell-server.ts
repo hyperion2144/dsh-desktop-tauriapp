@@ -56,6 +56,8 @@ export interface ShellServerOptions {
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
   /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
+  /** F12：页面内确认弹窗的回填（旧壳 ui_input_confirm） */
+  onInputConfirm?: (flow: string, value: string) => void
   onProfileOp?: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** 兼容/高级模式弹框状态（旧壳 get_mode_prompt_needed） */
   getModePrompt?: () => { needed: boolean; profile: string; port: number }
@@ -301,6 +303,20 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           return new Response(null, { status: 204 })
         }
         // F9：托盘弹框的新建/迁移 profile 表单提交
+        // F12：页面内确认弹窗的回填端点（旧壳 ui_input_confirm 的 HTTP 形态）
+        if (decision.rel === 'input-confirm') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onInputConfirm === undefined) return new Response('no listener', { status: 501 })
+          let body: { flow?: unknown; value?: unknown }
+          try {
+            body = (await request.json()) as { flow?: unknown; value?: unknown }
+          } catch {
+            return new Response('bad json', { status: 400 })
+          }
+          if (typeof body.flow !== 'string') return new Response('bad flow', { status: 400 })
+          options.onInputConfirm(body.flow, typeof body.value === 'string' ? body.value : '')
+          return new Response(null, { status: 204 })
+        }
         if (decision.rel === 'profile-op') {
           if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
           if (options.onProfileOp === undefined) return new Response('not implemented', { status: 501 })

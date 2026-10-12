@@ -117,6 +117,10 @@ export interface CommandDeps {
   taskStatus?: () => TaskSnapshot
   /** 当前生效的代理注入预览（`get_proxy_settings.effective`） */
   proxyEffective?: () => ProxyEnv | null
+  /** F13：窗口⇄最大化切换（壳主进程操作 focusedWindow） */
+  zoomToggle?: () => void
+  /** F12：确认弹窗回填的同槽转发（旧壳 ui_input_confirm） */
+  inputConfirm?: (flow: string, value: string) => void
 }
 
 /** 上游端口：状态条与「dsh 来源」卡都要它（壳状态快照里的 upstreamPort） */
@@ -232,6 +236,36 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         proxy_pass: settings.proxyPass ?? '',
         effective: deps.proxyEffective?.() ?? null,
       }
+    },
+
+    // F14：旧壳独立代理窗的保存口（新壳由设置面板承担，命令面保留对齐）
+    save_proxy_settings: async (args: Record<string, unknown>) => {
+      const patch: Record<string, unknown> = {}
+      for (const key of ['proxy_mode', 'proxy_url', 'no_proxy', 'proxy_user', 'proxy_pass'] as const) {
+        const value = args[key]
+        if (typeof value === 'string') patch[key] = value
+      }
+      if (Object.keys(patch).length === 0) throw new Error('save_proxy_settings：没有可保存的字段')
+      deps.save(patch)
+      return { ok: true, effective: deps.proxyEffective?.() ?? null }
+    },
+
+    // F13：旧壳 toggle_zoom（窗口⇄工作区）；Electrobun 无 workArea API，
+    // 用 maximize/unmaximize 等价实现（原生会记住恢复几何）
+    toggle_zoom: () => {
+      if (deps.zoomToggle === undefined) throw new Error('zoom 切换未就绪（壳还在启动）')
+      deps.zoomToggle()
+      return { ok: true }
+    },
+
+    // F12：页面内确认弹窗回填（旧壳命令名；新壳页面走 /__shell__/input-confirm，
+    // 这里为命令面对齐保留，同槽转发）
+    ui_input_confirm: (args: Record<string, unknown>) => {
+      const flow = typeof args['flow'] === 'string' ? args['flow'] : ''
+      const value = typeof args['value'] === 'string' ? args['value'] : ''
+      if (deps.inputConfirm === undefined) throw new Error('没有等待中的输入请求')
+      deps.inputConfirm(flow, value)
+      return { ok: true }
     },
 
     // 兼容/高级模式（旧壳 get_mode_prompt_needed / choose_desktop_mode）

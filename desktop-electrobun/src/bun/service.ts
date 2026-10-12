@@ -83,6 +83,8 @@ export interface ServiceOptions {
   onOpenExternal?: (url: string) => void
   /** 打开另一个 profile 的窗口（启动确认选了别的 profile 时用；多窗口见 index.ts） */
   onOpenProfileWindow?: (profile: string) => Promise<void>
+  /** F13：窗口⇄最大化切换（index.ts 操作 focusedWindow） */
+  onZoomToggle?: () => void
   /** 页面右键菜单（主进程实现） */
   onContextMenu?: (request: ContextMenuRequest) => void
   /** 宿主被守护器重启成功（主进程用它把页面刷回来） */
@@ -91,6 +93,8 @@ export interface ServiceOptions {
   onHostGiveUp?: (state: ShellState, reason: string) => void
   /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
   onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
+  /** F12：页面内确认弹窗的回填（壳主进程的 pending-input 单槽） */
+  onInputConfirm?: (flow: string, value: string) => void
   /** 启动阶段变化（启动界面据此报进度；无窗口模式也会调） */
   onStage?: (stage: ShellStage) => void
   /** 第二个实例请求把窗口带到前台（单实例激活） */
@@ -667,6 +671,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
     onProfileOp: (request) => service.profileOp(request),
+    onInputConfirm: options.onInputConfirm,
     getModePrompt: () => ({ needed: modePromptNeeded, profile: paths.profile, port: upstreamPort }),
     chooseMode: (mode, tokenUrl) => chooseDesktopMode(mode, tokenUrl),
     views: options.views,
@@ -1182,6 +1187,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         })
       },
       taskStatus: () => taskTracker.status(),
+      zoomToggle: () => options.onZoomToggle?.(),
+      inputConfirm: (flow, value) => options.onInputConfirm?.(flow, value),
       keybindings: {
         read: () => readKeybindings(home),
         write: (raw) => writeKeybindings(home, raw),

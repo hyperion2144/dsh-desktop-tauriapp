@@ -763,5 +763,53 @@ describe('本轮补的四条命令形状（对齐旧壳，F1/F2/F3/B3）', () =>
       bare.cleanup()
     }
   })
+
+  test('F12/F13/F14：确认回填同槽转发、zoom 切换、代理保存走 save 且回 effective', async () => {
+    const confirms: Array<[string, string]> = []
+    let zooms = 0
+    const h = harness({
+      inputConfirm: (flow, value) => confirms.push([flow, value]),
+      zoomToggle: () => {
+        zooms += 1
+      },
+      proxyEffective: () => ({ http: 'http://127.0.0.1:7890', https: 'http://127.0.0.1:7890', all: '', no_proxy: 'localhost' }),
+    })
+    try {
+      expect(await h.table['ui_input_confirm']?.({ flow: 'register-cli', value: 'force' })).toEqual({ ok: true })
+      expect(confirms).toEqual([['register-cli', 'force']])
+
+      expect(await h.table['toggle_zoom']?.({})).toEqual({ ok: true })
+      expect(zooms).toBe(1)
+      const bareZoom = harness()
+      try {
+        expect(() => bareZoom.table['toggle_zoom']?.({})).toThrow('zoom 切换未就绪')
+      } finally {
+        bareZoom.cleanup()
+      }
+
+      const saved: Array<Record<string, unknown>> = []
+      const proxy = harness({
+        save: (patch) => {
+          saved.push(patch)
+          return proxy.deps.settings()
+        },
+        proxyEffective: () => null,
+      })
+      try {
+        const result = (await proxy.table['save_proxy_settings']?.({
+          proxy_mode: 'manual',
+          proxy_url: 'http://127.0.0.1:7890',
+          bad_field: 'x',
+        })) as { ok: boolean; effective: unknown }
+        expect(result.ok).toBe(true)
+        expect(saved).toEqual([{ proxy_mode: 'manual', proxy_url: 'http://127.0.0.1:7890' }])
+        expect(() => proxy.table['save_proxy_settings']?.({ bad_field: 'x' })).toThrow('没有可保存的字段')
+      } finally {
+        proxy.cleanup()
+      }
+    } finally {
+      h.cleanup()
+    }
+  })
 })
 })

@@ -27,6 +27,7 @@ import { createTray, type TrayHandle } from './tray.ts'
 import { trayMenu, type TrayAction, type TrayCatalogItem, type TrayState } from './tray-menu.ts'
 import { listProfiles } from './profiles.ts'
 import { profileDialogHtml, type ProfileOpDialogKind } from './profile-dialog.ts'
+import { confirmModalScript } from './input-modal.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -381,6 +382,18 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         void refreshTray()
       }
     },
+    onZoomToggle: () => {
+      const win = focusedWindow()
+      if (win === null) return
+      if (win.isMaximized()) win.unmaximize()
+      else win.maximize()
+    },
+    onInputConfirm: (flow, value) => {
+      if (pendingInput?.flow === flow) {
+        pendingInput.resolve(value)
+        pendingInput = null
+      }
+    },
     onHostRestart: (state) => {
       // 宿主被守护器拉起来了：把对应窗口刷回同一个页面 origin（token/端口都没变）
       console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)
@@ -717,10 +730,53 @@ function openProfileOpDialog(kind: ProfileOpDialogKind): void {
   })
   dialog.on('closed', () => void refreshTray())
 }
-/** 托盘「注册 dsh 命令」：冲突态直接强制覆盖（那一行的文案里已经写了冲突目标）。 */
+/** F12：页面内确认弹窗（旧壳 register/confirm_modal 的等价物）：注入 JS，等 POST 回填，180s 超时。 */
+let pendingInput: { flow: string; resolve: (value: string) => void } | null = null
+const INPUT_CONFIRM_TIMEOUT_MS = 180_000
+
+async function confirmModal(flow: string, title: string, body: string): Promise<boolean> {
+  const win = focusedWindow() ?? mainWindow
+  if (win === null || !mainWindowReady) {
+    console.log('[input] 主窗口不可用，确认弹窗直接按取消处理')
+    return false
+  }
+  const promise = new Promise<string>((resolve) => {
+    pendingInput = { flow, resolve }
+  })
+  showMainWindow()
+  try {
+    win.webview?.executeJavascript(confirmModalScript({ flow, title, body }))
+  } catch (error) {
+    console.log(`[input] 确认弹窗注入失败：${String(error)}`)
+    pendingInput = null
+    return false
+  }
+  const value = await Promise.race([
+    promise,
+    Bun.sleep(INPUT_CONFIRM_TIMEOUT_MS).then(() => ''),
+  ])
+  if (pendingInput?.flow === flow) pendingInput = null
+  return value === 'force'
+}
+
+/** 托盘「注册 dsh 命令」：冲突时弹确认（旧壳 confirm_modal），确认才强制覆盖。 */
 async function registerDshCliFromTray(): Promise<void> {
   const state = registerCli.cached()
-  const result = await registerCli.register({ force: state.kind === 'conflict' })
+  let force = false
+  if (state.kind === 'conflict') {
+    const target = state.resolved ?? '未知目标'
+    const confirmed = await confirmModal(
+      'register-cli',
+      '检测到 dsh 命令冲突',
+      `当前系统里的 dsh 指向：\n${target}\n\n注册会把 /usr/local/bin/dsh 指到本壳的垫片，原目标会先备份。`,
+    )
+    if (!confirmed) {
+      console.log('[register] 用户取消覆盖，注册未完成')
+      return
+    }
+    force = true
+  }
+  const result = await registerCli.register({ force })
   console.log(`[register] ${result.ok ? '注册成功' : '注册未完成'}：${result.message}`)
   refreshTray()
 }
