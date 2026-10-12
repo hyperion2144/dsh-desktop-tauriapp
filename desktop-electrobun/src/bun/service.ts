@@ -7,6 +7,7 @@ import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { decideClaim, extractTokenFromUrl } from '../shared/port-claim.ts'
+import { normalizeRemoteUrl, remoteDisplay, remoteOrigin } from '../shared/remote.ts'
 import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
@@ -463,6 +464,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
   let liveSettings = settings
+  // 远程 dsh 地址（旧壳 select_remote）：设置里存了就进入远程模式——本地文档 + 远程数据面，
+  // 不 spawn 宿主（「远程只是少了启动 dsh 这一步」）。restartHost 会重算。
+  let remoteAddr: string | null = normalizeRemoteUrl(liveSettings.remoteAddr ?? '')
   /**
    * 代理注入（旧壳 `resolved_proxy_env` + `system_proxy_env`）：manual 用设置里的 URL，
    * system 问系统（macOS `scutil` / Windows 注册表 / 其余环境变量），off 不注入。
@@ -471,6 +475,30 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   const childProxy = (): ProxyEnv | null =>
     resolveProxyEnv(liveSettings, detectSystemProxy({ platform: process.platform, env: childEnv, log }))
   const connect = async (): Promise<void> => {
+    if (remoteAddr !== null) {
+      // ---- 远程模式（旧壳 navigate_remote / startup 远程短路）：不 spawn 宿主，数据面指向远程。
+      // URL 里的 token 换会话 cookie；拿不到照常起服务面，由 dsh 自行展示鉴权错误页（旧壳同口径）。
+      host = undefined
+      hostInjections = []
+      const upstream = remoteOrigin(remoteAddr)
+      const token = extractTokenFromUrl(remoteAddr)
+      cookie = ''
+      if (token !== null) {
+        try {
+          const auth = await fetch(`${upstream}/?token=${token}`, { redirect: 'manual' })
+          const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
+          cookie = setCookies[0]?.split(';')[0] ?? ''
+          log(`[remote] 换 cookie：auth ${String(auth.status)} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
+        } catch (error) {
+          log(`[remote] 换 cookie 失败（照常继续，由 dsh 展示鉴权页）：${error instanceof Error ? error.message : String(error)}`)
+        }
+      } else {
+        log('[remote] 地址里没有 ?token=（旧格式 host:port），按老版 dsh 直连（新版会 401）')
+      }
+      hostOrigin = upstream
+      log(`[remote] 数据面上游 = ${remoteDisplay(remoteAddr)} | 页面文档仍由本机 dist 出`)
+      return
+    }
     try {
       host = await startHost({
         layout: paths,
@@ -542,12 +570,13 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     resolveModeChoice = resolvePromise
   })
   let blockedMessage: string | undefined
-  if (decision === 'free') {
+  // 远程模式跳过本地端口认领（旧壳 startup 远程短路：根本不走本地 spawn 链）
+  if (remoteAddr !== null || decision === 'free') {
     await connect()
   } else if (decision === 'foreign-unknown') {
     blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
     log(`[shell] ${blockedMessage}`)
-  } else {
+  } else if (remoteAddr === null) {
     modePromptNeeded = true
     log(`[shell] 127.0.0.1:${String(upstreamPort)} 已有${decision === 'ours' ? '本壳拉起过的' : '外部'} dsh 实例在监听，等待选择「兼容 / 高级」接入模式`)
   }
@@ -907,8 +936,16 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       state.runtimeDir = paths.runtimeDir
       state.distDir = paths.distDir
       void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
-      // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
+      // 远程/本地互切：先重算 remoteAddr（设置面板 nsSave 已落盘），再分流——
+      // 远程模式没有宿主可杀，直接把服务面切过去；从远程切回本地时也没有宿主，立即拉起。
+      // 其余（本地→本地）杀掉宿主即可：退出会唤醒守护器，由它重启并把服务面切过去。
+      remoteAddr = normalizeRemoteUrl(liveSettings.remoteAddr ?? '')
       await host?.stop()
+      if (remoteAddr !== null || host === undefined) {
+        await connect()
+        serverOptions.upstreamOrigin = hostOrigin !== '' ? hostOrigin : `http://127.0.0.1:${String(upstreamPort)}`
+        applyHost()
+      }
     },
     // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
