@@ -21,6 +21,9 @@ import { createRestartLedger } from './supervisor.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
 import { loadSettings } from './settings-store.ts'
 import { scaffoldProfile } from './profile-scaffold.ts'
+import { isValidProfileName, isSelfMigrate } from './profile-dialog.ts'
+import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
+export type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 import { cleanupStagedPlugins, stagePlugins } from './plugin-staging.ts'
 import { createArbiter } from '../shared/power-arbiter.ts'
 import { resolveProxyEnv } from '../shared/proxy-env.ts'
@@ -86,6 +89,8 @@ export interface ServiceOptions {
   onHostRestart?: (state: ShellState) => void
   /** 宿主反复退出，守护器放弃（不再重启） */
   onHostGiveUp?: (state: ShellState, reason: string) => void
+  /** F9：托盘弹框的 profile 新建/迁移落地后（create → 开窗，migrate → 刷新托盘） */
+  onProfileOpApplied?: (op: 'create' | 'migrate', profile: string) => void
   /** 启动阶段变化（启动界面据此报进度；无窗口模式也会调） */
   onStage?: (stage: ShellStage) => void
   /** 第二个实例请求把窗口带到前台（单实例激活） */
@@ -172,6 +177,10 @@ export interface ShellService {
   chooseDesktopMode: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
   /** 等待用户选完模式；无弹框时启动即已定（advanced），立即 resolve */
   modeChosen: Promise<'advanced' | 'compat'>
+  /** 新建 / 迁移 profile（F9：托盘弹框的落点；结果回给弹框展示） */
+  profileOp: (request: ProfileOpRequest) => Promise<ProfileOpResult>
+  /** profileOp 落地后的回调（create → 开窗，migrate → 刷新托盘）；测试可注入 */
+  onProfileOpApplied: (op: 'create' | 'migrate', profile: string) => void
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -657,6 +666,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
     onWindowControl: options.onWindowControl,
+    onProfileOp: (request) => service.profileOp(request),
     getModePrompt: () => ({ needed: modePromptNeeded, profile: paths.profile, port: upstreamPort }),
     chooseMode: (mode, tokenUrl) => chooseDesktopMode(mode, tokenUrl),
     views: options.views,
@@ -928,6 +938,57 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     modePromptNeeded: () => modePromptNeeded,
     chooseDesktopMode: chooseDesktopMode,
     modeChosen,
+    profileOp: async (request) => {
+      if (request.op === 'create') {
+        const name = request.target ?? ''
+        if (!isValidProfileName(name)) {
+          return { ok: false, message: '名称仅允许小写字母、数字与连字符（1-64 字符）' }
+        }
+        const result = scaffoldProfile(home, name)
+        const message = result.created
+          ? `profile ${name} 已创建；开窗时会自动装依赖树并拉起 dsh。`
+          : `profile ${name} 已存在，直接打开即可。`
+        options.onProfileOpApplied?.('create', name)
+        return { ok: true, message, profile: name }
+      }
+      // migrate：校验后交给命令表同一条迁移路径（复制依赖树 + pnpm install，长任务）
+      const source = request.source ?? ''
+      const target = request.target ?? ''
+      if (!isValidProfileName(target)) {
+        return { ok: false, message: '目标名称仅允许小写字母、数字与连字符（1-64 字符）' }
+      }
+      if (isSelfMigrate(source, target)) {
+        return { ok: false, message: '源与目标相同，无需迁移。' }
+      }
+      try {
+        const summary = await migrateProfile({
+          home,
+          source,
+          dest: target,
+          overwrite: request.overwrite === true,
+          activeProfile: paths.profile,
+          install: () =>
+            installProfileDependencies({
+              home,
+              profile: target,
+              appSupport: paths.appSupport,
+              runtimeRoot: paths.runtimeDir,
+              env: childEnv,
+              preferOffline: true,
+              log,
+            }),
+          log,
+          track: taskTracker,
+        })
+        options.onProfileOpApplied?.('migrate', target)
+        return { ok: true, message: summary, profile: target }
+      } catch (error) {
+        return { ok: false, message: String(error) }
+      }
+    },
+    onProfileOpApplied: (op, profile) => {
+      log(`[profile-op] ${op} ${profile} 完成`)
+    },
     restartHost: async () => {
       if (stopping) return
       // 设置面板切了 dsh 来源/运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，

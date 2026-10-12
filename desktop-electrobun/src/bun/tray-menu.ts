@@ -10,6 +10,19 @@ import { remoteDisplay } from '../shared/remote.ts'
 // 目录里点一下就下载并切换）、退出。
 // 还没做的项不摆假入口——宁可菜单短，也不要点了没反应的项。
 
+/** 「PROFILE 窗口」子菜单的每 profile 行（旧壳 tray.rs:63-73） */
+export interface ProfileRow {
+  profile: string
+  /** 窗口开着 */
+  open: boolean
+  /** dsh 宿主在跑 */
+  running: boolean
+  /** 页面 origin 端口（运行中才有） */
+  port: number | null
+  /** 是当前聚焦窗口 */
+  focused: boolean
+}
+
 /** 托盘菜单里的动作 id；前缀 `tray:` 便于和右键菜单的 action 区分。 */
 export const TRAY_MENU_ACTIONS = {
   toggleWindow: 'tray:toggle-window',
@@ -23,6 +36,9 @@ export const TRAY_MENU_ACTIONS = {
   runtimeVersionPrefix: 'tray:runtime:version:',
   runtimeFetchPrefix: 'tray:runtime:fetch:',
   registerCli: 'tray:register-cli',
+  stopProfile: 'tray:profile:stop:',
+  newProfile: 'tray:profile:new',
+  migrateProfile: 'tray:profile:migrate',
 } as const
 export type TrayActionKind =
   | 'toggle-window'
@@ -33,6 +49,9 @@ export type TrayActionKind =
   | 'download-runtime'
   | 'register-cli'
   | 'remote-source'
+  | 'stop-profile'
+  | 'new-profile'
+  | 'migrate-profile'
 
 export interface TrayAction {
   kind: TrayActionKind
@@ -45,6 +64,7 @@ export interface TrayAction {
   version?: string
   /** kind === 'remote-source'：选中的远程地址在 remoteList 里的下标；undefined = 切回本地 */
   addrIndex?: number
+  /** kind === 'stop-profile' 时是目标 profile */
 }
 
 export interface TrayState {
@@ -56,6 +76,8 @@ export interface TrayState {
   profiles: readonly string[]
   /** 已经开着窗口的 profile（菜单里标「已开窗」，点了是聚焦不是新开） */
   openWindows: readonly string[]
+  /** 每 profile 运行行（F8，旧壳 tray.rs「● name · port（聚焦中）」数据源）；空 = 退回旧行为 */
+  profileRows?: readonly ProfileRow[]
   /** dsh 宿主是否在跑（守护器重启期间会短暂为 false） */
   hostRunning: boolean
   /** 运行时来源的人类可读标签，例如 `内置 0.2.1-alpha.2` */
@@ -135,6 +157,13 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     const addrIndex = Number(raw)
     if (raw === '' || !Number.isInteger(addrIndex) || addrIndex < 0) return null
     return { kind: 'remote-source', addrIndex }
+  }
+  if (action === TRAY_MENU_ACTIONS.newProfile) return { kind: 'new-profile' }
+  if (action === TRAY_MENU_ACTIONS.migrateProfile) return { kind: 'migrate-profile' }
+  if (action.startsWith(TRAY_MENU_ACTIONS.stopProfile)) {
+    const profile = action.slice(TRAY_MENU_ACTIONS.stopProfile.length)
+    if (profile === '') return null
+    return { kind: 'stop-profile', profile }
   }
   return null
 }
@@ -291,16 +320,51 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
     },
     { type: 'divider' },
   ]
-  // 多 profile：菜单按 home 下的 profile 目录列，点了开/聚焦那一份窗口（旧壳「PROFILE 窗口」分组）
+  // 「PROFILE 窗口」（旧壳 tray.rs:63-73 的等价物）：每 profile 一层子菜单，头部
+  // `● name · port（聚焦中）` / `name · port（运行中）` / 未运行裸名；里面是「聚焦窗口」
+  // （未运行时「在新窗口打开 <name>」）+ 运行中的「退出（停止实例）」。末尾挂「新建 Profile…」
+  // 与「迁移 Profile…」两个顶层入口（F9 的 UI 门面，表单窗由壳进程弹出）。
+  const rows =
+    state.profileRows ??
+    profiles.map((profile) => ({
+      profile,
+      open: state.openWindows.includes(profile),
+      running: profile === state.profile && state.hostRunning,
+      port: null as number | null,
+      focused: profile === state.profile,
+    }))
+  const windowItems: TrayMenuItem[] = rows.map((row) => {
+    const portPart = row.port !== null ? ` · ${row.port}` : ''
+    const head = row.running
+      ? `${row.focused ? '● ' : ''}${row.profile}${portPart}（${row.focused ? '聚焦中' : '运行中'}）`
+      : row.profile
+    const sub: TrayMenuItem[] = [
+      {
+        type: 'normal',
+        label: row.open ? '聚焦窗口' : `在新窗口打开 ${row.profile}`,
+        action: windowAction(row.profile),
+        checked: row.focused,
+      },
+    ]
+    if (row.running) {
+      sub.push({ type: 'divider' })
+      sub.push({
+        type: 'normal',
+        label: '退出（停止实例）',
+        action: `${TRAY_MENU_ACTIONS.stopProfile}${row.profile}`,
+      })
+    }
+    return { type: 'normal' as const, label: head, submenu: sub }
+  })
+  windowItems.push(
+    { type: 'divider' },
+    { type: 'normal', label: '新建 Profile…', action: TRAY_MENU_ACTIONS.newProfile },
+    { type: 'normal', label: '迁移 Profile…', action: TRAY_MENU_ACTIONS.migrateProfile },
+  )
   items.push({
     type: 'normal',
     label: 'PROFILE 窗口',
-    submenu: profiles.map((profile) => ({
-      type: 'normal',
-      label: state.openWindows.includes(profile) ? `${profile}（已开窗）` : profile,
-      action: windowAction(profile),
-      checked: profile === state.profile,
-    })),
+    submenu: windowItems,
   })
   items.push(
     // 运行时来源：只读一行看当前，真正的切换在子菜单里（旧壳的 `运行时版本` 子菜单同形）

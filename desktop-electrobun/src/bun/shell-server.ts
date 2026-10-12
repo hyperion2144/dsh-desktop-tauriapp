@@ -22,6 +22,7 @@ import { isExternalUrl } from './external.ts'
 import { VIEW_TOKEN_HEADER, denyReason, isCommandAllowed } from '../shared/view-grant.ts'
 import type { ViewGrant, ViewRegistry } from '../shared/view-grant.ts'
 import type { ContextMenuRequest } from './context-menu.ts'
+import type { ProfileOpRequest, ProfileOpResult } from './profile-dialog.ts'
 
 /** 官方 web-document.ts 的同一行：index 会等异步的 Host 注入，先把 promise 挂上。 */
 export const BOOT_LINE = '<script>globalThis.__DSH_BOOT_READY__ = Promise.withResolvers()</script>'
@@ -54,6 +55,8 @@ export interface ShellServerOptions {
   onActivate?: () => void
   /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
   onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
+  /** F9：托盘弹框的新建/迁移 profile 提交（服务面实现） */
+  onProfileOp?: (request: ProfileOpRequest) => Promise<ProfileOpResult>
   /** 兼容/高级模式弹框状态（旧壳 get_mode_prompt_needed） */
   getModePrompt?: () => { needed: boolean; profile: string; port: number }
   /** 选模式（旧壳 choose_desktop_mode） */
@@ -296,6 +299,27 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           }
           options.onWindowControl(action)
           return new Response(null, { status: 204 })
+        }
+        // F9：托盘弹框的新建/迁移 profile 表单提交
+        if (decision.rel === 'profile-op') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onProfileOp === undefined) return new Response('not implemented', { status: 501 })
+          let body: unknown
+          try {
+            body = await request.json()
+          } catch {
+            return new Response('bad json', { status: 400 })
+          }
+          const op = (body as { op?: unknown }).op
+          if (op !== 'create' && op !== 'migrate') return new Response('unknown op', { status: 400 })
+          const payload = body as { target?: unknown; source?: unknown; overwrite?: unknown }
+          const result = await options.onProfileOp({
+            op,
+            target: typeof payload.target === 'string' ? payload.target : '',
+            source: typeof payload.source === 'string' ? payload.source : '',
+            overwrite: payload.overwrite === true,
+          })
+          return Response.json(result)
         }
         return new Response('not found', { status: 404 })
       }

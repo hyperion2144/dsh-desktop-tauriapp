@@ -84,21 +84,50 @@ describe('trayMenu', () => {
     expect(hidden[0]).toBe('显示窗口')
   })
 
-  test('PROFILE 窗口子菜单：已开窗的标「已开窗」，当前 profile 打勾', () => {
+  test('PROFILE 窗口子菜单：未运行裸名 + 「在新窗口打开」，末尾挂新建/迁移入口', () => {
     const items = trayMenu(baseState({ openWindows: ['desktop'] }))
-    const submenu = findItem(items, 'PROFILE 窗口')?.submenu
-    expect(labels(submenu ?? [])).toEqual(['✓ desktop（已开窗）'])
-    expect(findItem(submenu ?? [], 'desktop（已开窗）')?.action).toBe(windowAction('desktop'))
+    const group = findItem(items, 'PROFILE 窗口')
+    const submenu = group?.submenu ?? []
+    expect(submenu[0]?.type).toBe('normal')
+    expect((submenu[0] as NormalItem).label).toBe('● desktop（聚焦中）')
+    const nested = (submenu[0] as NormalItem).submenu ?? []
+    expect((nested[0] as NormalItem).label).toBe('聚焦窗口')
+    expect((nested[0] as NormalItem).action).toBe(windowAction('desktop'))
+    const tail = submenu.slice(-3)
+    expect((tail[0] as { type?: string }).type).toBe('divider')
+    expect((tail[1] as NormalItem).label).toBe('新建 Profile…')
+    expect(parseTrayAction((tail[1] as NormalItem).action)).toEqual({ kind: 'new-profile' })
+    expect((tail[2] as NormalItem).label).toBe('迁移 Profile…')
+    expect(parseTrayAction((tail[2] as NormalItem).action)).toEqual({ kind: 'migrate-profile' })
   })
 
   test('多个 profile：当前项打勾且排第一位，没开窗的不带后缀', () => {
     const items = trayMenu(
-      baseState({ profile: 'web', profiles: ['desktop', 'web', 'mobile'], openWindows: ['web'] })
+      baseState({
+        profile: 'web',
+        profiles: ['desktop', 'web', 'mobile'],
+        openWindows: ['web'],
+        profileRows: [
+          { profile: 'web', open: true, running: true, port: 6393, focused: true },
+          { profile: 'desktop', open: false, running: false, port: null, focused: false },
+          { profile: 'mobile', open: false, running: false, port: null, focused: false },
+        ],
+      })
     )
     const submenu = findItem(items, 'PROFILE 窗口')?.submenu
     expect(submenu !== undefined).toBe(true)
-    expect(labels(submenu ?? [])).toEqual(['✓ web（已开窗）', 'desktop', 'mobile'])
-    expect(findItem(submenu ?? [], 'desktop')?.action).toBe(windowAction('desktop'))
+    const webHead = (submenu ?? [])[0] as NormalItem
+    expect(webHead.label).toBe('● web · 6393（聚焦中）')
+    const webSub = webHead.submenu ?? []
+    expect((webSub[0] as NormalItem).label).toBe('聚焦窗口')
+    expect((webSub[0] as NormalItem).action).toBe(windowAction('web'))
+    expect((webSub[webSub.length - 1] as NormalItem).label).toBe('退出（停止实例）')
+    expect(parseTrayAction((webSub[webSub.length - 1] as NormalItem).action)).toEqual({
+      kind: 'stop-profile',
+      profile: 'web',
+    })
+    expect(((submenu ?? [])[1] as NormalItem).label).toBe('desktop')
+    expect(((submenu ?? [])[2] as NormalItem).label).toBe('mobile')
   })
 
   test('运行时与宿主状态是只读行，退出永远在最后', () => {

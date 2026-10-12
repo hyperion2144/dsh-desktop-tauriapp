@@ -26,6 +26,7 @@ import { stageLabel, stagePercent, type ShellStage } from './stages.ts'
 import { createTray, type TrayHandle } from './tray.ts'
 import { trayMenu, type TrayAction, type TrayCatalogItem, type TrayState } from './tray-menu.ts'
 import { listProfiles } from './profiles.ts'
+import { profileDialogHtml, type ProfileOpDialogKind } from './profile-dialog.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -88,6 +89,8 @@ interface ProfileWindow {
 }
 const windows = new Map<string, ProfileWindow>()
 const services = new Map<string, ShellService>()
+/** F8：正在「退出（停止实例）」的 profile——will-close 对它们放行真关窗 */
+const stoppingProfiles = new Set<string>()
 /** 最近聚焦的窗口 profile；托盘「显示/隐藏窗口」作用在它身上（旧壳 focused_window_label）。 */
 let focusedProfile: string | null = null
 let mainWindow: BrowserWindow | null = null
@@ -245,6 +248,18 @@ function trayState(): TrayState {
     // 多 profile：菜单按 home 下的 profile 目录列，点了开/聚焦那一份窗口
     profiles: listProfiles(dshHome(), instanceProfile),
     openWindows: [...windows.keys()],
+    profileRows: listProfiles(dshHome(), instanceProfile).map((profile) => {
+      const svc = services.get(profile)
+      const origin = svc?.state.origin ?? ''
+      const port = Number(origin.split(':').pop() ?? '') || null
+      return {
+        profile,
+        open: windows.has(profile),
+        running: (svc?.state.hostPid ?? 0) > 0,
+        port,
+        focused: focusedProfile === profile,
+      }
+    }),
     hostRunning: uiService().state.hostPid > 0,
     runtimeLabel: runtimeLabelOf(snapshot),
     mode: settings.dshMode ?? 'builtin',
@@ -354,6 +369,16 @@ function serviceOptionsFor(profile: string): ServiceOptions {
         else win.maximize()
       } else {
         win.close()
+      }
+    },
+    onProfileOpApplied: (op, profile) => {
+      // F9：创建成功直接开那扇窗（ensureService 会装依赖并拉宿主）；迁移完成刷新托盘。
+      if (op === 'create') {
+        void openProfileWindow(profile)
+          .then(() => refreshTray())
+          .catch((error) => console.error(`[shell] 打开新 profile 窗口失败：${String(error)}`))
+      } else {
+        void refreshTray()
       }
     },
     onHostRestart: (state) => {
@@ -467,6 +492,8 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
   // 没有托盘时不能隐藏（隐藏后没有入口再叫回来），直接走真退出（仅主窗）。
   win.on('will-close', (event) => {
     if (quitting) return
+    // F8：「退出（停止实例）」主动销毁窗口时不拦截（stoppingProfiles 由 stopProfileFromTray 置位）
+    if (stoppingProfiles.has(profile)) return
     if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
       ;(event as { response?: unknown }).response = { allow: false }
       console.log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
@@ -649,9 +676,47 @@ function onTrayAction(action: TrayAction): void {
         .catch((error) => console.error(`[shell] 切换 dsh 服务地址失败：${String(error)}`))
       return
     }
+    case 'stop-profile':
+      if (action.profile !== undefined) void stopProfileFromTray(action.profile)
+      return
+    case 'new-profile':
+      void openProfileOpDialog('create')
+      return
+    case 'migrate-profile':
+      void openProfileOpDialog('migrate')
+      return
   }
 }
 
+/** F8：托盘「退出（停止实例）」——销毁那扇窗、停那份额服务面（旧壳 tray.rs:63-73） */
+async function stopProfileFromTray(profile: string): Promise<void> {
+  const svc = services.get(profile)
+  if (svc === undefined) {
+    console.log(`[shell] 退出实例：${profile} 没有在跑的服务面，忽略`)
+    return
+  }
+  console.log(`[shell] 退出实例：停止 ${profile} 的 dsh 与服务面`)
+  stoppingProfiles.add(profile)
+  try {
+    windows.get(profile)?.window.close()
+    await svc.stop()
+  } finally {
+    stoppingProfiles.delete(profile)
+    void refreshTray()
+  }
+}
+
+/** F9：托盘「新建 / 迁移 Profile…」——弹一张小表单窗，提交给服务面的 /profile-op */
+function openProfileOpDialog(kind: ProfileOpDialogKind): void {
+  const dialog = new BrowserWindow({
+    title: kind === 'create' ? '新建 Profile' : '迁移 Profile',
+    html: profileDialogHtml(kind, listProfiles(dshHome(), instanceProfile)),
+    renderer: 'cef',
+    titleBarStyle: 'hidden',
+    frame: { width: 460, height: kind === 'create' ? 240 : 330 },
+  })
+  dialog.on('closed', () => void refreshTray())
+}
 /** 托盘「注册 dsh 命令」：冲突态直接强制覆盖（那一行的文案里已经写了冲突目标）。 */
 async function registerDshCliFromTray(): Promise<void> {
   const state = registerCli.cached()
