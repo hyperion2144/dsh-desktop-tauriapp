@@ -215,6 +215,7 @@ jobs:
           if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
           Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
 
+      - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: dsh-desktop-shell-${{ matrix.label }}
