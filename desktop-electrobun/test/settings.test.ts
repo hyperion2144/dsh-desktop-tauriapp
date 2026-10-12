@@ -16,6 +16,8 @@ import {
   profileLanePort,
   serializeSettings,
   settingsSummary,
+  defaultLanePortForProfile,
+  defaultPortForProfile,
 } from '../src/shared/settings.ts'
 import {
   loadSettings,
@@ -146,16 +148,16 @@ describe('activeProfile / profilePort / expandHome', () => {
     const settings = normalizeSettings({ profile_ports: { desktop: 4081 } })
     expect(profilePort(settings, 'desktop', {})).toBe(4081)
     expect(profilePort(settings, 'web', {})).toBe(3080)
-    expect(profilePort(settings, 'other', {})).toBe(3080)
+    expect(profilePort(settings, 'other', {})).toBe(defaultPortForProfile('other'))
     expect(profilePort(settings, 'desktop', { DSH_DESKTOP_PORT: '5081' })).toBe(5081)
   })
 
-  test('手机 lane 端口：环境变量 > profile 覆盖 > web 的 lane_port > 默认表（desktop 3092）', () => {
-    expect(profileLanePort(defaultSettings(), 'desktop', {})).toBe(3092)
-    expect(profileLanePort(defaultSettings(), 'web', {})).toBe(3091)
-    expect(profileLanePort(defaultSettings(), 'other', {})).toBe(3091)
+  test('手机 lane 端口：环境变量 > profile 覆盖 > web 的 lane_port > 默认表（desktop 3093，lane 整体 +1）', () => {
+    expect(profileLanePort(defaultSettings(), 'desktop', {})).toBe(3093)
+    expect(profileLanePort(defaultSettings(), 'web', {})).toBe(3092)
+    expect(profileLanePort(defaultSettings(), 'other', {})).toBe(defaultLanePortForProfile('other'))
     expect(profileLanePort(normalizeSettings({ lane_port: 4091 }), 'web', {})).toBe(4091)
-    expect(profileLanePort(normalizeSettings({ lane_port: 4091 }), 'desktop', {})).toBe(3092)
+    expect(profileLanePort(normalizeSettings({ lane_port: 4091 }), 'desktop', {})).toBe(3093)
     const perProfile = normalizeSettings({ profile_lane_ports: { desktop: 4092 } })
     expect(profileLanePort(perProfile, 'desktop', {})).toBe(4092)
     expect(profileLanePort(perProfile, 'desktop', { DSH_MOBILE_LANE_PORT: '6092' })).toBe(6092)

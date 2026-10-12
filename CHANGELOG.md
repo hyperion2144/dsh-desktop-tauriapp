@@ -3,6 +3,10 @@
 本项目所有显著变更记录于此。发布版本的 release notes 从本文件「已发布」段生成。
 
 ## Unreleased
+
+### 桌面壳（Electrobun）
+
+- 固定端口与「兼容 / 高级」接入模式（旧壳 `decide_claim` / `choose_desktop_mode` 的等价物）：dsh 上游端口不再随机/顺延，按旧壳公式固定（env `DSH_DESKTOP_PORT` > `profile_ports` >（web 遗留 `port`）> web 3080 / desktop 3081 / 其余 3082+FNV-1a(profile)%512，避让窗 [base, base+1023]）；手机 lane 同式整体 +1（web 3092 / desktop 3093 / 其余 3094+散列）。启动前对上游端口做认领判定：free 直接拉起；本壳台账命中（ours）或外部 dsh 占 web 遗留端口（foreign-web）→ 弹「兼容 / 高级」——兼容=复用外部实例不代拉（可粘贴带 token 的完整 URL 换会话 cookie），高级=清场（SIGTERM 6 轮→SIGKILL 2s）后壳自拉；其余占用（foreign-unknown）→ 明确报错不代杀不误连（`端口 X 被其他实例或程序占用（profile=Y）…`）。模式是内存态不落盘，重启后端口仍被占会再问（旧壳同语义）。新增 `/__shell__/mode-prompt`（GET）与 `/__shell__/mode`（POST）自答端点、`get_mode_prompt_needed` / `choose_desktop_mode` 命令、启动界面的选择弹框（兼容/高级按钮 + token 输入）。弹框期间不建主窗、不 spawn 宿主；守护器只在宿主真正拉起后才接管。实测：free 直接起；foreign-web 弹框且 hostPid=0；compat 后 `state.pageUrl` 切外部 URL 且占用者不被杀；advanced 杀掉占用者并 SHELL-READY。全量 bun test 564 pass / 0 fail。
 - **代理注入（B2，旧壳 `network/proxy.rs` 的等价物；设置面板的代理不再是摆设）**：
   - **检测**（`src/shared/system-proxy.ts` + `src/bun/system-proxy.ts`）：manual 用设置里的 URL；system 按平台问真代理——macOS `scutil --proxy`（只认 `*Enable == 1`；**PAC 生效时只给 NO_PROXY、不猜 URL**；https 代理写 `http://` 且默认 443；SOCKS 进 ALL_PROXY）、Windows `reg query …Internet Settings`（`ProxyEnable != 1` 视为未启用；`ProxyServer` 单值对 http/https 同效、`http=…;https=…;socks=…` 分协议；`ProxyOverride` 进 NO_PROXY，`<local>` 就地展开成回环保底）、其余回落环境变量；检测失败/没代理 ⇒ 不注入（**用户自己设的代理变量不被动**）。
   - **注入**（`child-env.ts`）：`HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` 大小写各写一份；socks5 只写 ALL_PROXY 并清掉基线里残留的 HTTP(S)_PROXY；凭据拼接复用 F3 抽出的 `proxy-env.ts`。每次 spawn 现算，面板改完重启服务面即生效；设置面板 `effective` 展示与真实注入**同源**（一样走三级检测）。

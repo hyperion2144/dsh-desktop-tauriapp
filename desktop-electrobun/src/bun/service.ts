@@ -6,6 +6,8 @@
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
+import { decideClaim, extractTokenFromUrl } from '../shared/port-claim.ts'
+import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
 import type { ShellStage } from './stages.ts'
@@ -128,6 +130,10 @@ export interface ShellState {
   settings: DesktopSettings
   /** 设置文件的读取过程（首启/迁移/损坏重建） */
   settingsProvenance: { created: boolean; migrated: boolean; recovered: boolean }
+  /** 接入模式（旧壳 DshState.mode 的内存态：compat 复用外部实例、advanced 壳自拉） */
+  mode: 'advanced' | 'compat'
+  /** 启动被阻塞的原因（旧壳 ForeignUnknown：端口被陌生程序占用，只报错不代杀）；未阻塞时无此字段 */
+  blocked?: string
 }
 
 export interface ShellService {
@@ -154,6 +160,12 @@ export interface ShellService {
   downloadStatus: () => RuntimeDownloadStatus
   /** 下载并安装一个运行时（单飞） */
   download: (version: string, source: RuntimeSource) => Promise<{ ok: true; version: string }>
+  /** 兼容/高级模式弹框当前是否在等用户选（旧壳 get_mode_prompt_needed） */
+  modePromptNeeded: () => boolean
+  /** 选模式（旧壳 choose_desktop_mode）：compat 复用外部实例（可带 tokenUrl），advanced 清场后壳自拉 */
+  chooseDesktopMode: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
+  /** 等待用户选完模式；无弹框时启动即已定（advanced），立即 resolve */
+  modeChosen: Promise<'advanced' | 'compat'>
 }
 
 export async function startService(options: ServiceOptions): Promise<ShellService> {
@@ -304,34 +316,21 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     isFree: portFree,
   })
   if (pagePort === null) throw new Error('页面 origin 端口池已耗尽')
-  // 上游 dsh 端口（旧壳 `port_for_profile` + `DSH_DESKTOP_PORT`）：手机访问插件靠它找上游；
-  // 固定端口而不是 `--port 0`，与旧壳一致（3080 web / 3081 desktop），被占就顺延并在日志里说清楚。
-  // lane 端口先算：上游顺延时不能顺手把手机 lane 要占的端口抢走（两个都绑 127.0.0.1）
-  // lane 端口先算：上游顺延时不能顺手把手机 lane 要占的端口抢走（两个都绑 127.0.0.1）；
-  // 多窗口下同一个 env 覆盖会让两份服务面抢同一个 lane 端口，所以也要顺延（实测 EADDRINUSE）。
-  const intendedLane = profileLanePort(settings, paths.profile, env)
-  const laneFree = (port: number): boolean => port !== pagePort && portFree(port)
-  const pickedLane = laneFree(intendedLane)
-    ? intendedLane
-    : choosePort({ requested: intendedLane, base: intendedLane + 1, span: 20, isFree: laneFree })
-  if (pickedLane === null) throw new Error('手机 lane 端口池已耗尽')
-  const lanePort: number = pickedLane
-  if (lanePort !== intendedLane) {
-    log(`手机 lane 端口 ${String(intendedLane)} 被占用，顺延到 ${String(lanePort)}`)
+  // 上游/lane 固定端口（旧壳公式，用户口径：不做随机端口与顺延）：
+  //   上游 = env DSH_DESKTOP_PORT > profile_ports >（web 的遗留 port）> 3080/3081/3082+fnv%512
+  //   lane = env DSH_MOBILE_LANE_PORT > profile_lane_ports >（web 的遗留 lane_port）> 3092/3093/3094+fnv%512
+  // 跨进程的端口冲突不做静默顺延：启动前判定（见下方 decideClaim），弹「兼容/高级」或明确报错。
+  // 同进程多窗口的互相避让用 taken（含其它服务面已占的端口与页面端口），只在会话内存里记。
+  const taken = new Set<number>([pagePort])
+  for (const claim of claims) {
+    taken.add(claim.port)
+    if (claim.dataPort !== undefined) taken.add(claim.dataPort)
+    if (claim.lanePort !== undefined) taken.add(claim.lanePort)
   }
-  const intendedUpstream = profilePort(settings, paths.profile, env)
-  const upstreamFree = (port: number): boolean => port !== lanePort && portFree(port)
-  const pickedUpstream = upstreamFree(intendedUpstream)
-    ? intendedUpstream
-    : choosePort({
-        requested: intendedUpstream,
-        base: intendedUpstream + 1,
-        span: 20,
-        isFree: upstreamFree,
-      })
-  if (pickedUpstream === null) throw new Error('dsh 上游端口池已耗尽')
-  // let：切 profile 时就地换掉（守护器重启宿主时读的是这里）
-  let upstreamPort: number = pickedUpstream
+  const lanePort: number = profileLanePort(settings, paths.profile, env, taken)
+  taken.add(lanePort)
+  const upstreamPort: number = profilePort(settings, paths.profile, env, taken)
+  taken.add(upstreamPort)
   log(`端口：页面 origin ${String(pagePort)} | dsh 上游 ${String(upstreamPort)} | 手机 lane ${String(lanePort)}`)
   options.onStage?.('ports')
   const token = `tok-${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`
@@ -457,7 +456,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     log,
   })
   let patchFiles = [staged.injectFile]
-  let host!: Awaited<ReturnType<typeof startHost>>
+  let host: Awaited<ReturnType<typeof startHost>> | undefined
+  let hostOrigin = ''
+  let hostInjections: readonly unknown[] = []
   let cookie = ''
   // 起宿主 + 取 cookie。守护器重启时重复调这个（同一个 cookie 变量与服务面 options）。
   // 设置面板会写盘：内存里也同步一份，免得面板读回来还是旧值（必须先于 connect：connect 里会读）
@@ -507,7 +508,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }
-    log(`host ready | dsh = ${new URL(host.ready.url).origin} | injections = ${String(host.ready.injections.length)}`)
+    hostOrigin = new URL(host.ready.url).origin
+    hostInjections = host.ready.injections
+    log(`host ready | dsh = ${hostOrigin} | injections = ${String(hostInjections.length)}`)
 
     // ---- 取 cookie：303 + set-cookie（官方 authenticateWebHost 语义，不解析 stdout 的 token 行）----
     const auth = await fetch(host.ready.url, { redirect: 'manual' })
@@ -519,7 +522,35 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       throw new Error('没拿到 dsh 会话 cookie（303 + set-cookie 流程失败）')
     }
   }
-  await connect()
+  // ---- 端口认领判定（旧壳 decide_claim：启动前判定，free 才自动拉起）----
+  const upstreamOpen = await portOpen(upstreamPort)
+  const oursAlive = readHostRecords(hostRegistryFile).some(
+    (record) => record.profile === paths.profile && isAlivePid(record.hostPid),
+  )
+  const decision = decideClaim({
+    profile: paths.profile,
+    port: upstreamPort,
+    portOpen: upstreamOpen,
+    claims: oursAlive ? [{ profile: paths.profile, port: upstreamPort, alive: true }] : [],
+    legacyWebPort: profilePort(settings, 'web', env),
+  })
+  // 接入模式与弹框状态（旧壳 DshState：内存态，不落盘、重启后端口仍被占会再问）
+  let shellMode: 'advanced' | 'compat' = 'advanced'
+  let modePromptNeeded = false
+  let resolveModeChoice!: (mode: 'advanced' | 'compat') => void
+  const modeChosen = new Promise<'advanced' | 'compat'>((resolvePromise) => {
+    resolveModeChoice = resolvePromise
+  })
+  let blockedMessage: string | undefined
+  if (decision === 'free') {
+    await connect()
+  } else if (decision === 'foreign-unknown') {
+    blockedMessage = `端口 ${String(upstreamPort)} 被其他实例或程序占用（profile=${paths.profile}），已停止自动拉起；可在设置中调整该 profile 的端口后重试`
+    log(`[shell] ${blockedMessage}`)
+  } else {
+    modePromptNeeded = true
+    log(`[shell] 127.0.0.1:${String(upstreamPort)} 已有${decision === 'ours' ? '本壳拉起过的' : '外部'} dsh 实例在监听，等待选择「兼容 / 高级」接入模式`)
+  }
   options.onStage?.('cookie')
 
   // ---- loopback 服务 ----
@@ -585,12 +616,14 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     distDir: paths.distDir,
     token,
     cookie,
-    upstreamOrigin: new URL(host.ready.url).origin,
+    upstreamOrigin: hostOrigin !== '' ? hostOrigin : `http://127.0.0.1:${String(upstreamPort)}`,
     port: pagePort,
     bootPayload: () => bootPayload,
     onOpenExternal: options.onOpenExternal,
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
+    getModePrompt: () => ({ needed: modePromptNeeded, profile: paths.profile, port: upstreamPort }),
+    chooseMode: (mode, tokenUrl) => chooseDesktopMode(mode, tokenUrl),
     views: options.views,
     onLog: log,
     onRpc: async (raw, grant) => {
@@ -604,7 +637,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   }
   const server = startShellServer(serverOptions)
   options.onStage?.('server')
-  bootPayload.injections = host.ready.injections
+  bootPayload.injections = [...hostInjections]
   const pageUrl = `${server.origin}/${token}/`
 
   // 写入前重读磁盘：多窗口下台账被所有服务面共享，内存副本可能是旧的（否则会覆盖掉别人的行）。
@@ -633,7 +666,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     profile: paths.profile,
     runtimeDir: paths.runtimeDir,
     distDir: paths.distDir,
-    hostPid: host.pid,
+    hostPid: host?.pid ?? 0,
     upstreamPort,
     lanePort,
     notifyPort: notifyServer.port,
@@ -641,8 +674,49 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     noWindow: options.noWindow ?? false,
     settings,
     settingsProvenance: { created: loaded.created, migrated: loaded.migrated, recovered: loaded.recovered },
+    mode: shellMode,
+    ...(blockedMessage === undefined ? {} : { blocked: blockedMessage }),
   }
   await Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+
+  // ---- 兼容 / 高级模式（旧壳 choose_desktop_mode + get_mode_prompt_needed）----
+  const chooseDesktopMode = async (mode: string, tokenUrl?: string): Promise<{ ok: true; needsToken: boolean }> => {
+    if (mode !== 'compat' && mode !== 'advanced') throw new Error(`未知的桌面接入模式：${mode}`)
+    modePromptNeeded = false
+    if (mode === 'compat') {
+      const raw = (tokenUrl ?? '').trim()
+      const token = extractTokenFromUrl(raw)
+      if (raw !== '' && token === null) log('[mode] 未能识别 token：输入里没有 ?token= 参数，将按老版 dsh 直连（新版会 401）')
+      shellMode = 'compat'
+      if (token !== null) {
+        try {
+          const auth = await fetch(`http://127.0.0.1:${String(upstreamPort)}/?token=${token}`, { redirect: 'manual' })
+          const setCookies = (auth.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
+          cookie = setCookies[0]?.split(';')[0] ?? ''
+          serverOptions.cookie = cookie
+          log(`[mode] 兼容模式：auth ${String(auth.status)} | cookie = ${cookie === '' ? '(none)' : `${cookie.slice(0, 18)}…`}`)
+        } catch (error) {
+          log(`[mode] 兼容模式换 cookie 失败：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      state.pageUrl = token !== null ? `http://127.0.0.1:${String(upstreamPort)}/?token=${token}` : `http://127.0.0.1:${String(upstreamPort)}/`
+      state.mode = 'compat'
+      void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+      resolveModeChoice('compat')
+      return { ok: true, needsToken: raw === '' }
+    }
+    // 高级：清场后由壳自己拉起
+    const freed = await stopPortOwner({ port: upstreamPort, log })
+    if (!freed) throw new Error('等待本地服务就绪超时，请查看下方日志输出并重试。')
+    await connect()
+    shellMode = 'advanced'
+    applyHost()
+    state.pageUrl = `${server.origin}/${token}/`
+    state.mode = 'advanced'
+    void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
+    resolveModeChoice('advanced')
+    return { ok: true, needsToken: false }
+  }
 
   // ---- 诊断快照（#220 日志与诊断）：一个 JSON 回答「哪版、哪个 profile、端口/pod、日志在哪」----
   const startedAt = new Date().toISOString()
@@ -711,7 +785,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   let stopping = false
   const registerHost = (): void => {
     const records = upsertHostRecord(readHostRecords(hostRegistryFile), {
-      hostPid: host.pid,
+      hostPid: host?.pid ?? 0,
       shellPid: process.pid,
       profile: paths.profile,
       startedAt: new Date().toISOString(),
@@ -725,22 +799,21 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     )
   }
   const applyHost = (): void => {
-    bootPayload.injections = host.ready.injections
+    bootPayload.injections = [...hostInjections]
     serverOptions.cookie = cookie
-    serverOptions.upstreamOrigin = new URL(host.ready.url).origin
-    state.hostPid = host.pid
+    state.hostPid = host?.pid ?? 0
     state.injections = bootPayload.injections.length
     void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
   }
   const supervise = async (): Promise<void> => {
     registerHost()
-    const code = await host.exited
+    const code = await host?.exited
     if (stopping) return
     // 旧实例没了 = 它的忙租约不再会被刷新：先摘干净再决定要不要重启。
     arbiter.clear()
     keepAwake.tick()
     const decision = ledger.decide(Date.now())
-    log(`宿主 ${String(host.pid)} 意外退出（code = ${String(code)}）：${decision.reason}`)
+    log(`宿主 ${String(host?.pid ?? 0)} 意外退出（code = ${String(code)}）：${decision.reason}`)
     if (!decision.restart) {
       dshStatusCode = 5
       options.onHostGiveUp?.(state, decision.reason)
@@ -761,13 +834,17 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     }
     dshStatusCode = 2
     applyHost()
-    log(`守护器已重启宿主：pid = ${String(host.pid)} | injections = ${String(bootPayload.injections.length)}`)
+    log(`守护器已重启宿主：pid = ${String(host?.pid ?? 0)} | injections = ${String(bootPayload.injections.length)}`)
     notifier.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务已自动重启（${paths.profile}）`)
     options.onHostRestart?.(state)
     void supervise()
   }
-  registerHost()
-  void supervise()
+  if (host !== undefined) {
+    registerHost()
+    void supervise()
+  } else {
+    log('端口被外部实例占用：等用户选完「兼容 / 高级」再拉起（弹框期间不 spawn 宿主）')
+  }
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
 
@@ -807,6 +884,9 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       fetchRuntimeCatalog({ source, repo: liveSettings.runtimeGithubRepo ?? null, log }),
     downloadStatus: () => downloader.status(),
     download: (version, source) => downloader.start(version, source),
+    modePromptNeeded: () => modePromptNeeded,
+    chooseDesktopMode: chooseDesktopMode,
+    modeChosen,
     restartHost: async () => {
       if (stopping) return
       // 设置面板切了 dsh 来源/运行时版本：这里重新解析选中项（同一个 paths 对象就地更新，
@@ -828,7 +908,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       state.distDir = paths.distDir
       void Bun.write(stateFile, `${JSON.stringify(state, null, 2)}\n`)
       // 杀掉当前宿主即可：退出会唤醒守护器，由它重启并把服务面切过去
-      await host.stop()
+      await host?.stop()
     },
     // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
@@ -849,7 +929,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         log(`[exit] 清理插件链接失败：${String(error)}`)
       }
       try {
-        await host.stop()
+        await host?.stop()
       } catch {}
       forgetHosts()
       // 同样先重读：退出时只能摘掉自己那一行，别人的行要留着
@@ -868,6 +948,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
       log,
       settings: () => liveSettings,
       save: saveSettings,
+      modePrompt: () => modePromptNeeded,
+      chooseMode: (mode: string, tokenUrl?: string) => chooseDesktopMode(mode, tokenUrl),
       restartService: () => service.restartHost(),
       status: () => ({ ...state }),
       ports: () => ({ port: pagePort, lanePort }),

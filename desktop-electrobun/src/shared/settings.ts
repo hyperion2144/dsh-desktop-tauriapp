@@ -32,8 +32,14 @@ export type RuntimeSource = (typeof RUNTIME_SOURCES)[number]
 export const DEFAULT_PROFILE = 'desktop'
 /** web profile 的默认端口（旧壳注释：web 3080、desktop 3081）。 */
 export const DEFAULT_PROFILE_PORTS: Readonly<Record<string, number>> = { web: 3080, desktop: 3081 }
-/** 手机访问 lane 的默认端口（旧壳：web 3091、desktop 3092）。 */
-export const DEFAULT_PROFILE_LANE_PORTS: Readonly<Record<string, number>> = { web: 3091, desktop: 3092 }
+/** 手机访问 lane 的默认端口（旧壳 #94 后的口径：lane 整体 +1 → web 3092、desktop 3093，腾 3091 给壳转发器）。 */
+export const DEFAULT_PROFILE_LANE_PORTS: Readonly<Record<string, number>> = { web: 3092, desktop: 3093 }
+/** 非 web/desktop 的上游端口散列基点（旧壳 settings.rs:291 `PORT_BASE_OTHER`）。 */
+export const PORT_BASE_OTHER = 3082
+/** 非 web/desktop 的 lane 端口散列基点（旧壳 settings.rs:293 `LANE_BASE_OTHER`）。 */
+export const LANE_BASE_OTHER = 3094
+/** 端口避让窗口 [base, base+1023]，溢出回绕（旧壳 assign_port_avoiding）。 */
+export const PORT_AVOID_SPAN = 1_024
 
 export interface NotificationScenarioConfig {
   enabled: boolean
@@ -351,22 +357,79 @@ export function activeProfile(settings: DesktopSettings, env: Record<string, str
   return settings.activeProfile ?? DEFAULT_PROFILE
 }
 
-/** dsh web 端口：环境变量 `DSH_DESKTOP_PORT` > 设置 > profile 默认表。 */
-export function profilePort(settings: DesktopSettings, profile: string, env: Record<string, string | undefined> = {}): number {
+/** FNV-1a 64（旧壳 settings.rs:296-303：offset basis `0xcbf29ce484222325`、prime `0x100000001b3`，按 UTF-8 字节）。 */
+export function fnv1a64(input: string): bigint {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(input)) {
+    hash ^= BigInt(byte)
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn
+  }
+  return hash
+}
+
+/** 默认上游端口（旧壳 default_port_for_profile：web 3080 / desktop 3081 / 其余 3082+散列%512）。 */
+export function defaultPortForProfile(profile: string): number {
+  if (profile === 'web') return 3080
+  if (profile === 'desktop') return 3081
+  return PORT_BASE_OTHER + Number(fnv1a64(profile) % 512n)
+}
+
+/** 默认 lane 端口（旧壳 default_lane_port_for_profile：web 3092 / desktop 3093 / 其余 3094+散列%512）。 */
+export function defaultLanePortForProfile(profile: string): number {
+  if (profile === 'web') return 3092
+  if (profile === 'desktop') return 3093
+  return LANE_BASE_OTHER + Number(fnv1a64(profile) % 512n)
+}
+
+/** 在 [base, base+1023] 里找第一个不在 taken 里的端口，溢出回绕（旧壳 assign_port_avoiding）。 */
+export function assignPortAvoiding(base: number, taken: ReadonlySet<number> | readonly number[]): number {
+  const used = taken instanceof Set ? taken : new Set(taken)
+  for (let offset = 0; offset < PORT_AVOID_SPAN; offset += 1) {
+    const candidate = base + offset
+    if (!used.has(candidate)) return candidate
+  }
+  return base
+}
+
+/**
+ * dsh 上游端口（旧壳 port_for_profile 的口径）：env > 用户配置的 profile_ports >（web 的遗留 `port`）
+ * > 默认公式。给 `taken`（本会话已占端口）时非 web/desktop 会做 [base, base+1023] 避让——结果只活在
+ * 会话内存（调用方自己记），不落盘：靠 FNV 确定性保证下次启动算出同一个值。
+ */
+export function profilePort(
+  settings: DesktopSettings,
+  profile: string,
+  env: Record<string, string | undefined> = {},
+  taken?: ReadonlySet<number>,
+): number {
   const fromEnv = port(env.DSH_DESKTOP_PORT)
   if (fromEnv !== undefined) return fromEnv
   const perProfile = settings.profilePorts?.[profile]
   if (perProfile !== undefined) return perProfile
-  return DEFAULT_PROFILE_PORTS[profile] ?? 3080
+  if (profile === 'web' && settings.port !== undefined) return settings.port
+  const base = defaultPortForProfile(profile)
+  if (taken === undefined || profile === 'web' || profile === 'desktop') return base
+  return assignPortAvoiding(base, taken)
 }
-/** 手机访问 lane 端口：环境变量 `DSH_MOBILE_LANE_PORT` > profile 专属 > `lane_port` > 默认表。 */
-export function profileLanePort(settings: DesktopSettings, profile: string, env: Record<string, string | undefined> = {}): number {
+
+/**
+ * 手机访问 lane 端口（旧壳 lane_port_for_profile 的口径）：env > profile 专属 >（web 的遗留
+ * `lane_port`）> 默认公式；`taken` 避让同上，同样不落盘。
+ */
+export function profileLanePort(
+  settings: DesktopSettings,
+  profile: string,
+  env: Record<string, string | undefined> = {},
+  taken?: ReadonlySet<number>,
+): number {
   const fromEnv = port(env.DSH_MOBILE_LANE_PORT)
   if (fromEnv !== undefined) return fromEnv
   const perProfile = settings.profileLanePorts?.[profile]
   if (perProfile !== undefined) return perProfile
   if (profile === 'web' && settings.lanePort !== undefined) return settings.lanePort
-  return DEFAULT_PROFILE_LANE_PORTS[profile] ?? 3091
+  const base = defaultLanePortForProfile(profile)
+  if (taken === undefined || profile === 'web' || profile === 'desktop') return base
+  return assignPortAvoiding(base, taken)
 }
 
 /** `~` 前缀展开（旧壳 `expand_home`：DSH_HOME 带 `~` 时若不展开，壳与 dsh 会各写各的目录）。 */

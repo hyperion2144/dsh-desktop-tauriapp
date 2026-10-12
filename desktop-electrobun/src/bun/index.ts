@@ -728,10 +728,24 @@ console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
 // 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
 updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
 
+let startupBlocked = false
 if (!noWindow) {
+  // 兼容/高级模式弹框（旧壳：端口被外部实例占用时先问再动）：启动界面里问，选完再建主窗。
+  if (service.state.blocked !== undefined) {
+    splash?.webview?.executeJavascript(splashFailScript(service.state.blocked))
+    setTimeout(() => { void shutdown() }, SPLASH_FAILURE_HOLD_MS)
+    startupBlocked = true
+  }
+  if (!startupBlocked && service.modePromptNeeded()) {
+    const { profile, port } = { profile: service.state.profile, port: service.state.upstreamPort }
+    const origin = service.state.origin
+    const modeUi = `(function(){var d=document.createElement('div');d.style.cssText='position:fixed;inset:0;background:rgba(16,20,24,0.95);display:flex;flex-direction:column;gap:10px;padding:18px;font:13px/1.5 system-ui;color:#d7dde6;z-index:9';d.innerHTML='<b style=\"font-size:14px\">检测到已有 dsh 服务（外部实例）</b><span>端口 ${port} 上已有 dsh 在跑。兼容模式直接复用它（标准布局）；高级模式会停掉它并由壳重新拉起（桌面界面）。</span><input id=\"tk\" placeholder=\"可选：粘贴 dsh web 打印的完整 URL（含 token）\" style=\"padding:6px 8px;border-radius:6px;border:1px solid #3a4453;background:#0b0e12;color:#d7dde6\"/><div style=\"display:flex;gap:8px;justify-content:flex-end\"><button id=\"c\" style=\"padding:6px 12px;border-radius:6px\">兼容模式（标准布局）</button><button id=\"a\" style=\"padding:6px 12px;border-radius:6px;background:#3b82f6;color:#fff;border:0\">高级模式（桌面界面）</button></div><span id=\"m\" style=\"color:#8b95a3\"></span>';document.body.appendChild(d);var post=async function(mode){document.getElementById('m').textContent=mode==='compat'?'正在进入兼容模式…':'正在停用外部服务并以高级模式启动…';try{var r=await fetch('${origin}/__shell__/mode',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({mode:mode,tokenUrl:document.getElementById('tk').value})});var j=await r.json();if(j.needsToken){document.getElementById('m').textContent='请粘贴带 token 的完整 URL 后再点兼容模式';return}d.remove()}catch(e){document.getElementById('m').textContent=String(e)}};document.getElementById('c').onclick=function(){post('compat')};document.getElementById('a').onclick=function(){post('advanced')}})()`
+    splash?.webview?.executeJavascript(modeUi)
+    await service.modeChosen
+  }
   // 标题栏形态与旧壳对齐：macOS 保留原生红绿灯并叠在内容上（旧壳 TitleBarStyle::Overlay），
   // Windows/Linux 隐藏原生标题栏，caption 行与窗口按钮由插件 client 自绘（旧壳 decorations:false）。
-  createProfileWindow(instanceProfile, service)
+  if (!startupBlocked) createProfileWindow(instanceProfile, service)
   // 右键菜单里我们自己那几项（原生 role 由系统处理，不会回到这里）；
   // 多窗口下作用在「最近聚焦」那个窗口上。
   ContextMenu.on('context-menu-clicked', (event) => {

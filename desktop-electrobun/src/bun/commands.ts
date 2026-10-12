@@ -44,6 +44,9 @@ export interface CommandDeps {
   dshStatus?: () => number
   /** 运行中的 dsh 版本（内置＝运行时目录名，外部＝CLI 版本） */
   dshVersion?: () => string
+  /** 兼容/高级模式弹框（旧壳 get_mode_prompt_needed / choose_desktop_mode） */
+  modePrompt?: () => boolean
+  chooseMode?: (mode: string, tokenUrl?: string) => Promise<{ ok: true; needsToken: boolean }>
   openExternal?: (url: string) => void
   closeWindow?: () => void
   /** 试听音效（设置面板的「试听」；缺省不响，但要回一条可诊断的话） */
@@ -229,6 +232,15 @@ export function createCommandTable(deps: CommandDeps): Record<string, RpcHandler
         proxy_pass: settings.proxyPass ?? '',
         effective: deps.proxyEffective?.() ?? null,
       }
+    },
+
+    // 兼容/高级模式（旧壳 get_mode_prompt_needed / choose_desktop_mode）
+    get_mode_prompt_needed: () => deps.modePrompt?.() ?? false,
+    choose_desktop_mode: async (args: Record<string, unknown>) => {
+      const mode = typeof args['mode'] === 'string' ? args['mode'] : ''
+      const tokenUrl = typeof args['tokenUrl'] === 'string' ? args['tokenUrl'] : undefined
+      if (deps.chooseMode === undefined) throw new Error('接入模式选择器未就绪（壳还在启动）')
+      return await deps.chooseMode(mode, tokenUrl)
     },
 
     // 底部状态条的轮询口（每 5s 一次）：旧壳的 0..7 枚举，缺了它状态永远是默认文案
