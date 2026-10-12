@@ -81,6 +81,7 @@ declare module 'electrobun/bun' {
     setFullScreen(fullScreen: boolean): void
     maximize(): void
     isMaximized(): boolean
+    unmaximize(): void
     setTitle(title: string): void
     center(): void
   }

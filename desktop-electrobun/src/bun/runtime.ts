@@ -87,11 +87,19 @@ export function trayImagePath(env: Record<string, string | undefined> = process.
   if (explicit !== undefined && explicit !== '') return explicit
   const projectRoot =
     env.DSH_SHELL_PROJECT ?? findProjectRoot(import.meta.dir) ?? packagedRoot(import.meta.dir) ?? resolve(import.meta.dir, '..', '..')
-  const candidates = [
-    join(projectRoot, 'resources', 'tray.png'),
-    join(projectRoot, 'runtime', 'tray.png'),
-    join(resolve(projectRoot, '..'), 'desktop', 'src-tauri', 'icons', '32x32.png'),
-  ]
+  const candidates = process.platform === 'win32'
+    ? [
+        join(projectRoot, 'resources', 'tray.ico'),
+        join(projectRoot, 'runtime', 'tray.ico'),
+        join(resolve(projectRoot, '..'), 'desktop', 'src-tauri', 'icons', 'icon.ico'),
+        join(projectRoot, 'resources', 'tray.png'),
+        join(projectRoot, 'runtime', 'tray.png'),
+      ]
+    : [
+        join(projectRoot, 'resources', 'tray.png'),
+        join(projectRoot, 'runtime', 'tray.png'),
+        join(resolve(projectRoot, '..'), 'desktop', 'src-tauri', 'icons', '32x32.png'),
+      ]
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate
   }

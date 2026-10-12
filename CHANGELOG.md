@@ -6,6 +6,10 @@
 
 ### 桌面壳（Electrobun）
 
+- Windows/Linux 窗口控制（A5）：设置面板自绘三键（最小化/最大化/关闭）在新壳可用——新壳走壳内端点 `POST /__shell__/window`（shell-server 自答，主进程操作 BrowserWindow；未知动作 400、无窗口宿主 501、GET 405），旧 Tauri 壳回退原插件命令；拖拽改走 Electrobun 的 CSS 拖拽区（`electrobun-webkit-app-region-drag`，标题行挂 drag、内部交互元素挂 no-drag）；非 macOS 不再把中间列内容顶下来（控制三键只占右上角 138×28，logo 回到自然位置）；Windows 托盘优先 `.ico`（prepare-bundle 拷 icon.ico → resources/tray.ico → 包内 runtime/，win32 候选链 ico 优先 png 回退）。
+
+### 桌面壳（Electrobun）
+
 - 托盘菜单限宽（A6）：Electrobun 菜单项没有 width 概念，超长 label（运行时路径/冲突路径/远程地址）会把菜单拉到很宽——现在所有普通项与子菜单项按码点截断到 48 字符加省略号（不劈开代理对），action 语义不变；`truncateTrayLabel`/`TRAY_LABEL_MAX` 单测 5 例。
 - 换 bundle id（A7）：`com.arcreel.dsh-desktop-tauriapp` → `com.hyperion.dsh-desktop-bun`（electrobun.config.ts identifier + 壳侧默认 `~/Library/Application Support/<id>` 与 prepare-bundle 的 runtimes 回退路径同步改；CEF 用户数据/端口台账/单实例锁随新 id 独立成目录，不与旧 Tauri 壳互踩）。
 

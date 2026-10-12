@@ -60,6 +60,15 @@ if (existsSync(traySource)) {
 } else {
   console.warn(`[prepare-bundle] 找不到托盘图标：${traySource}，本次构建不建托盘`)
 }
+// Windows 托盘：win32 原生用 .ico（HICON 加载 png 在部分壳层不渲染），拷一份 icon.ico 备用
+const trayIcoSource = resolve(repoRoot, 'desktop', 'src-tauri', 'icons', 'icon.ico')
+const trayIcoTarget = join(projectRoot, 'resources', 'tray.ico')
+if (existsSync(trayIcoSource)) {
+  mkdirSync(dirname(trayIcoTarget), { recursive: true })
+  copyFileSync(trayIcoSource, trayIcoTarget)
+  console.log(`[prepare-bundle] ${trayIcoSource}`)
+  console.log(`            → ${trayIcoTarget}`)
+}
 
 // ── 4. 内置 dsh 运行时（随包发出）───────────────────────────────────────
 // 为什么必须随包：ADR 0004 的页面资产取自「当前生效运行时」的 dist。以前新壳只有

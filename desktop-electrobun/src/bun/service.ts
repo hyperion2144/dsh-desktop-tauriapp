@@ -89,6 +89,8 @@ export interface ServiceOptions {
   onStage?: (stage: ShellStage) => void
   /** 第二个实例请求把窗口带到前台（单实例激活） */
   onActivate?: () => void
+  /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
+  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
   onLog?: (line: string) => void
   /** 通知权限桥（index.ts 注入同一个实例；缺省自建） */
   notifyBridge?: NativeNotify
@@ -651,6 +653,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     onOpenExternal: options.onOpenExternal,
     onContextMenu: options.onContextMenu,
     onActivate: options.onActivate,
+    onWindowControl: options.onWindowControl,
     getModePrompt: () => ({ needed: modePromptNeeded, profile: paths.profile, port: upstreamPort }),
     chooseMode: (mode, tokenUrl) => chooseDesktopMode(mode, tokenUrl),
     views: options.views,

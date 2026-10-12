@@ -52,6 +52,8 @@ export interface ShellServerOptions {
   onContextMenu?: (request: ContextMenuRequest) => void
   /** 单实例激活：第二个壳请求把窗口带到前台（主进程实现） */
   onActivate?: () => void
+  /** 自绘窗口控制（A5）：页面三键 → 主进程操作 BrowserWindow */
+  onWindowControl?: (action: 'minimize' | 'toggle-maximize' | 'close') => void
   /** 兼容/高级模式弹框状态（旧壳 get_mode_prompt_needed） */
   getModePrompt?: () => { needed: boolean; profile: string; port: number }
   /** 选模式（旧壳 choose_desktop_mode） */
@@ -276,6 +278,23 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
           if (options.onActivate === undefined) return new Response('no window host', { status: 501 })
           options.onActivate()
           log('[shell] 收到激活请求：窗口带到前台')
+          return new Response(null, { status: 204 })
+        }
+        // 自绘窗口控制（A5）：最小化 / 最大化切换 / 关闭
+        if (decision.rel === 'window') {
+          if (request.method.toUpperCase() !== 'POST') return new Response('method not allowed', { status: 405 })
+          if (options.onWindowControl === undefined) return new Response('no window host', { status: 501 })
+          let action = ''
+          try {
+            const body = (await request.json()) as { action?: unknown }
+            if (typeof body.action === 'string') action = body.action
+          } catch {
+            return new Response('bad json', { status: 400 })
+          }
+          if (action !== 'minimize' && action !== 'toggle-maximize' && action !== 'close') {
+            return new Response(`unknown window action: ${action}`, { status: 400 })
+          }
+          options.onWindowControl(action)
           return new Response(null, { status: 204 })
         }
         return new Response('not found', { status: 404 })

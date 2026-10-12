@@ -71,6 +71,8 @@ export default {
       'runtime/bun-preload.mjs': 'runtime/bun-preload.mjs',
       // 托盘图标：prepare:bundle 把旧的 32x32.png 拷到 resources/tray.png，再落进包内 runtime/
       'resources/tray.png': 'runtime/tray.png',
+      // Windows 托盘：shell tray 用 .ico（win32 原生格式），资源同上链路
+      'resources/tray.ico': 'runtime/tray.ico',
       // macOS 通知桥（旧壳 notify_un.rs 的等价物）：dylib 由 `bun run build:native` 编出来，
       // 先编后打（见 package.json 的 build 链），装完才有真授权状态与真投递。
       // 只在 darwin 上声明：Linux/Windows 上根本没这个产物，写死会让 `hutch electrobun build`

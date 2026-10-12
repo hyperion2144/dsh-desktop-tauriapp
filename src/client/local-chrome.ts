@@ -30,6 +30,20 @@ function tauriWindowCommand(command: string): void {
   }
 }
 
+/** 自绘窗口三键（A5）：新壳走壳内端点；旧 Tauri 壳回退插件命令。 */
+function sendWindowAction(action: 'minimize' | 'toggle-maximize' | 'close'): void {
+  const tauri = { minimize: 'plugin:window|minimize', 'toggle-maximize': 'plugin:window|toggle_maximize', close: 'plugin:window|close' }[action]
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: (cmd: string) => Promise<unknown> } }).__TAURI_INTERNALS__
+  if (internals?.invoke !== undefined) {
+    tauriWindowCommand(tauri)
+    return
+  }
+  void fetch('/__shell__/window', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action }),
+  }).catch(() => undefined)
+}
 function makeCaptionButton(aria: string, extraClass: string, svgPath: string): HTMLButtonElement {
   const button = document.createElement('button')
   button.type = 'button'
@@ -49,9 +63,9 @@ function buildWindowControls(): HTMLElement {
   box.addEventListener('click', (event) => {
     const button = (event.target as HTMLElement).closest('button')
     const action = button?.getAttribute('aria-label')
-    if (action === '最小化') tauriWindowCommand('plugin:window|minimize')
-    else if (action === '最大化') tauriWindowCommand('plugin:window|toggle_maximize')
-    else if (action === '关闭') tauriWindowCommand('plugin:window|close')
+    if (action === '最小化') sendWindowAction('minimize')
+    else if (action === '最大化') sendWindowAction('toggle-maximize')
+    else if (action === '关闭') sendWindowAction('close')
   })
   return box
 }
@@ -89,6 +103,8 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
   const drag = document.createElement('div')
   drag.className = 'dshDesktopChromeDrag'
   drag.setAttribute('data-tauri-drag-region', '')
+  // Electrobun 的拖拽区是 CSS 驱动（preload/dragRegions）：类名挂上才能原生拖动（macOS/Windows 同）
+  drag.classList.add('electrobun-webkit-app-region-drag')
   strip.appendChild(drag)
   if (platform !== 'darwin') strip.appendChild(buildWindowControls())
   host.appendChild(strip)
@@ -380,14 +396,18 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       }
       if (collapsed) widenCollapsedRail(frame)
     } else {
-      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`
-      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`
-      if (center !== null) center.style.paddingTop = `${height}px`
-      // 右侧 Sidebar panel（dsh >= 0.15.0-rc.1 多 tab 结构）同样顶下，
-      // 让出 chrome 条覆盖区（#62）。panel 是 position:absolute; top:0，
-      // paddingTop 对绝对定位子元素无效，须直接覆写 panel.style.top。
-      const rightPanel = rightColumn?.querySelector('[data-sidebar-right-panel]')
-      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = `${height}px`
+      // A5：窗口控制只占右上角，不再把中间列内容顶下来（logo 回到自然位置）；
+      // 拖拽交给内容自己的标题行（app-region CSS），空隙由标题行自己的留白承担。
+      strip.style.cssText = `right:0;top:0;width:${CAPTION_CONTROLS_WIDTH}px;height:${height}px;`
+      drag.style.display = 'none'
+      const header = center?.querySelector('[data-conversation-header-leading]')?.parentElement ?? null
+      if (header instanceof HTMLElement) {
+        header.classList.add('electrobun-webkit-app-region-drag')
+        header.style.paddingRight = `${CAPTION_CONTROLS_WIDTH}px`
+        for (const el of header.querySelectorAll('button, input, select, textarea, a, [role="button"]')) {
+          el.classList.add('electrobun-webkit-app-region-no-drag')
+        }
+      }
     }
   }
 

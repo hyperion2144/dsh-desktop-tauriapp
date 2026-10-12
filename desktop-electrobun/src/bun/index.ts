@@ -341,6 +341,18 @@ function serviceOptionsFor(profile: string): ServiceOptions {
       console.log('[shell] 收到激活请求：窗口带到前台')
       showMainWindow()
     },
+    onWindowControl: (action) => {
+      const win = focusedWindow()
+      if (win === null) return
+      if (action === 'minimize') {
+        win.minimize()
+      } else if (action === 'toggle-maximize') {
+        if (win.isMaximized()) win.unmaximize()
+        else win.maximize()
+      } else {
+        win.close()
+      }
+    },
     onHostRestart: (state) => {
       // 宿主被守护器拉起来了：把对应窗口刷回同一个页面 origin（token/端口都没变）
       console.log(`[shell] 宿主已重启，页面重载：${state.pageUrl}`)

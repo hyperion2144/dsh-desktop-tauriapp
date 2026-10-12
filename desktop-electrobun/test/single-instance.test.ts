@@ -325,3 +325,63 @@ describe('单实例锁：重启 / pid 复用', () => {
     expect(defaultIsOurProcess(999_999_999)).toBe(false)
   })
 })
+
+describe('/__shell__/window 端点（A5 自绘窗口控制）', () => {
+  function withWindowServer(
+    onWindowControl: (action: 'minimize' | 'toggle-maximize' | 'close') => void,
+    run: (origin: string) => Promise<void>,
+  ): Promise<void> {
+    const dist = tempDir()
+    const probe = Bun.serve({ port: 0, fetch: () => new Response('upstream') })
+    const port = probe.port
+    if (port === undefined) throw new Error('临时端口没拿到')
+    probe.stop(true)
+    const server = startShellServer({
+      distDir: dist,
+      token: 'tok',
+      cookie: 'dsh-auth-x=v1.y',
+      upstreamOrigin: `http://127.0.0.1:${String(port)}`,
+      port,
+      bootPayload: () => null,
+      onWindowControl,
+    })
+    try {
+      return run(server.origin).finally(() => server.stop())
+    } finally {
+      rmSync(dist, { recursive: true, force: true })
+    }
+  }
+
+  test('POST minimize/toggle-maximize/close ⇒ 204 且动作逐次送达', async () => {
+    const seen: string[] = []
+    await withWindowServer((action) => void seen.push(action), async (origin) => {
+      for (const action of ['minimize', 'toggle-maximize', 'close'] as const) {
+        const response = await fetch(`${origin}/__shell__/window`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action }),
+        })
+        expect(response.status).toBe(204)
+      }
+      expect(seen).toEqual(['minimize', 'toggle-maximize', 'close'])
+    })
+  })
+
+  test('未知动作 ⇒ 400', async () => {
+    await withWindowServer(() => undefined, async (origin) => {
+      const response = await fetch(`${origin}/__shell__/window`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'explode' }),
+      })
+      expect(response.status).toBe(400)
+    })
+  })
+
+  test('GET ⇒ 405', async () => {
+    await withWindowServer(() => undefined, async (origin) => {
+      const response = await fetch(`${origin}/__shell__/window`)
+      expect(response.status).toBe(405)
+    })
+  })
+})
