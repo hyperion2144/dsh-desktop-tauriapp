@@ -135,7 +135,13 @@ jobs:
         working-directory: desktop-electrobun
         shell: bash
         run: |
-          hutch electrobun build --env=stable
+          # hdiutil 在 runner 上偶发 Resource busy（实测 run 38294201295）：重试三次
+          for attempt in 1 2 3; do
+            hutch electrobun build --env=stable && break
+            echo "打包第 $attempt 次失败，重试…"
+            [ "$attempt" = "3" ] && exit 1
+            sleep 30
+          done
           # 封装签名只在 macOS 有意义（通知授权要一份绑了 Info.plist 的签名）；
           # 脚本自身在非 macOS 会跳过，但 Windows/Linux 产物里没有 .app，这里就不调它。
           if [ "$RUNNER_OS" = "macOS" ]; then
@@ -157,6 +163,56 @@ jobs:
         run: |
           if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
           bun run build:installer
+          - name: 静默安装（NSIS /S，装到固定目录）
+            shell: pwsh
+            run: |
+              $setup = Get-ChildItem desktop-electrobun\artifacts -Recurse -Filter *-setup.exe | Select-Object -First 1
+              if ($null -eq $setup) { throw '找不到 setup.exe' }
+              $env:ELECTROBUN_INSTALLER_UI_AUTOCLOSE = '1'
+              Start-Process -FilePath $setup.FullName -ArgumentList '/S','/D=C:\dsh-smoke' -Wait
+              if (-not (Test-Path 'C:\dsh-smoke')) { throw '静默安装后没有安装目录' }
+              Get-ChildItem C:\dsh-smoke | Select-Object -First 12 | ForEach-Object { $_.Name }
+          - name: 无窗口启动 + SHELL-READY 断言
+            shell: pwsh
+            run: |
+              $ErrorActionPreference = 'Stop'
+              $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1
+              if ($null -eq $app) { throw '安装树里找不到 launcher.exe' }
+              # 内置树随包断言（干净安装位应有 app\dsh\node_modules\@deepseek-ai\dsh）
+              $dshTree = Get-ChildItem C:\dsh-smoke -Recurse -Filter bin.js | Where-Object { $_.FullName -like '*app\dsh\node_modules\@deepseek-ai\dsh\lib*' } | Select-Object -First 1
+              if ($null -eq $dshTree) { throw '安装后没有内置 dsh 运行时树（app\dsh）' }
+              $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
+              $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
+              $env:DSH_HOME = $smokeHome
+              $env:DSH_SHELL_PROFILE_MODE = 'fresh'
+              $env:DSH_SHELL_NO_WINDOW = '1'
+              $env:DSH_SHELL_PAGE_PORT = '6451'
+              $env:DSH_DESKTOP_PORT = '6452'
+              $env:DSH_MOBILE_LANE_PORT = '6453'
+              $env:DSH_DESKTOP_AUTO_QUIT = '20000'
+              $env:DSH_DESKTOP_NO_SINGLETON = '1'
+              # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
+              Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
+              # launcher 可能立即把工作交给子进程：轮询日志等 SHELL-READY（最长 90 秒）
+              $ready = $false
+              foreach ($i in 1..45) {
+                Start-Sleep -Seconds 2
+                $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
+                if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
+              }
+              if (-not $ready) {
+                Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
+                Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
+                throw '90 秒内未拿到 SHELL-READY'
+              }
+              (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
+              # 等 AUTO_QUIT 收尾（再给 60 秒），然后确认没有残留的 bun/launcher 服务进程
+              Start-Sleep -Seconds 60
+              $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' -or $_.Path -like "$env:LOCALAPPDATA*" }
+              if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
+              Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
+
+
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
@@ -167,65 +223,3 @@ jobs:
             desktop-electrobun/build/**/Setup*.zip
             desktop-electrobun/build/**/*.tar.gz
           if-no-files-found: error
-
-  # Windows 冒烟（A5 的机械半边）：把 NSIS 安装器静默装到真 Windows runner，再用安装产物
-  # 无窗口启动一次（NO_WINDOW + AUTO_QUIT），断言 SHELL-READY 与包内内置树。剩下的
-  # 目视项（窗口 chrome / 托盘 ico / 通知音）仍需真机，但「装得上、起得来」由 CI 把关。
-  windows-smoke:
-    name: Windows 冒烟（NSIS 静默安装 + 无窗口启动）
-    runs-on: windows-latest
-    needs: build
-    steps:
-      - name: 取安装器产物
-        uses: actions/download-artifact@v4
-        with:
-          name: dsh-desktop-shell-Windows x64
-          path: pkg
-      - name: 静默安装（NSIS /S，装到固定目录）
-        shell: pwsh
-        run: |
-          $setup = Get-ChildItem pkg -Recurse -Filter *-setup.exe | Select-Object -First 1
-          if ($null -eq $setup) { throw '找不到 setup.exe' }
-          $env:ELECTROBUN_INSTALLER_UI_AUTOCLOSE = '1'
-          Start-Process -FilePath $setup.FullName -ArgumentList '/S','/D=C:\dsh-smoke' -Wait
-          if (-not (Test-Path 'C:\dsh-smoke')) { throw '静默安装后没有安装目录' }
-          Get-ChildItem C:\dsh-smoke | Select-Object -First 12 | ForEach-Object { $_.Name }
-      - name: 无窗口启动 + SHELL-READY 断言
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1
-          if ($null -eq $app) { throw '安装树里找不到 launcher.exe' }
-          # 内置树随包断言（干净安装位应有 app\dsh\node_modules\@deepseek-ai\dsh）
-          $dshTree = Get-ChildItem C:\dsh-smoke -Recurse -Filter bin.js | Where-Object { $_.FullName -like '*app\dsh\node_modules\@deepseek-ai\dsh\lib*' } | Select-Object -First 1
-          if ($null -eq $dshTree) { throw '安装后没有内置 dsh 运行时树（app\dsh）' }
-          $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
-          $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
-          $env:DSH_HOME = $smokeHome
-          $env:DSH_SHELL_PROFILE_MODE = 'fresh'
-          $env:DSH_SHELL_NO_WINDOW = '1'
-          $env:DSH_SHELL_PAGE_PORT = '6451'
-          $env:DSH_DESKTOP_PORT = '6452'
-          $env:DSH_MOBILE_LANE_PORT = '6453'
-          $env:DSH_DESKTOP_AUTO_QUIT = '20000'
-          $env:DSH_DESKTOP_NO_SINGLETON = '1'
-          # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
-          Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
-          # launcher 可能立即把工作交给子进程：轮询日志等 SHELL-READY（最长 90 秒）
-          $ready = $false
-          foreach ($i in 1..45) {
-            Start-Sleep -Seconds 2
-            $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
-            if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
-          }
-          if (-not $ready) {
-            Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
-            Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
-            throw '90 秒内未拿到 SHELL-READY'
-          }
-          (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
-          # 等 AUTO_QUIT 收尾（再给 60 秒），然后确认没有残留的 bun/launcher 服务进程
-          Start-Sleep -Seconds 60
-          $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' -or $_.Path -like "$env:LOCALAPPDATA*" }
-          if ($left) { $left | ForEach-Object { Stop-Process -Id $_.Id -Force }; throw 'AUTO_QUIT 后仍有残留服务进程' }
-          Write-Host 'Windows 冒烟通过：静默安装 + 无窗口启动（SHELL-READY）+ 自动退出无残留'
