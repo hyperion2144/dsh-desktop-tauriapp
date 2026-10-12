@@ -28,6 +28,7 @@ import { trayMenu, type TrayAction, type TrayCatalogItem, type TrayState } from 
 import { listProfiles } from './profiles.ts'
 import { profileDialogHtml, type ProfileOpDialogKind } from './profile-dialog.ts'
 import { confirmModalScript } from './input-modal.ts'
+import { navRulesFor } from '../shared/nav-rules.ts'
 import {
   DEFAULT_WINDOW_HEIGHT,
   DEFAULT_WINDOW_WIDTH,
@@ -484,6 +485,8 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
   const index = windows.size
   const frame = index === 0 ? restoreWindowFrame(profile) : offsetFrame(restoreWindowFrame(profile), index)
   const win = new BrowserWindow({
+    // D1：原生层同步评估的导航守卫——白名单页面 origin，其余导航被拦（外链交给 open_external）
+    navigationRules: navRulesFor({ origin: svc.state.origin }),
     title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}` ,
     url: svc.state.pageUrl,
     renderer: 'cef',

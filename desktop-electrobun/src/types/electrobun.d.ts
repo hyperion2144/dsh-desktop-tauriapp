@@ -21,7 +21,8 @@ declare module 'electrobun/bun' {
     transparent?: boolean
     hidden?: boolean
     viewsRoot?: string | null
-    navigationRules?: unknown
+    /** D1 原生导航守卫：glob 串数组，`^` 前缀 = 阻断，最后命中赢（见 src/shared/nav-rules.ts） */
+    navigationRules?: string[] | null
     sandbox?: boolean
   }
 

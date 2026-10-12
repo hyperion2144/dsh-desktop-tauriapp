@@ -6,6 +6,7 @@
 
 ### 桌面壳（Electrobun）
 
+- 主窗导航守卫下沉到原生层（D1，旧壳 on_navigation 的等价物）：Electrobun 的 `navigationRules` 在原生代码里同步评估（不回调 Bun，覆盖 location 赋值/表单提交/meta refresh 等一切导航路径）；规则 = 阻断一切（`^*`）+ 放行页面 origin，外链由 open_external 走系统浏览器。规则构造抽成 `src/shared/nav-rules.ts`（注意「最后命中赢」：阻断必须排最前）。
 - 通知音效跨平台（D7，旧壳 rodio 的等价物）：`systemDefaultSoundCommand` 不再只认 macOS——Windows 用 PowerShell 播系统事件音（无需额外依赖），Linux 用 aplay 播 freedesktop 主题音（没有就静默）；自定义音仍按 `$DSH_HOME/sounds` 白名单。Windows/Linux 实际发声待 CI 产物实机确认。
 - 关窗回托盘首次提示（D5）与运行时回退通知（D6）：主窗关窗隐藏到托盘时，第一次发一条「窗口已最小化到托盘，点托盘图标可找回」（window.lifecycle 场景，每 profile 一次）；运行时解析回退（用户选的版本起不来/外部 dsh 找不到）不再只写日志，notifier 就绪后补发一条 config.error 通知。
 - 窗口几何记忆扩到每个 profile 窗口（D3）：此前只有主窗记 `window.json`，多窗口下其余 profile 窗口的位置/尺寸不落盘；现在按 profile 各存一份（主窗沿用 `window.json`，其余存 `window-<profile>.json`），还原/落盘/退出清理都按窗走，越界与坏数据校验同一套。
