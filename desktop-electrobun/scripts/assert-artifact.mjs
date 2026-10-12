@@ -15,7 +15,8 @@
  * 退出码：0 = 通过；1 = 断言失败（缺 CEF / 缺 version.json / 读不出归档）。
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const projectRoot = resolve(import.meta.dir, '..')
@@ -105,39 +106,77 @@ if (payloads.length === 0) {
   problems.push('产物里没有 payload 归档（*.tar.zst）——Electrobun 的包结构变了？')
 }
 
-for (const payload of payloads) {
-  const relative = payload.slice(target.length + 1)
-  const listing = tarList(payload)
-  if (listing === null) {
-    problems.push(`读不出归档列表：${relative}（tar 不支持 zstd？装 zstd 或换 bsdtar）`)
-    continue
-  }
-  const joined = listing.join('\n')
-  for (const marker of cefMarkers(platform)) {
-    if (!joined.includes(marker)) problems.push(`${relative} 里缺 CEF 标志：${marker}`)
-  }
-  const versionEntry = listing.find((line) => line.endsWith('Resources/version.json'))
-  if (versionEntry === undefined) {
-    problems.push(`${relative} 里没有 Resources/version.json（更新与版本号都靠它）`)
-  } else {
-    const raw = tarExtract(payload, versionEntry)
-    try {
-      const parsed = JSON.parse(raw ?? '')
-      const channel = String(parsed.channel ?? '')
-      const baseUrl = String(parsed.baseUrl ?? '')
-      const version = String(parsed.version ?? '')
-      console.log(`[assert] ${relative} → version=${version} channel=${channel} baseUrl=${baseUrl || '(空)'}`)
-      if (version === '') problems.push(`${relative} 的 version.json 没有版本号`)
-      if (channel === '') problems.push(`${relative} 的 version.json 没有 channel`)
-      // dev 构建本来就不带更新源（框架也拒绝更新 dev）；stable 必须带，否则自动更新永远不可用。
-      if (channel === 'stable' && baseUrl === '') {
-        problems.push(`${relative}：stable 包没有 baseUrl（release.baseUrl 配错层了？）`)
-      }
-    } catch (error) {
-      problems.push(`${relative} 的 version.json 解析失败：${String(error)}`)
+/** 二进制安全地把归档里的某个成员解到磁盘（内层归档可能很大，由调用方负责删）。 */
+function tarExtractTo(archive, member, dest) {
+  for (const args of [['--zstd', '-xOf'], ['-xOf']]) {
+    const result = spawnSync('tar', [...args, archive, member], { maxBuffer: 2 * 1024 * 1024 * 1024 })
+    if (result.status === 0 && result.stdout !== null && result.stdout.length > 0) {
+      writeFileSync(dest, result.stdout)
+      return true
     }
   }
+  return false
 }
+
+/**
+ * 断言一份归档。两类都认：
+ *   · 叶子（真正的应用 payload）→ 必须有 CEF 运行时 + 可用的 version.json；
+ *   · 包装层（Windows 的 `*-Setup.tar.zst` 就是这种）→ 里面还有内层 `*.tar.zst`，
+ *     解出来递归断言。
+ * 路径比较一律先把 `\` 归一成 `/`：Windows 上 tar 列表用的是反斜杠（CI 实测）。
+ */
+function inspect(archive, label, depth = 0) {
+  const listing = tarList(archive)
+  if (listing === null) {
+    problems.push(`读不出归档列表：${label}（tar 不支持 zstd？装 zstd 或换 bsdtar）`)
+    return
+  }
+  const norm = listing.map((line) => line.replace(/\\/g, '/')).filter((line) => line !== '')
+  const versionLine = listing.find((line) => {
+    const normalized = line.replace(/\\/g, '/')
+    return normalized === 'version.json' || normalized.endsWith('/version.json')
+  })
+  const nested = norm.filter((line) => line.endsWith('.tar.zst'))
+  if (versionLine === undefined && nested.length > 0 && depth < 2) {
+    console.log(`[assert] ${label} → 包装层（内含 ${String(nested.length)} 份内层归档），逐份解出来再断言`)
+    for (const member of nested) {
+      const scratch = join(tmpdir(), `dsh-assert-${String(process.pid)}-${String(depth)}.tar.zst`)
+      try {
+        if (tarExtractTo(archive, member, scratch)) inspect(scratch, `${label} → ${member}`, depth + 1)
+        else problems.push(`解不出内层归档：${label} → ${member}`)
+      } finally {
+        rmSync(scratch, { force: true })
+      }
+    }
+    return
+  }
+  const joined = norm.join('\n')
+  for (const marker of cefMarkers(platform)) {
+    if (!joined.includes(marker)) problems.push(`${label} 里缺 CEF 标志：${marker}`)
+  }
+  if (versionLine === undefined) {
+    problems.push(`${label} 里没有 version.json（更新与版本号都靠它）`)
+    return
+  }
+  const raw = tarExtract(archive, versionLine)
+  try {
+    const parsed = JSON.parse(raw ?? '')
+    const channel = String(parsed.channel ?? '')
+    const baseUrl = String(parsed.baseUrl ?? '')
+    const version = String(parsed.version ?? '')
+    console.log(`[assert] ${label} → version=${version} channel=${channel} baseUrl=${baseUrl || '(空)'}`)
+    if (version === '') problems.push(`${label} 的 version.json 没有版本号`)
+    if (channel === '') problems.push(`${label} 的 version.json 没有 channel`)
+    // dev 构建本来就不带更新源（框架也拒绍更新 dev）；stable 必须带，否则自动更新永远不可用。
+    if (channel === 'stable' && baseUrl === '') {
+      problems.push(`${label}：stable 包没有 baseUrl（release.baseUrl 配错层了？）`)
+    }
+  } catch (error) {
+    problems.push(`${label} 的 version.json 解析失败：${String(error)}`)
+  }
+}
+
+for (const payload of payloads) inspect(payload, payload.slice(target.length + 1))
 
 // 安装包形态也顺带报一下（dmg / Setup.zip / tar.gz 都是预期产物，缺了不判失败，只提示）。
 const installers = listDir(target).filter((name) => /\.(dmg|zip|tar\.gz|tar\.zst)$/.test(name))
