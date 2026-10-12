@@ -181,9 +181,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1
           if ($null -eq $app) { throw '安装树里找不到 launcher.exe' }
-          # 内置树随包断言（干净安装位应有 app\dsh\node_modules\@deepseek-ai\dsh）
-          $dshTree = Get-ChildItem C:\dsh-smoke -Recurse -Filter bin.js | Where-Object { $_.FullName -like '*app\dsh\node_modules\@deepseek-ai\dsh\lib*' } | Select-Object -First 1
-          if ($null -eq $dshTree) { throw '安装后没有内置 dsh 运行时树（app\dsh）' }
+          # 内置树随包断言：Windows 是两段式（安装位 = launcher + payload 归档，app\dsh
+          # 要等首次启动自解压才物化），所以放到 SHELL-READY 之后断言（见下方）。
           $smokeHome = Join-Path $env:RUNNER_TEMP 'dsh-smoke-home'
           $log = Join-Path $env:RUNNER_TEMP 'smoke-out.log'
           $env:DSH_HOME = $smokeHome
@@ -209,6 +208,16 @@ jobs:
             throw '90 秒内未拿到 SHELL-READY'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
+          # 首启自解压完成后，内置 dsh 树必须已物化（goal 第 1 条的 Windows 半边）
+          $roots = @('C:\dsh-smoke', (Join-Path $env:LOCALAPPDATA 'DeepSeekHarnessDesktopBUN'))
+          $dshTree = $null
+          foreach ($root in $roots) {
+            if (-not (Test-Path $root)) { continue }
+            $dshTree = Get-ChildItem $root -Recurse -Filter bin.js -ErrorAction SilentlyContinue | Where-Object { $_.FullName -like '*app\dsh\node_modules\@deepseek-ai\dsh\lib*' } | Select-Object -First 1
+            if ($null -ne $dshTree) { break }
+          }
+          if ($null -eq $dshTree) { throw '启动后没有物化内置 dsh 运行时树（app\dsh）' }
+          Write-Host "内置 dsh 树：$($dshTree.FullName)"
           # 等 AUTO_QUIT 收尾（再给 60 秒），然后确认没有残留的 bun/launcher 服务进程
           Start-Sleep -Seconds 60
           $left = Get-Process -Name 'bun','launcher' -ErrorAction SilentlyContinue | Where-Object { $_.Path -like 'C:\dsh-smoke*' -or $_.Path -like "$env:LOCALAPPDATA*" }
