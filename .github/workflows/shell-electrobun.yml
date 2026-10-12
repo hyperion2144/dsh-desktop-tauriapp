@@ -202,19 +202,31 @@ jobs:
           $env:DSH_DESKTOP_NO_SINGLETON = '1'
           # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
           # 提速：runner 的 Defender 实时扫描会把 31k 文件的解压拖到分钟级
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          $elevated = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host ("冒烟：elevated={0}" -f $elevated)
+          if ($elevated) {
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath 'C:\dsh-smoke' -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath (Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun') -ErrorAction SilentlyContinue
+            Write-Host ("冒烟：Defender realtime={0}" -f (Get-MpPreference).DisableRealtimeMonitoring)
+          }
+          $extractRoot = Join-Path $env:LOCALAPPDATA 'com.hyperion.dsh-desktop-bun'
           Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
-          # launcher 要先把 399MB payload 解压安装完才拉起应用：轮询日志等 SHELL-READY（最长 360 秒）
+          # launcher 要先把 399MB payload（31k 文件）解压安装完才拉起应用：轮询等 SHELL-READY（最长 50 分钟），每分钟报一次解压进度
           $ready = $false
-          foreach ($i in 1..450) {
+          foreach ($i in 1..1500) {
             Start-Sleep -Seconds 2
             $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
             if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
+            if ($i % 30 -eq 0) {
+              $n = (Get-ChildItem $extractRoot -Recurse -File -ErrorAction SilentlyContinue | Measure-Object).Count
+              Write-Host ("冒烟：等待中 {0}s，已解压文件 {1}" -f ($i * 2), $n)
+            }
           }
           if (-not $ready) {
             Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
             Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
-            throw '900 秒内未拿到 SHELL-READY'
+            throw '3000 秒内未拿到 SHELL-READY'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
           # 首启自解压完成后，内置 dsh 树必须已物化（goal 第 1 条的 Windows 半边）
