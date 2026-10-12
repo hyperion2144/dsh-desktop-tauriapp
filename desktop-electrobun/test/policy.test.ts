@@ -198,6 +198,13 @@ describe('dsh 子进程环境整表', () => {
     expect(bad.DSH_MOBILE_ENABLED).toBeUndefined()
   })
 
+  test('cloudflared 透传（旧壳 lifecycle.rs:414-417）：设置里有路径才注入，空白串当没设置', () => {
+    const withBin = buildChildEnv({ base: {}, clientVersion: '0.12.0', profile: 'desktop', home: '/tmp/h', cloudflaredBin: ' /opt/homebrew/bin/cloudflared ' })
+    expect(withBin.DSH_CLOUDFLARED_BIN).toBe('/opt/homebrew/bin/cloudflared')
+    const withoutBin = buildChildEnv({ base: { DSH_CLOUDFLARED_BIN: '/old' }, clientVersion: '0.12.0', profile: 'desktop', home: '/tmp/h' })
+    expect(withoutBin.DSH_CLOUDFLARED_BIN).toBeUndefined()
+  })
+
   test('资源条件显式写在代码里（cwd / 隔离区清理 / fd 上限）', () => {
     expect(CHILD_RESOURCE_CONDITIONS.cwdIsHome).toBe(true)
     expect(CHILD_RESOURCE_CONDITIONS.quarantineCleanupBeforeSpawn).toBe(true)

@@ -805,9 +805,11 @@ async function registerDshCliFromTray(): Promise<void> {
 
 // ---- 单实例：已有实例活着就不起第二份宿主，只请它把窗口带到前台 ----
 // （Electrobun 2.0.2 没有单实例 API，旧 Tauri 壳用的是 tauri-plugin-single-instance）
+// P2 测试钩子（旧壳 lib.rs:742-757）：DSH_DESKTOP_NO_SINGLETON=1 跳过单实例互斥（并行探针用）
 const instanceFile = join(appSupportDir(), 'shell-instance.json')
 const instance = acquireInstance(instanceFile, instanceProfile)
-if (!instance.acquired) {
+const skipSingleton = (process.env.DSH_DESKTOP_NO_SINGLETON ?? '') !== ''
+if (!instance.acquired && !skipSingleton) {
   const previous = instance.previous
   if (previous !== null && previous.origin !== '') {
     try {
@@ -913,6 +915,14 @@ try {
 console.log(`SHELL-READY ${JSON.stringify({ ...service.state, locale })}`)
 // 服务面就绪：把 origin/页面 URL 回填给实例锁，第二个壳才能激活这个窗口
 updateInstance(instanceFile, process.pid, { origin: service.state.origin, pageUrl: service.state.pageUrl })
+// P2 测试钩子（旧壳 lib.rs:744 _AUTO_QUIT）：服务面就绪后延迟自动退出，给 CI/探针一个干净的结束信号
+if ((process.env.DSH_DESKTOP_AUTO_QUIT ?? '') !== '') {
+  const delayMs = Number(process.env.DSH_DESKTOP_AUTO_QUIT) > 0 ? Number(process.env.DSH_DESKTOP_AUTO_QUIT) : 3_000
+  setTimeout(() => {
+    console.log('[shell] DSH_DESKTOP_AUTO_QUIT 触发自动退出')
+    void shutdown()
+  }, delayMs).unref?.()
+}
 
 let startupBlocked = false
 if (!noWindow) {
@@ -965,7 +975,23 @@ if (!noWindow) {
   if (image === null) {
     console.warn('[shell] 找不到托盘图标（resources/tray.png / runtime/tray.png），本次不建托盘')
   } else {
-    tray = createTray({ image, state: trayState(), onAction: onTrayAction, log: (line) => console.log(line) })
+    tray = createTray({
+      image,
+      state: trayState(),
+      onAction: onTrayAction,
+      onEmptyClick: () => {
+        // P8（旧壳 tray.rs:265-285，#181）：左键单击托盘 = 聚焦最后活跃窗口；没有就开主 profile 的窗
+        const win = focusedWindow()
+        if (win !== null && win !== undefined) {
+          win.unminimize?.()
+          win.show()
+          win.activate()
+        } else {
+          void openProfileWindow(instanceProfile)
+        }
+      },
+      log: (line) => console.log(line)
+    })
     refreshTray()
   }
   // macOS Dock 图标被点（无可见窗口时）：把主窗带回来

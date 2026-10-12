@@ -35,6 +35,8 @@ export interface StartHostInput {
   lanePort?: number | undefined
   /** 代理注入（旧壳 `resolved_proxy_env`）；null/缺省 = 不注入 */
   proxy?: ProxyEnv | null
+  /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164 隧道） */
+  cloudflaredBin?: string | undefined
 }
 
 export interface HostHandle {
@@ -71,7 +73,8 @@ export async function startHost(input: StartHostInput): Promise<HostHandle> {
     notify: input.notify,
     upstreamPort: input.upstreamPort,
     lanePort: input.lanePort,
-    proxy: input.proxy
+    proxy: input.proxy,
+    cloudflaredBin: input.cloudflaredBin,
   })
   assertChildEnv(env)
 

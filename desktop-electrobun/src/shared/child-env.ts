@@ -25,6 +25,7 @@ export const OPTIONAL_ENV_KEYS = [
   'DSH_DESKTOP_PORT',
   'DSH_MOBILE_LANE_PORT',
   'DSH_MOBILE_ENABLED',
+  'DSH_CLOUDFLARED_BIN',
 ] as const
 /** 壳自己消费的内部键（不是 dsh 契约的一部分，不进 REQUIRED/OPTIONAL 表）。 */
 export const SHELL_INTERNAL_ENV_KEYS = ['DSH_SHELL_PARENT_PID', 'DSH_SHELL_PATCH_FILES'] as const
@@ -67,6 +68,8 @@ export interface ChildEnvInput {
   lanePort?: number | undefined
   /** 代理注入（旧壳 `resolved_proxy_env` + `apply_proxy_env`）：大小写各一份；null/缺省 = 不动基线环境 */
   proxy?: ProxyEnv | null
+  /** cloudflared 可执行文件路径（旧壳 `DSH_CLOUDFLARED_BIN`，#164）：空/缺省不注入 */
+  cloudflaredBin?: string | undefined
 }
 
 export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
@@ -131,6 +134,13 @@ export function buildChildEnv(input: ChildEnvInput): Record<string, string> {
     applyProxy('HTTPS_PROXY', input.proxy.https)
     applyProxy('ALL_PROXY', input.proxy.all)
     applyProxy('NO_PROXY', input.proxy.no_proxy)
+  }
+  // cloudflared（旧壳 lifecycle.rs:414-417，#164）：设置里有路径就透传给 dsh，
+  // 手机访问插件的公网隧道功能靠它找可执行文件；空/缺省不写。
+  if (input.cloudflaredBin !== undefined && input.cloudflaredBin.trim() !== '') {
+    env.DSH_CLOUDFLARED_BIN = input.cloudflaredBin.trim()
+  } else {
+    delete env.DSH_CLOUDFLARED_BIN
   }
   return env
 }

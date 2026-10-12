@@ -18,6 +18,8 @@ export interface CreateTrayOptions {
   image: string
   state: TrayState
   onAction: (action: TrayAction) => void
+  /** 左键单击托盘图标（不带菜单动作）：旧壳 focus_last_or_main（tray.rs:265-285，#181）——聚焦最后活跃窗口 */
+  onEmptyClick?: () => void
   log?: (line: string) => void
 }
 
@@ -54,7 +56,13 @@ export function createTray(options: CreateTrayOptions): TrayHandle | null {
   }
 
   tray.on('tray-clicked', (event) => {
-    const action = parseTrayAction((event as { data?: { action?: string } }).data?.action)
+    const rawAction = (event as { data?: { action?: string } }).data?.action
+    if ((rawAction ?? '') === '') {
+      // 左键单击：聚焦窗口（不弹菜单也没反应就太傻了）
+      options.onEmptyClick?.()
+      return
+    }
+    const action = parseTrayAction(rawAction)
     if (action === null) return
     options.onAction(action)
   })

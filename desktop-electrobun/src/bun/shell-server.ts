@@ -158,6 +158,7 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
     const method = request.method.toUpperCase()
     const hasBody = method !== 'GET' && method !== 'HEAD'
     let upstream: Response
+    const t0 = performance.now()
     try {
       upstream = await fetch(target, {
         method,
@@ -170,6 +171,10 @@ export function startShellServer(options: ShellServerOptions): ShellServer {
       return new Response('upstream unreachable', { status: 502 })
     }
     const outHeaders = scrubResponseHeaders(upstream.headers, { pathname })
+    const ttfbMs = Math.round(performance.now() - t0)
+    // P1（旧壳 stream_proxy.rs:456 SLOW 口径）：慢请求照旧壳阈值记一条，不用逐请求刷屏
+    if (ttfbMs >= 2_000) log(`[proxy] SLOW ttfb=${ttfbMs}ms ${method} ${pathname} -> ${upstream.status}`)
+    if (upstream.status >= 500) log(`[proxy] 上游 ${upstream.status} ${method} ${pathname}（ttfb=${ttfbMs}ms）`)
     return new Response(upstream.body, { status: upstream.status, headers: outHeaders })
   }
 

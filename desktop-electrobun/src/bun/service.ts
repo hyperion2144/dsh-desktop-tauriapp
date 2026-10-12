@@ -540,6 +540,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         upstreamPort,
         lanePort,
         proxy: childProxy(),
+        cloudflaredBin: liveSettings.cloudflaredBin,
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     } catch (error) {
@@ -563,6 +564,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
         upstreamPort,
         lanePort,
         proxy: childProxy(),
+        cloudflaredBin: liveSettings.cloudflaredBin,
         notify: { port: notifyServer.port, token: notifyServer.token },
       })
     }

@@ -60,7 +60,14 @@ if (process.platform !== 'darwin') {
 }
 
 console.log(`[sign-app] ad-hoc 重签：${target}`)
-execFileSync('codesign', ['--force', '--deep', '--sign', '-', target], { stdio: 'inherit' })
+// P10：带上旧壳同款 entitlements（CEF/V8 初始化需要 JIT 豁免，缺了会 Fatal OOM）
+const entitlements = join(projectRoot, 'resources', 'entitlements.plist')
+const signArgs = ['--force', '--deep', '--sign', '-']
+try {
+  statSync(entitlements)
+  signArgs.push('--entitlements', entitlements)
+} catch {}
+execFileSync('codesign', [...signArgs, target], { stdio: 'inherit' })
 
 // 读回签名：`codesign -dv` 把详情写在 **stderr**（stdout 是空的），所以两路都要收
 const check = spawnSync('codesign', ['-dv', target], { encoding: 'utf8' })
