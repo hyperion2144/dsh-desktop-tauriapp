@@ -108,16 +108,16 @@ const nsi = `
 !define APP_ID "DeepSeekHarnessDesktopBUN"
 !define APP_DIR_NAME "${nsiEscape(appDirName)}"
 
-Name "$\${APP_NAME}"
+Name "@@APP_NAME@@"
 OutFile "${nsiEscape(outFile)}"
-InstallDir "$LOCALAPPDATA\\$\${APP_ID}"
-InstallDirRegKey HKCU "Software\\$\${APP_ID}" "InstallDir"
+InstallDir "$LOCALAPPDATA\\@@APP_ID@@"
+InstallDirRegKey HKCU "Software\\@@APP_ID@@" "InstallDir"
 RequestExecutionLevel user
 ShowInstDetails show
 ShowUnInstDetails show
 Icon "${nsiEscape(iconPath)}"
 UninstallIcon "${nsiEscape(iconPath)}"
-Caption "$\${APP_NAME} 安装程序"
+Caption "@@APP_NAME@@ 安装程序"
 SpaceTexts none
 
 Page directory
@@ -126,29 +126,28 @@ UninstPage uninstConfirm
 UninstPage instfiles
 
 Section "install"
-  SetOutPath "$INSTDIR\\$\${APP_DIR_NAME}"
+  SetOutPath "$INSTDIR\\@@APP_DIR_NAME@@"
   File /r "${nsiEscape(appDir)}\\*.*"
-  WriteUninstaller "$INSTDIR\\$\${APP_DIR_NAME}\\uninstall.exe"
-  WriteRegStr HKCU "Software\\$\${APP_ID}" "InstallDir" $INSTDIR
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$\${APP_ID}" "DisplayName" "$\${APP_NAME}"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$\${APP_ID}" "DisplayIcon" "$INSTDIR\\$\${APP_DIR_NAME}\\launcher.exe"
-  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$\${APP_ID}" "UninstallString" "$INSTDIR\\$\${APP_DIR_NAME}\\uninstall.exe"
-  CreateDirectory "$SMPROGRAMS\\$\${APP_NAME}"
-  CreateShortCut "$SMPROGRAMS\\$\${APP_NAME}\\$\${APP_NAME}.lnk" "$INSTDIR\\$\${APP_DIR_NAME}\\launcher.exe"
-  CreateShortCut "$SMPROGRAMS\\$\${APP_NAME}\\卸载.lnk" "$INSTDIR\\$\${APP_DIR_NAME}\\uninstall.exe"
+  WriteUninstaller "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
+  WriteRegStr HKCU "Software\\@@APP_ID@@" "InstallDir" $INSTDIR
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayName" "@@APP_NAME@@"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "DisplayIcon" "$INSTDIR\\@@APP_DIR_NAME@@\\launcher.exe"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@" "UninstallString" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
+  CreateDirectory "$SMPROGRAMS\\@@APP_NAME@@"
+  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\launcher.exe"
+  CreateShortCut "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk" "$INSTDIR\\@@APP_DIR_NAME@@\\uninstall.exe"
 SectionEnd
 
 Section "un.install"
   ; 卸载器的 $INSTDIR 从安装时写的注册表恢复（用户自定义目录也要卸干净）
-  ReadRegStr $INSTDIR HKCU "Software\\$\${APP_ID}" "InstallDir"
-  Delete "$SMPROGRAMS\\$\${APP_NAME}\\$\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\\$\${APP_NAME}\\卸载.lnk"
-  RMDir "$SMPROGRAMS\\$\${APP_NAME}"
-  RMDir /r "$INSTDIR\\$\${APP_DIR_NAME}"
-  DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\$\${APP_ID}"
-  DeleteRegKey HKCU "Software\\$\${APP_ID}"
-SectionEnd
-`
+  ReadRegStr $INSTDIR HKCU "Software\\@@APP_ID@@" "InstallDir"
+  Delete "$SMPROGRAMS\\@@APP_NAME@@\\@@APP_NAME@@.lnk"
+  Delete "$SMPROGRAMS\\@@APP_NAME@@\\卸载.lnk"
+  RMDir "$SMPROGRAMS\\@@APP_NAME@@"
+  RMDir /r "$INSTDIR\\@@APP_DIR_NAME@@"
+  DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\@@APP_ID@@"
+  DeleteRegKey HKCU "Software\\@@APP_ID@@"
+SectionEnd`.replaceAll('@@APP_NAME@@', 'DeepSeek Harness Desktop BUN').replaceAll('@@APP_ID@@', 'DeepSeekHarnessDesktopBUN').replaceAll('@@APP_DIR_NAME@@', appDirName)
 
 const nsiPath = join(projectRoot, 'build', 'installer-windows.nsi')
 await Bun.write(nsiPath, nsi)
