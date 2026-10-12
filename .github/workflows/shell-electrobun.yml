@@ -174,6 +174,8 @@ jobs:
           Start-Process -FilePath $setup.FullName -ArgumentList '/S','/D=C:\dsh-smoke' -Wait
           if (-not (Test-Path 'C:\dsh-smoke')) { throw '静默安装后没有安装目录' }
           Get-ChildItem C:\dsh-smoke | Select-Object -First 12 | ForEach-Object { $_.Name }
+          # 诊断：装出来的树里 payload 归档/版本文件在哪（launcher 报 No metadata marker 时用它定位）
+          Get-ChildItem C:\dsh-smoke -Recurse -Include *.tar.zst,version.json,build.json -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host ("{0}  {1}" -f $_.FullName, $_.Length) }
       - name: 无窗口启动 + SHELL-READY 断言
         if: runner.os == 'Windows'
         shell: pwsh
