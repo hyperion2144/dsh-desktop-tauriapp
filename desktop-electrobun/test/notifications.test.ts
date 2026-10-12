@@ -267,6 +267,9 @@ describe('音效格式表与系统音', () => {
   test('系统默认提示音（D7）：三平台各有命令，Linux 无主题音则静默', () => {
     expect(systemDefaultSoundCommand('darwin')?.[0]).toBe('afplay')
     expect(systemDefaultSoundCommand('win32')?.[0]).toBe('powershell')
-    expect(systemDefaultSoundCommand('linux')).toBeNull()
+    // Linux：有 freedesktop 主题音则给 aplay 命令，没有则静默（null）——两种都合法，
+    // runner 镜像是否带音效文件不受我们控制（ubuntu-26 已自带），不能断言具体值。
+    const linux = systemDefaultSoundCommand('linux')
+    expect(linux === null || linux[0] === 'aplay').toBe(true)
   })
 })

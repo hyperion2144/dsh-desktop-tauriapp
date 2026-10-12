@@ -102,6 +102,12 @@ jobs:
         working-directory: desktop-electrobun
         run: bun install --frozen-lockfile
 
+      # 内置 dsh 运行时树（goal 第 1 条）：必须在 prepare:bundle 之前装好（它会把树拷进包内资源）；
+      # 不准备的话产物里没有 app/dsh，干净机器首启直接「找不到可用的 dsh 运行时」。
+      # assert-artifact 已把这条列为必需标志，缺了就红（首轮实测拦住过）。
+      - name: 装配内置 dsh 运行时（随包）
+        run: node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
+
       # 原生通知桥（native/libdsh-notify.dylib）也是单测的输入之一（「dylib 就位」那条），
       # 所以先准备好再跑测试；非 macOS 上 build:native 自己跳过。
       - name: 准备（原生通知桥 + 包内资源）
@@ -120,10 +126,6 @@ jobs:
         working-directory: desktop-electrobun
         run: bun test
 
-      # 内置 dsh 运行时树（goal 第 1 条）：不准备的话产物里没有 app/dsh，干净机器首启直接
-      # 「找不到可用的 dsh 运行时」。assert-artifact 已把这条列为必需标志，缺了就红。
-      - name: 装配内置 dsh 运行时（随包）
-        run: node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
       - name: 打包（Electrobun，CEF）
         working-directory: desktop-electrobun
         shell: bash
