@@ -166,26 +166,40 @@ function displayBounds(): DisplayBounds[] {
 }
 
 /** 落盘几何 → 可用几何；越界/太小/坏数据一律回默认（外接屏拔掉后不能把窗口丢在屏幕外）。 */
-function restoreWindowFrame(): WindowFrame {
-  const saved = sanitizeFrame(readWindowFrame(windowStateFile), displayBounds())
+/** D3：每窗几何记忆——主窗沿用 window.json，其余 profile 各存 window-<profile>.json */
+function windowStateFileOf(profile: string): string {
+  return profile === instanceProfile ? windowStateFile : join(appSupportDir(), `window-${profile}.json`)
+}
+
+function restoreWindowFrame(profile: string = instanceProfile): WindowFrame {
+  const saved = sanitizeFrame(readWindowFrame(windowStateFileOf(profile)), displayBounds())
   if (saved === null) return { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT, x: 0, y: 0 }
   console.log(`[shell] 还原窗口位置：${String(saved.x)},${String(saved.y)} ${String(saved.width)}×${String(saved.height)}`)
   return saved
 }
 
-/** 拖动/缩放会连续触发：合并 400ms 只写一次。 */
-let saveFrameTimer: ReturnType<typeof setTimeout> | null = null
-function scheduleFrameSave(win: BrowserWindow): void {
-  if (saveFrameTimer !== null) clearTimeout(saveFrameTimer)
-  saveFrameTimer = setTimeout(() => {
-    saveFrameTimer = null
-    try {
-      const frame = win.getFrame()
-      writeWindowFrame(windowStateFile, { x: Math.round(frame.x), y: Math.round(frame.y), width: Math.round(frame.width), height: Math.round(frame.height) })
-    } catch (error) {
-      console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
-    }
-  }, 400)
+/** 拖动/缩放会连续触发：合并 400ms 只写一次（D3：按 profile 各写各的文件） */
+const frameSaveTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function scheduleFrameSave(win: BrowserWindow, profile: string): void {
+  const existing = frameSaveTimers.get(profile)
+  if (existing !== undefined) clearTimeout(existing)
+  frameSaveTimers.set(
+    profile,
+    setTimeout(() => {
+      frameSaveTimers.delete(profile)
+      try {
+        const frame = win.getFrame()
+        writeWindowFrame(windowStateFileOf(profile), {
+          x: Math.round(frame.x),
+          y: Math.round(frame.y),
+          width: Math.round(frame.width),
+          height: Math.round(frame.height),
+        })
+      } catch (error) {
+        console.warn(`[shell] 窗口几何落盘失败：${String(error)}`)
+      }
+    }, 400),
+  )
 }
 
 /** 版本目录缓存：托盘子菜单用它渲染「↓ 下载并切换」，但不该每刷一次托盘就打网络（旧壳也拿缓存）。 */
@@ -466,7 +480,7 @@ function reloadWindow(profile: string, url: string): void {
 function createProfileWindow(profile: string, svc: ShellService): BrowserWindow {
   const isBoot = profile === instanceProfile
   const index = windows.size
-  const frame = index === 0 ? restoreWindowFrame() : offsetFrame(restoreWindowFrame(), index)
+  const frame = index === 0 ? restoreWindowFrame(profile) : offsetFrame(restoreWindowFrame(profile), index)
   const win = new BrowserWindow({
     title: isBoot ? APP_NAME : `${APP_NAME} · ${profile}` ,
     url: svc.state.pageUrl,
@@ -535,11 +549,9 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     }
     refreshTray()
   })
-  // 位置/尺寸记忆只记主窗（多窗口共用一份 window.json；按 profile 各记一份是另一件事）
-  if (isBoot) {
-    win.on('resize', () => scheduleFrameSave(win))
-    win.on('move', () => scheduleFrameSave(win))
-  }
+  // D3：每窗各自记几何（windowStateFileOf 按 profile 分文件；scheduleFrameSave 带目标文件）
+  win.on('resize', () => scheduleFrameSave(win, profile))
+  win.on('move', () => scheduleFrameSave(win, profile))
   return win
 }
 
@@ -961,10 +973,8 @@ const shutdown = async (): Promise<void> => {
   // 托盘先摘：否则退出过程中它还会响菜单（点了就是另一个 shutdown）
   tray?.destroy()
   tray = null
-  if (saveFrameTimer !== null) {
-    clearTimeout(saveFrameTimer)
-    saveFrameTimer = null
-  }
+  for (const timer of frameSaveTimers.values()) clearTimeout(timer)
+  frameSaveTimers.clear()
   try {
     // 先摘服务面与宿主（SIGTERM → 宽限期 → SIGKILL，并等它真退出）再让框架退出；
     // 不能像以前那样发完信号就走——壳一退，宿主就被 launchd 收养，变成占着会话的孤儿。
