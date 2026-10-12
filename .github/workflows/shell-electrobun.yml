@@ -183,7 +183,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1
+          # Windows 版式：launcher.exe 与 metadata.json 同层（应用根），bin\ 下那个不是自解压入口
+          $appRoot = Get-ChildItem C:\dsh-smoke -Directory | Select-Object -First 1
+          $app = Get-ChildItem $appRoot.FullName -Filter launcher.exe | Select-Object -First 1
+          if ($null -eq $app) { $app = Get-ChildItem C:\dsh-smoke -Recurse -Filter launcher.exe | Select-Object -First 1 }
           if ($null -eq $app) { throw '安装树里找不到 launcher.exe' }
           # 内置树随包断言：Windows 是两段式（安装位 = launcher + payload 归档，app\dsh
           # 要等首次启动自解压才物化），所以放到 SHELL-READY 之后断言（见下方）。
