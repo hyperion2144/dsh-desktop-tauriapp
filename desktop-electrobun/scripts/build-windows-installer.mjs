@@ -22,14 +22,18 @@ import { spawnSync } from 'node:child_process'
 const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
 
-/** 找 Windows 构建目录：优先 stable-windows-x64，其次名字带 windows 的最新一个。 */
+/** 找 Windows 构建目录：Electrobun 在 Windows 上的目录名不带 'windows' 字样（CI 实测），
+ * 所以不按名字猜——挨个看哪份里能用 findAppDir 找到 launcher.exe，优先 stable-* 与最新名。 */
 function pickBuildDir() {
   if (!existsSync(buildRoot)) return null
   const entries = readdirSync(buildRoot).filter((name) => !name.startsWith('.'))
-  const stable = entries.filter((name) => name.startsWith('stable-windows'))
-  const windows = entries.filter((name) => name.includes('windows'))
-  const chosen = (stable.length > 0 ? stable : windows).sort().pop()
-  return chosen === undefined ? null : join(buildRoot, chosen)
+  const stable = entries.filter((name) => name.startsWith('stable-'))
+  const ordered = (stable.length > 0 ? stable : entries).sort().reverse()
+  for (const name of ordered) {
+    const dir = join(buildRoot, name)
+    if (findAppDir(dir) !== null) return dir
+  }
+  return null
 }
 
 /** 在构建目录里找「应用目录」：含 launcher.exe（Electrobun Windows 的可执行外壳）的那层。 */
