@@ -23,7 +23,7 @@ const projectRoot = resolve(import.meta.dir, '..')
 const buildRoot = join(projectRoot, 'build')
 
 /** 找 Windows 构建目录：Electrobun 在 Windows 上的目录名不带 'windows' 字样（CI 实测），
- * 所以不按名字猜——挨个看哪份里能用 findAppDir 找到 launcher.exe，优先 stable-* 与最新名。 */
+ * 所以不按名字猜——挨个看哪份里能找到 launcher.exe，优先 stable-* 与最新名。 */
 function pickBuildDir() {
   if (!existsSync(buildRoot)) return null
   const entries = readdirSync(buildRoot).filter((name) => !name.startsWith('.'))
@@ -31,14 +31,14 @@ function pickBuildDir() {
   const ordered = (stable.length > 0 ? stable : entries).sort().reverse()
   for (const name of ordered) {
     const dir = join(buildRoot, name)
-    if (findAppDir(dir) !== null) return dir
+    if (findLauncher(dir) !== null) return dir
   }
   return null
 }
 
-/** 在构建目录里找「应用目录」：含 launcher.exe（Electrobun Windows 的可执行外壳）的那层。 */
-function findAppDir(root, depth = 0) {
-  if (depth > 3 || !existsSync(root)) return null
+/** 找 launcher.exe 的完整路径（depth ≤ 4）：Windows 的应用根下是 bin/launcher.exe。 */
+function findLauncher(root, depth = 0) {
+  if (depth > 4 || !existsSync(root)) return null
   for (const entry of readdirSync(root)) {
     const full = join(root, entry)
     let info
@@ -47,9 +47,9 @@ function findAppDir(root, depth = 0) {
     } catch {
       continue
     }
+    if (info.isFile() && entry === 'launcher.exe') return full
     if (!info.isDirectory()) continue
-    if (existsSync(join(full, 'launcher.exe'))) return full
-    const hit = findAppDir(full, depth + 1)
+    const hit = findLauncher(full, depth + 1)
     if (hit !== null) return hit
   }
   return null
@@ -74,12 +74,26 @@ if (buildDir === null) {
   console.error(`[installer] build/ 下没有 Windows 构建目录：${buildRoot}`)
   process.exit(1)
 }
-const appDir = findAppDir(buildDir)
-if (appDir === null) {
-  console.error(`[installer] ${buildDir} 里找不到应用目录（launcher.exe 那层）`)
+// 应用根 = 构建目录下唯一的顶层目录（mac 是 .app，Windows 是 DeepSeekHarnessDesktopBUN/）。
+// 打包整棵树：launcher + Resources/payload 归档都要装下去，首启自解压才有的解。
+const launcher = findLauncher(buildDir)
+if (launcher === null) {
+  console.error(`[installer] ${buildDir} 里找不到 launcher.exe`)
   process.exit(1)
 }
-const appDirName = appDir.slice(buildDir.length + 1).split(sep)[0] ?? ''
+const topLevel = readdirSync(buildDir).filter((name) => {
+  try {
+    return statSync(join(buildDir, name)).isDirectory()
+  } catch {
+    return false
+  }
+})
+if (topLevel.length !== 1) {
+  console.error(`[installer] 构建目录顶层应有且只有一个应用目录，实际：${topLevel.join(', ')}`)
+  process.exit(1)
+}
+const appDir = join(buildDir, topLevel[0] ?? '')
+const appDirName = topLevel[0] ?? ''
 const iconPath = join(projectRoot, 'resources', 'app-icon.ico')
 if (!existsSync(iconPath)) {
   console.error('[installer] 缺 resources/app-icon.ico（先跑 prepare:bundle 或提交仓内源）')
@@ -141,10 +155,33 @@ await Bun.write(nsiPath, nsi)
 const sourceCount = listFilesRecursive(appDir).length
 console.log(`[installer] 应用目录：${appDir}（${String(sourceCount)} 个文件）`)
 console.log(`[installer] NSIS 脚本：${nsiPath}`)
+/** 定位 makensis：PATH 上先找，找不到再探 choco/NSIS 的固定安装位置（CI 刚装完时 PATH 可能还没刷新）。 */
+function resolveMakensis() {
+  const probe = spawnSync(process.platform === 'win32' ? 'where.exe' : 'which', ['makensis'], { encoding: 'utf8' })
+  const fromPath = typeof probe.stdout === 'string' ? probe.stdout.split(/\r?\n/)[0]?.trim() ?? '' : ''
+  if (probe.status === 0 && fromPath !== '') return fromPath
+  const candidates = process.platform === 'win32'
+    ? [
+        'C:\\Program Files (x86)\\NSIS\\makensis.exe',
+        'C:\\ProgramData\\chocolatey\\lib\\nsis\\tools\\nsis\\Bin\\makensis.exe',
+        'C:\\ProgramData\\chocolatey\\bin\\makensis.exe',
+      ]
+    : ['/usr/local/bin/makensis', '/opt/homebrew/bin/makensis']
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
 
-const makensis = spawnSync('makensis', [nsiPath], { stdio: 'inherit' })
+const makensisPath = resolveMakensis()
+if (makensisPath === null) {
+  console.error('[installer] 找不到 makensis（GitHub 镜像自带；本地 choco install nsis）')
+  process.exit(1)
+}
+console.log(`[installer] makensis：${makensisPath}`)
+const makensis = spawnSync(makensisPath, [nsiPath], { stdio: 'inherit' })
 if (makensis.status !== 0 || makensis.error !== undefined) {
-  console.error('[installer] makensis 失败（PATH 里没有 NSIS？GitHub 镜像自带；本地 choco install nsis）')
+  console.error('[installer] makensis 编译失败（看上方 NSIS 输出定位 .nsi 行号）')
   process.exit(1)
 }
 const info = statSync(outFile)
