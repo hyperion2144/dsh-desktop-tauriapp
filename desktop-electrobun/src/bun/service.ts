@@ -210,6 +210,8 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     shellLog.line(line)
     options.onLog?.(line)
   }
+  /** D6：运行时回退提示先记着，notifier 建好后补发（回退发生在 notifier 创建之前） */
+  let pendingRuntimeNote: string | null = null
 
   // ---- 设置：壳自己的一份（desktop-settings.json，旧壳的 settings.yaml 只读迁移一次）----
   const loaded = loadSettings({ home, log })
@@ -234,6 +236,11 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     `运行时 = ${paths.runtimeDir}（${paths.runtimeKind}${paths.runtimeVersion === null ? '' : ` ${paths.runtimeVersion}`}）| dist = ${paths.distDir} | profile = ${paths.profile} | home = ${paths.home}`
   )
   if (paths.runtimeNote !== null) log(`运行时回退：${paths.runtimeNote}`)
+  if (paths.runtimeNote !== null) {
+    log(`运行时回退：${paths.runtimeNote}`)
+    // D6：notifier 在下面才建好，先记下，建好后补发
+    pendingRuntimeNote = paths.runtimeNote
+  }
   // 回收站：上一次卸载留下的运行时目录到这时才真删（旧壳 #114：直接删会动到与运行树
   // 共享 hardlink 的 ctime，触发 dsh 插件 rebuilt → 白屏），所以只能在 spawn 之前清。
   const purgedTrash = purgeRuntimeTrash(paths.appSupport, log)
@@ -445,6 +452,10 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
           }
         : undefined,
     })
+  if (pendingRuntimeNote !== null) {
+    notifier.notify(SCENARIO.CONFIG_ERROR, `运行时回退：${pendingRuntimeNote}`)
+    pendingRuntimeNote = null
+  }
   if (notifyBridge.available) {
     notifyBridge.start()
     // start() 是异步的（原生层要等系统回调），第一行日志只能报「当时快照」；

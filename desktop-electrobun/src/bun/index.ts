@@ -92,6 +92,8 @@ const windows = new Map<string, ProfileWindow>()
 const services = new Map<string, ShellService>()
 /** F8：正在「退出（停止实例）」的 profile——will-close 对它们放行真关窗 */
 const stoppingProfiles = new Set<string>()
+/** D5：首次关窗回托盘提示过一次的 profile（进程生命周期内一次） */
+const trayHintShown = new Set<string>()
 /** 最近聚焦的窗口 profile；托盘「显示/隐藏窗口」作用在它身上（旧壳 focused_window_label）。 */
 let focusedProfile: string | null = null
 let mainWindow: BrowserWindow | null = null
@@ -522,6 +524,11 @@ function createProfileWindow(profile: string, svc: ShellService): BrowserWindow 
     // F8：「退出（停止实例）」主动销毁窗口时不拦截（stoppingProfiles 由 stopProfileFromTray 置位）
     if (stoppingProfiles.has(profile)) return
     if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray()) {
+    // D5：首次关窗回托盘时提示一次（旧壳关窗提示的等价物；用户知道了就不再弹）
+    if (closeAction(profile, instanceProfile) === 'hide-to-tray' && closeToTray() && !trayHintShown.has(profile)) {
+      trayHintShown.add(profile)
+      notifier.notify(SCENARIO.WINDOW_LIFECYCLE, '窗口已最小化到托盘，点托盘图标可找回。')
+    }
       ;(event as { response?: unknown }).response = { allow: false }
       console.log(`[shell] 关窗回托盘（${profile} 窗口隐藏，进程继续）`)
       win.hide()
