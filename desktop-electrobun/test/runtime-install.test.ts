@@ -223,7 +223,7 @@ describe('installRuntime', () => {
     expect(workspace).toContain('allowBuilds:')
     expect(workspace).toContain('node-pty: true')
     expect(readFileSync(join(dir, '.npmrc'), 'utf8')).toBe(
-      `node-linker=hoisted\nstore-dir=${join(appSupport, 'runtimes', '.pnpm-store')}\n`,
+      `node-linker=hoisted\nstore-dir=${join(appSupport, 'runtimes', '.pnpm-store').replace(/\\/g, '/')}\n`,
     )
     expect(JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))).toEqual({ name: 'dsh-runtime-9.9.9', private: true })
 

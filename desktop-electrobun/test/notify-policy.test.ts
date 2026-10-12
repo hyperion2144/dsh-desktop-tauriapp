@@ -126,7 +126,8 @@ describe('notify-policy：声音档位', () => {
   })
 
   test('音效目录与上限常量', () => {
-    expect(soundsDir('/tmp/home')).toBe('/tmp/home/sounds')
+    // 期望值走 join：Windows 上 soundsDir 返回反斜杠路径
+    expect(soundsDir('/tmp/home')).toBe(join('/tmp/home', 'sounds'))
     expect(MAX_SOUND_BYTES).toBe(5 * 1024 * 1024)
     expect(MAX_SOUND_SECONDS).toBe(10)
   })
