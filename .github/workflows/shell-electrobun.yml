@@ -106,7 +106,12 @@ jobs:
       # 不准备的话产物里没有 app/dsh，干净机器首启直接「找不到可用的 dsh 运行时」。
       # assert-artifact 已把这条列为必需标志，缺了就红（首轮实测拦住过）。
       - name: 装配内置 dsh 运行时（随包）
-        run: node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
+        # 注意：装配脚本会整目录重进 resources/dsh（rmSync + npm 装），把 tracked 的
+        # bun-preload.mjs（Bun 兼容层单一来源）也一起抹掉 —— 装完立刻从 git 恢复它，
+        # 否则下一步 prepare:bundle 找不到来源直接失败（run 38291291385 实测）。
+        run: |
+          node desktop/scripts/prepare-builtin-runtime.mjs --variant latest
+          git checkout -- desktop/src-tauri/resources/dsh/bun-preload.mjs
 
       # 原生通知桥（native/libdsh-notify.dylib）也是单测的输入之一（「dylib 就位」那条），
       # 所以先准备好再跑测试；非 macOS 上 build:native 自己跳过。
