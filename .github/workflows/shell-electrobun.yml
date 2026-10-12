@@ -202,9 +202,9 @@ jobs:
           $env:DSH_DESKTOP_NO_SINGLETON = '1'
           # launcher 自己知道怎么引导自己的载荷（macOS 实测裸跑即可），不用替它拼 main.js 参数
           Start-Process -FilePath $app.FullName -WorkingDirectory (Split-Path $app.FullName) -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
-          # launcher 可能立即把工作交给子进程：轮询日志等 SHELL-READY（最长 90 秒）
+          # launcher 要先把 399MB payload 解压安装完才拉起应用：轮询日志等 SHELL-READY（最长 360 秒）
           $ready = $false
-          foreach ($i in 1..45) {
+          foreach ($i in 1..180) {
             Start-Sleep -Seconds 2
             $text = Get-Content $log -Raw -ErrorAction SilentlyContinue
             if ($text -and $text -match 'SHELL-READY') { $ready = $true; break }
@@ -212,7 +212,7 @@ jobs:
           if (-not $ready) {
             Write-Host '--- stdout ---'; Get-Content $log -ErrorAction SilentlyContinue | Select-Object -First 30
             Write-Host '--- stderr ---'; Get-Content ($log + '.err') -ErrorAction SilentlyContinue | Select-Object -First 30
-            throw '90 秒内未拿到 SHELL-READY'
+            throw '360 秒内未拿到 SHELL-READY'
           }
           (Get-Content $log -Raw | Select-String -Pattern 'SHELL-READY.*').Matches.Value | Write-Host
           # 首启自解压完成后，内置 dsh 树必须已物化（goal 第 1 条的 Windows 半边）
