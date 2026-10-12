@@ -8,7 +8,8 @@ import { basename, dirname, join } from 'node:path'
 import { choosePort, claimFor, parseClaims, pruneClaims, releaseClaim, upsertClaim } from '../shared/ports.ts'
 import { decideClaim, extractTokenFromUrl } from '../shared/port-claim.ts'
 import { startLaneForwarder, type LaneForwarder } from './lane-forwarder.ts'
-import { normalizeRemoteUrl, remoteDisplay, remoteOrigin } from '../shared/remote.ts'
+import { normalizeRemoteUrl, remoteDisplay, remoteHostPort, remoteOrigin } from '../shared/remote.ts'
+import { createWatchdogState, tickWatchdog, WATCHDOG_INTERVAL_MS } from '../shared/watchdog.ts'
 import { portOpen, stopPortOwner } from './port-owner.ts'
 import { startHost } from './host.ts'
 import { readLoginShellEnvironment, resolveLoginShellTimeoutMs } from './login-shell-env.ts'
@@ -903,6 +904,62 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
   log(`端口台账：${JSON.stringify(claims)}`)
   options.onStage?.('ready')
 
+  // ---- D2 守护器：周期 TCP 判活（旧壳 lib.rs 守护器的等价物，语义照旧壳）----
+  // 只管「运行中」：readyOnce 之前（启动/重启期/等选模式）归 spawn 与守护器退出事件管。
+  let readyOnce = remoteAddr !== null || decision === 'free'
+  const watchdog = createWatchdogState()
+  let watchdogTimer: ReturnType<typeof setInterval> | null = null
+  const probePort = (): number => {
+    if (remoteAddr !== null) {
+      const port = Number(remoteHostPort(remoteAddr).split(':').pop() ?? '')
+      if (Number.isInteger(port) && port > 0) return port
+    }
+    return upstreamPort
+  }
+  const watchdogTick = async (): Promise<void> => {
+    if (stopping || !readyOnce) return
+    const up = await portOpen(probePort())
+    const verdict = tickWatchdog(watchdog, {
+      up,
+      spawned: host !== undefined,
+      remote: remoteAddr !== null,
+      now: Date.now(),
+    })
+    if (verdict.kind === 'healthy') {
+      if (verdict.reset) log('[watchdog] 连续健康 ≥2 分钟，自愈计数已重置')
+      return
+    }
+    if (verdict.kind === 'remote-down') {
+      if (verdict.notify) notifier.notify(SCENARIO.SERVICE_HEALTH, `远程 dsh 不可达：${verdict.verbose}`)
+      return
+    }
+    if (verdict.kind === 'external-down') {
+      log(`[watchdog] 外部 dsh 实例不可达，未自动重启（那是用户的实例）`)
+      if (verdict.notify) notifier.notify(SCENARIO.SERVICE_HEALTH, '复用的外部 dsh 实例已停止，请手动重启服务')
+      return
+    }
+    if (verdict.kind === 'gave-up') {
+      log('[watchdog] 连续自动恢复失败 3 次，停止自愈')
+      notifier.notify(SCENARIO.SERVICE_HEALTH, 'dsh 服务异常：连续自动恢复失败，请手动重启')
+      return
+    }
+    log(`[watchdog] dsh 不可达（TCP 探测失败），自动重启（第 ${String(verdict.attempt)} 次）`)
+    notifier.notify(SCENARIO.SERVICE_HEALTH, `dsh 服务异常，正在自动重启（第 ${String(verdict.attempt)} 次）`)
+    if (host !== undefined) {
+      // 交给退出事件那条路：守护器杀旧拉新，watchdog 的封顶比它的退避更严
+      void host.stop().catch(() => {})
+    } else if (remoteAddr !== null) {
+      try {
+        await connect()
+        serverOptions.upstreamOrigin = hostOrigin !== '' ? hostOrigin : serverOptions.upstreamOrigin
+        applyHost()
+      } catch (error) {
+        log(`[watchdog] 远程重连失败：${String(error)}`)
+      }
+    }
+  }
+  watchdogTimer = setInterval(() => { void watchdogTick() }, WATCHDOG_INTERVAL_MS)
+
   // 写设置的唯一路径：命令表（设置面板）与壳侧（托盘切运行时）都走它
   const saveSettings = (patch: Record<string, unknown>): DesktopSettings => {
     liveSettings = updateSettings(home, patch, log)
@@ -1028,6 +1085,7 @@ export async function startService(options: ServiceOptions): Promise<ShellServic
     // 多窗口：不再就地换 profile（旧壳的「托盘切换 profile」在新壳里就是把那份 profile 的窗口开到前台）。
     stop: async () => {
       stopping = true
+      if (watchdogTimer !== null) clearInterval(watchdogTimer)
       dshStatusCode = 6
       ledger.reset()
       server.stop()

@@ -6,6 +6,7 @@
 
 ### 桌面壳（Electrobun）
 
+- 守护器 TCP 判活（D2，旧壳 lib.rs 守护器的等价物）：新增 `desktop-electrobun/src/shared/watchdog.ts`（纯裁决：健康 = TCP 连接成功；运行中连不上一次即分流——远程/外部实例只提示不代拉，本地拉起的立即自愈；自愈每轮 3 次封顶、连续健康 ≥2 分钟才重置计数、同类提示 5 分钟节流）；service 每 5s 探测上游端口（远程模式探远程 host:port），判死本地实例交守护器杀旧拉新，放弃自愈发 service.health 通知。
 - 手机稳定接入点 lane 转发器（F4，旧壳 `network/forwarder.rs` #94 的等价物）：新增 `desktop-electrobun/src/bun/lane-forwarder.ts`，壳在遗留 lane 端口（settings 的 `lane_port`，默认 3091）监听并把 TCP 原样双向转发到焦点实例的 lane——手机旧配置零改动，新连接落焦点实例、存量长连接不切换；外部 dsh 占了端口时警告后退场（手机直连它即可）。窗口焦点切换/关闭时更新目标；多实例下只有先起的服务面持有转发器。
 - 托盘「dsh 服务地址」分组（F7，旧壳 `remote_menu_items` #136 的等价物）：`desktop-electrobun/src/bun/tray-menu.ts` 新增 `remoteMenuItems()`（本地/远程同层单选，● 当前生效 / ○ 可选，标签用 `remoteDisplay`（host[:port]）绝不含 token）；托盘菜单在「运行时版本」后插入该子菜单，点选即保存 `remote_addr` 并重启 dsh——远程不可用（token 失效 401）时不用手改配置文件就能一键切回本地。
 - 托盘「PROFILE 窗口」重排 + 每实例退出（F8/F9，旧壳 `ui/tray.rs:63-79` 的等价物）：每 profile 一层子菜单（● 聚焦中 / 运行中 带页面端口），内含「聚焦窗口」与运行中的「退出（停止实例）」（销毁窗口 + stop 服务面）；末尾挂「新建 Profile…」「迁移 Profile…」——弹一张小表单窗（`src/bun/profile-dialog.ts`）POST `/__shell__/profile-op`，服务面落地（create = 脚手架 + 自动开窗，migrate = 旧壳同一条复制依赖树 + pnpm install 路径，目标占用/重名/覆盖确认都有校验）。
