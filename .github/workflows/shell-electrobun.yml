@@ -176,6 +176,8 @@ jobs:
           Get-ChildItem C:\dsh-smoke | Select-Object -First 12 | ForEach-Object { $_.Name }
           # 诊断：装出来的树里 payload 归档/版本文件在哪（launcher 报 No metadata marker 时用它定位）
           Get-ChildItem C:\dsh-smoke -Recurse -Include *.tar.zst,version.json,build.json -ErrorAction SilentlyContinue | Select-Object -First 20 | ForEach-Object { Write-Host ("{0}  {1}" -f $_.FullName, $_.Length) }
+          # 诊断 2：装出来的树全貌（深度 3），看 launcher 旁边的 Resources 里有没有 main.js/build.json
+          Get-ChildItem C:\dsh-smoke -Recurse -Depth 3 -ErrorAction SilentlyContinue | Select-Object -First 60 | ForEach-Object { Write-Host $_.FullName }
       - name: 无窗口启动 + SHELL-READY 断言
         if: runner.os == 'Windows'
         shell: pwsh
