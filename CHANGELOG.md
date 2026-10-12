@@ -6,6 +6,8 @@
 
 ### 桌面壳（Electrobun）
 
+- Windows/Linux 布局对齐旧壳（维护者口径）：中间列顶部保留整条 chrome 条（拖拽区 + 窗口三键，内容 padding 顶下、右侧 panel 覆写 top）——回退 round 3 里「三键只占右上角」的布局改动；仅保留 Electrobun CSS 拖拽区与壳端点三键。侧栏顶部间隔（macOS 红绿灯腾位）在代码里本就是 darwin 独占：stock 布局的 `--dsh-frame-top-clearance:48px` 只挂在 `html[data-platform=darwin]`，壳的侧栏 padding 也只在 darwin 分支。
+
 - Windows 安装外壳应用图标（A2 第一步）：`win.icon` 指向仓内新增的 `resources/app-icon.ico`（由 `icon.png` 生成的 16/32/48/64/128/256 多尺寸 ICO，63KB；Electrobun 把它用于提取器安装外壳、桌面快捷方式与任务栏）；prepare-bundle 在仓内源缺失时退回旧壳单尺寸 icon.ico 并警告。
 
 ### 桌面壳（Electrobun）

@@ -396,18 +396,13 @@ export function installLocalChrome(platform: DesktopClientPlatform): () => void 
       }
       if (collapsed) widenCollapsedRail(frame)
     } else {
-      // A5：窗口控制只占右上角，不再把中间列内容顶下来（logo 回到自然位置）；
-      // 拖拽交给内容自己的标题行（app-region CSS），空隙由标题行自己的留白承担。
-      strip.style.cssText = `right:0;top:0;width:${CAPTION_CONTROLS_WIDTH}px;height:${height}px;`
-      drag.style.display = 'none'
-      const header = center?.querySelector('[data-conversation-header-leading]')?.parentElement ?? null
-      if (header instanceof HTMLElement) {
-        header.classList.add('electrobun-webkit-app-region-drag')
-        header.style.paddingRight = `${CAPTION_CONTROLS_WIDTH}px`
-        for (const el of header.querySelectorAll('button, input, select, textarea, a, [role="button"]')) {
-          el.classList.add('electrobun-webkit-app-region-no-drag')
-        }
-      }
+      // 布局对齐旧壳（维护者口径）：Windows/Linux 中间列顶部保留一整条 chrome 条
+      //（拖拽区 + 右侧窗口三键），中间列内容用 padding 顶下去，右侧 panel 覆写 top。
+      strip.style.cssText = `left:${sidebarWidth}px;right:0;top:0;height:${height}px;`
+      drag.style.cssText = `position:absolute;top:0;bottom:0;left:0;right:${CAPTION_CONTROLS_WIDTH}px;`
+      if (center !== null) center.style.paddingTop = `${height}px`
+      const rightPanel = rightColumn?.querySelector('[data-sidebar-right-panel]')
+      if (rightPanel !== null) (rightPanel as HTMLElement).style.top = `${height}px`
     }
   }
 
