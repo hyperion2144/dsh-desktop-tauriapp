@@ -5,6 +5,7 @@
 // 少了推送就是「永远正在打开…」）。
 
 import { describe, expect, test } from 'bun:test'
+import { dirname, join } from 'node:path'
 import {
   EMPTY_GUEST_STATE,
   GUEST_DEFAULT_URL,
@@ -208,9 +209,10 @@ describe('原生核定位', () => {
       'darwin',
     )
     expect(candidates[0]).toBe('/tmp/core.dylib')
-    expect(candidates[1]).toBe('/app/Contents/MacOS/libElectrobunCore.dylib')
-    expect(candidates[2]).toBe('/app/Contents/Resources/libElectrobunCore.dylib')
-    expect(candidates).toContain('/src/bun/libElectrobunCore.dylib')
+    // 期望值用 join 算：Windows 上 join 产出反斜杠路径，写死 `/` 会误报
+    expect(candidates[1]).toBe(join(dirname('/app/Contents/MacOS/launcher'), 'libElectrobunCore.dylib'))
+    expect(candidates[2]).toBe(join('/app/Contents/Resources', 'libElectrobunCore.dylib'))
+    expect(candidates).toContain(join('/src/bun', 'libElectrobunCore.dylib'))
   })
 
   test('找不到核：不抛，回 core:null 与原因', async () => {

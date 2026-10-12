@@ -131,7 +131,8 @@ describe('库定位顺序（环境变量 > 包内 runtime > 可执行体同级 >
       resourcesDir: '/res',
       exists: (candidate) => {
         seen.push(candidate)
-        return candidate.startsWith('/res/')
+        // 断言与实现都走 join，Windows 上的反斜杠路径才不会把 exists 断成 false
+        return candidate.startsWith(join('/res'))
       },
     })
     expect(path).toBe(join('/res', 'runtime', NOTIFY_LIB_NAME))
@@ -146,7 +147,7 @@ describe('库定位顺序（环境变量 > 包内 runtime > 可执行体同级 >
       resourcesDir: null,
       exists: (candidate) => {
         seen.push(candidate)
-        return candidate.includes('Contents/Resources/runtime')
+        return candidate.includes(join('Contents', 'Resources', 'runtime'))
       },
     })
     expect(path).toBe(join('/Applications/DeepSeek Harness Desktop.app/Contents/Resources/runtime', NOTIFY_LIB_NAME))

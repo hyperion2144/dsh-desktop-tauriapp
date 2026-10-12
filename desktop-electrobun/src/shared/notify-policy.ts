@@ -9,6 +9,7 @@
 //   · `custom:<文件名>` → 应用侧播放 `$DSH_HOME/sounds/<文件名>`（白名单校验在下面）
 
 import { NOTIFICATION_SCENARIOS, type NotificationsConfig, type ScenarioMeta } from './settings.ts'
+import { join } from 'node:path'
 
 /** 场景 id 常量（与 settings 里的表一一对应；调用点写常量，避免手打错字符串）。 */
 export const SCENARIO = {
@@ -190,5 +191,6 @@ export function soundFormatMatches(name: string, head: Uint8Array): boolean {
 
 /** 音效目录：`$DSH_HOME/sounds/`（旧壳 `sounds_dir()`）。 */
 export function soundsDir(home: string): string {
-  return `${home}/sounds`
+  // 用 join 而不是模板拼接：Windows 上路径分隔符是反斜杠，拼出来的混搭分隔符在断言/日志里很难认
+  return join(home, 'sounds')
 }

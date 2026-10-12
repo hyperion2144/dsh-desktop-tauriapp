@@ -10,6 +10,7 @@
 // 不做的事（与规格一致）：通知**点击回调**（Electrobun 上游 #384 未支持）、通知中心去重。
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { basename, join } from 'node:path'
 import {
   decide,
   hasAllowedSoundExtension,
@@ -79,7 +80,7 @@ export function listSounds(home: string): string[] {
       .filter((name) => hasAllowedSoundExtension(name))
       .filter((name) => {
         try {
-          return statSync(`${soundsDir(home)}/${name}`).isFile()
+          return statSync(join(soundsDir(home), name)).isFile()
         } catch {
           return false
         }
@@ -96,7 +97,8 @@ export function listSounds(home: string): string[] {
  * 文件名白名单 → 扩展名魔数 → 大小上限，逐关不过就抛，过了就拷贝，返回入库后的文件名。
  */
 export function importSound(home: string, source: string): string {
-  const name = source.split('/').pop() ?? ''
+  // basename：Windows 上用户选的是 `C:\Users\…\ding.wav`，split('/') 会把整条路径当文件名
+  const name = basename(source)
   if (name === '' || !isValidSoundName(name)) throw new Error(`音效文件名不合法：${name}`)
   if (!hasAllowedSoundExtension(name)) {
     throw new Error(`不支持的音效格式（白名单：wav / mp3 / ogg）：${name}`)
@@ -116,7 +118,7 @@ export function importSound(home: string, source: string): string {
   if (!soundFormatMatches(name, head)) throw new Error('文件内容与扩展名不符（魔数校验失败）')
   const dir = soundsDir(home)
   mkdirSync(dir, { recursive: true })
-  copyFileSync(source, `${dir}/${name}`)
+  copyFileSync(source, join(dir, name))
   return name
 }
 
@@ -185,7 +187,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       log(`[notify] 音效格式不在白名单（wav/mp3/ogg）：${name}`)
       return null
     }
-    const path = `${soundsDir(options.home)}/${name}`
+    const path = join(soundsDir(options.home), name)
     if (!existsSync(path)) {
       log(`[notify] 音效文件不存在：${path}`)
       return null

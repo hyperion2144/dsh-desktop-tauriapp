@@ -218,7 +218,8 @@ describe('installRuntime', () => {
     const workspace = readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')
     expect(workspace.startsWith('packages: []\n')).toBe(true)
     expect(workspace).toContain('nodeLinker: hoisted')
-    expect(workspace).toContain(`storeDir: ${join(appSupport, 'runtimes', '.pnpm-store')}`)
+    // 产物把 storeDir 归一成正斜杠（pnpm 友好），断言跟着归一，Windows 上才对得上
+    expect(workspace).toContain(`storeDir: ${join(appSupport, 'runtimes', '.pnpm-store').replace(/\\/g, '/')}`)
     expect(workspace).toContain('allowBuilds:')
     expect(workspace).toContain('node-pty: true')
     expect(readFileSync(join(dir, '.npmrc'), 'utf8')).toBe(

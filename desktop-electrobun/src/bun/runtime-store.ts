@@ -8,7 +8,7 @@
 // - 目录抓取失败不抛给调用方：返回 `{entries, error}`，设置面板降级显示已下载版本（旧壳 #107）。
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import {
   DEFAULT_GITHUB_REPO,
   INSTALLED_MANIFEST,
@@ -202,9 +202,28 @@ function isFile(path: string): boolean {
   }
 }
 
+/** PATH 里的目录（Windows 用 `;` 分隔，POSIX 用 `:`）。*/
+function pathEntries(value: string): string[] {
+  return value
+    .split(delimiter)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '')
+}
+
+/** dsh 可执行文件的名字：Windows 上 npm 装出来的是 `dsh.cmd`（也可能有 `dsh.exe`）。*/
+function dshBinNames(platform: string = process.platform): string[] {
+  return platform === 'win32' ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh']
+}
+
+/** PATH 里所有可能的 dsh 可执行文件绝对路径（目录 × 名字）。*/
+function pathBinCandidates(value: string): string[] {
+  const names = dshBinNames()
+  return pathEntries(value).flatMap((dir) => names.map((name) => join(dir, name)))
+}
+
 /** 版本号键：`0.2.1-alpha.10` → [0,2,1,10]（用于 nvm 目录挑最高版本）。 */
 function versionKey(dir: string): number[] {
-  const name = dir.split('/').pop() ?? ''
+  const name = basename(dir)
   const match = /^v(\d+)\.(\d+)\.(\d+)/.exec(name)
   if (match === null) return [0, 0, 0]
   return [Number(match[1]), Number(match[2]), Number(match[3])]
@@ -233,8 +252,7 @@ export function resolveExternalDsh(
     }
     options.log?.(`DSH_BIN 指向的文件不存在：${explicit}`)
   }
-  for (const dir of (env.PATH ?? '').split(':').filter((entry) => entry !== '')) {
-    const candidate = join(dir, 'dsh')
+  for (const candidate of pathBinCandidates(env.PATH ?? '')) {
     if (file(candidate)) {
       options.log?.(`外部 dsh：在 PATH 中找到 ${candidate}`)
       return resolve(candidate)
@@ -400,7 +418,7 @@ function externalCandidates(
   const list: string[] = []
   const explicit = env.DSH_BIN
   if (explicit !== undefined && explicit !== '') list.push(resolve(explicit))
-  for (const dir of (env.PATH ?? '').split(':').filter((entry) => entry !== '')) list.push(join(dir, 'dsh'))
+  list.push(...pathBinCandidates(env.PATH ?? ''))
   list.push(...(options.commonCandidates ?? ['/opt/homebrew/bin/dsh', '/usr/local/bin/dsh', join(home, '.npm-global', 'bin', 'dsh')]))
   return list.filter((value, index) => list.indexOf(value) === index)
 }

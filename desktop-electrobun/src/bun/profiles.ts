@@ -6,6 +6,7 @@
 
 import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { basename } from 'node:path'
 
 export function profilesDir(home: string): string {
   return join(home, 'profiles')
@@ -27,6 +28,7 @@ export function listProfiles(home: string, current: string): string[] {
 
 /** 运行时来源标签：本轮只有「内置运行时」，外部 CLI / 下载运行时在运行时管理那一轮接上。 */
 export function runtimeLabel(runtimeDir: string): string {
-  const version = runtimeDir.split('/').filter((part) => part !== '').at(-1) ?? runtimeDir
+  // basename 而不是 split('/')：Windows 上运行时目录是反斜杠路径
+  const version = basename(runtimeDir)
   return `内置 ${version}`
 }

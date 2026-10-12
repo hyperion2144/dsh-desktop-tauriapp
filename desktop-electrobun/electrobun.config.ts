@@ -30,8 +30,12 @@ export default {
       // 托盘图标：prepare:bundle 把旧的 32x32.png 拷到 resources/tray.png，再落进包内 runtime/
       'resources/tray.png': 'runtime/tray.png',
       // macOS 通知桥（旧壳 notify_un.rs 的等价物）：dylib 由 `bun run build:native` 编出来，
-      // 先编后打（见 package.json 的 build 链），装完才有真授权状态与真投递
-      'native/libdsh-notify.dylib': 'runtime/libdsh-notify.dylib',
+      // 先编后打（见 package.json 的 build 链），装完才有真授权状态与真投递。
+      // 只在 darwin 上声明：Linux/Windows 上根本没这个产物，写死会让 `hutch electrobun build`
+      // 报 `error: CopySourceMissing`（Electrobun 的 copy 不会「源缺就跳过」）。
+      ...(process.platform === 'darwin'
+        ? { 'native/libdsh-notify.dylib': 'runtime/libdsh-notify.dylib' }
+        : {}),
     },
     // 关窗不退出：托盘在的时候，关掉最后一个窗口只是隐藏（与旧 Tauri 壳同行为）。
     // 没有托盘时（Linux 某些桌面环境）隐藏后就再也叫不回来了，所以 index.ts

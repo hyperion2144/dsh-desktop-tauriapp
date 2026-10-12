@@ -230,7 +230,8 @@ describe('宿主停止：等到真退出，超时就升级 SIGKILL', () => {
     expect(parentWatch.isProcessAlive(started.pid)).toBe(false)
   }, 30_000)
 
-  test('升级路径：忽略 SIGTERM 的宿主也要被 SIGKILL 收掉（不留孤儿）', async () => {
+  // Windows 没有 POSIX 信号语义（`kill('SIGTERM')` 即 TerminateProcess），这套「先礼后兵」的升级路径只在 POSIX 上有意义。
+  test.skipIf(process.platform === 'win32')('升级路径：忽略 SIGTERM 的宿主也要被 SIGKILL 收掉（不留孤儿）', async () => {
     const dir = tempDir()
     const layout = fakeLayout(
       dir,

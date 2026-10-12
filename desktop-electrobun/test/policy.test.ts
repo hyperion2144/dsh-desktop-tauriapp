@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { decide, isCrossSite, normalizeRel, stripToken } from '../src/shared/admission.ts'
 import { contentTypeFor, isNoContentAsset, resolveAsset } from '../src/shared/asset-path.ts'
+import { resolve } from 'node:path'
 import { buildChildEnv, assertChildEnv, missingEnvKeys, CHILD_RESOURCE_CONDITIONS } from '../src/shared/child-env.ts'
 import { scrubRequestHeaders, scrubResponseHeaders, shouldNoStore } from '../src/shared/headers.ts'
 
@@ -66,7 +67,8 @@ describe('静态资产解析（静态优先 + 穿越防护）', () => {
   const dist = '/tmp/dist'
 
   test('正常路径解析到 dist 之内', () => {
-    expect(resolveAsset(dist, '/assets/index-abc.js')).toBe('/tmp/dist/assets/index-abc.js')
+    // 期望值用 resolve 算，而不是写死 `/tmp/...`：Windows 上 dist 根会被补成盘符路径
+    expect(resolveAsset(dist, '/assets/index-abc.js')).toBe(resolve(dist, 'assets/index-abc.js'))
   })
 
   test('拒绝穿越、反斜杠、NUL、非绝对路径与编码绕过', () => {

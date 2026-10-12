@@ -107,7 +107,8 @@ describe('超时与候选', () => {
   })
 })
 
-describe('登录 shell 环境读取（假 shell 驱动）', () => {
+// 这一组全靠「假 shell 脚本」驱动（POSIX sh），Windows 上跑不了——跳过而不是判失败。
+describe.skipIf(process.platform === 'win32')('登录 shell 环境读取（假 shell 驱动）', () => {
   test('读到就合并，并把 PATH 换成登录 shell 的', async () => {
     const shell = fakeShell(dumpOnly({ PATH: '/opt/homebrew/bin:/usr/bin:/bin', HOMEBREW_PREFIX: '/opt/homebrew' }))
     const result = await readLoginShellEnvironment({ PATH: '/usr/bin:/bin' }, { shells: [shell] })

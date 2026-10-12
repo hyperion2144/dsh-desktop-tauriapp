@@ -13,7 +13,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
-import { dirname, join, relative, sep } from 'node:path'
+import { basename, delimiter, dirname, join, relative, sep } from 'node:path'
 import {
   MIGRATION_SKIP_DIRS,
   migrationSkips,
@@ -43,7 +43,8 @@ function parseFailure(path: string): boolean {
   } catch {
     return true
   }
-  const name = path.slice(path.lastIndexOf('/') + 1)
+  // 用 basename 而不是 lastIndexOf('/')：Windows 上路径分隔符是反斜杠，手抠会把整条路径当成文件名
+  const name = basename(path)
   if (name === 'package.json') {
     try {
       JSON.parse(text)
@@ -157,7 +158,7 @@ export async function installProfileDependencies(input: InstallProfileInput): Pr
 function commandExists(command: string, env: Record<string, string | undefined>): boolean {
   const path = env.PATH ?? env.Path ?? ''
   if (path === '') return false
-  for (const part of path.split(':')) {
+  for (const part of path.split(delimiter)) {
     if (part !== '' && existsSync(join(part, command))) return true
   }
   return false

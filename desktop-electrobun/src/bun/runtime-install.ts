@@ -10,7 +10,7 @@
 // hoisted 平铺（#95）、allowBuilds 白名单（#135）、错误尾巴优先 stderr 再回退 stdout（#95 Bug 1）。
 
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import { NPM_PACKAGE, isRuntimeVersion } from '../shared/runtime-catalog.ts'
 import { runtimeNpmrc, runtimeWorkspaceYaml } from '../shared/profile-template.ts'
 import { isRuntimeTreeValid, runtimeDirOf, runtimesDir } from './runtime-store.ts'
@@ -189,7 +189,8 @@ export async function installRuntime(input: InstallRuntimeInput): Promise<void> 
     if (value !== undefined) env[key] = value
   }
   if (input.nodeShimDir !== undefined && input.nodeShimDir !== null && input.nodeShimDir !== '') {
-    env.PATH = `${input.nodeShimDir}:${env.PATH ?? ''}`
+    // Windows 上 PATH 的分隔符是 `;`
+    env.PATH = `${input.nodeShimDir}${delimiter}${env.PATH ?? ''}`
   }
   const spawn = input.spawnImpl ?? ((command: string[], options: Record<string, unknown>) => Bun.spawn(command, options as never))
   input.onLog?.(`运行时安装：${input.bunPath} ${input.pnpmCjs} add ${NPM_PACKAGE}@${input.version}（cwd = ${dir}）`)

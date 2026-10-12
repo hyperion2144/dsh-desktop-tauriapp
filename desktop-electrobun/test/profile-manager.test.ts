@@ -148,7 +148,8 @@ describe('迁移 profile（旧壳 migrate_profile_inner）', () => {
     expect(existsSync(join(dst, '.dsh-module-fallback'))).toBe(false)
     expect(existsSync(join(dst, 'stale.lock'))).toBe(false)
     expect(existsSync(join(dst, '.plugin-manager', 'logs'))).toBe(false)
-    expect(readlinkSync(join(dst, 'link-out'))).toBe('/tmp')
+    // Windows 的 CI runner 建不了符号链接（无开发者模式/特权），复制器会跳过它——那不算迁移失败
+    if (process.platform !== 'win32') expect(readlinkSync(join(dst, 'link-out'))).toBe('/tmp')
     const pkg = JSON.parse(readFileSync(join(dst, 'package.json'), 'utf8')) as { name: string }
     expect(pkg.name).toBe('dsh-profile-web')
     expect(track.status()).toMatchObject({ running: false, finished: true, error: '' })
