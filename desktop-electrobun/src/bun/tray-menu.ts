@@ -1,5 +1,6 @@
 // 托盘菜单模型（纯逻辑，不 import electrobun ⇒ 缝 ② 直接断言）。
 import { sortRuntimeVersionsDesc } from '../shared/runtime-catalog.ts'
+import { remoteDisplay } from '../shared/remote.ts'
 //
 // 为什么单独一层：菜单项文案、勾选状态、以及「点了哪一项要干什么」是产品语义，
 // 而 `Tray` 类只是把它交给原生层。分开之后无显示器/无 CEF 也能测。
@@ -14,6 +15,8 @@ export const TRAY_MENU_ACTIONS = {
   toggleWindow: 'tray:toggle-window',
   quit: 'tray:quit',
   restartService: 'tray:restart-service',
+  remoteLocal: 'tray:remote:local',
+  remoteAddrPrefix: 'tray:remote:addr:',
   windowPrefix: 'tray:window:',
   runtimeBuiltin: 'tray:runtime:builtin',
   runtimeExternal: 'tray:runtime:external',
@@ -21,7 +24,6 @@ export const TRAY_MENU_ACTIONS = {
   runtimeFetchPrefix: 'tray:runtime:fetch:',
   registerCli: 'tray:register-cli',
 } as const
-
 export type TrayActionKind =
   | 'toggle-window'
   | 'quit'
@@ -30,16 +32,19 @@ export type TrayActionKind =
   | 'switch-runtime'
   | 'download-runtime'
   | 'register-cli'
+  | 'remote-source'
 
 export interface TrayAction {
   kind: TrayActionKind
-  /** kind === 'select-profile' 时是目标 profile */
+  /** kind === 'open-window' 时是目标 profile */
   profile?: string
   /** kind === 'switch-runtime'：'builtin' 是内置树，'external' 是系统装的 dsh CLI；
    *  已下载版本用同样的 kind 加 version 表示 */
   mode?: 'builtin' | 'external'
   /** kind === 'switch-runtime'（目标版本）或 'download-runtime'（要下的版本） */
   version?: string
+  /** kind === 'remote-source'：选中的远程地址在 remoteList 里的下标；undefined = 切回本地 */
+  addrIndex?: number
 }
 
 export interface TrayState {
@@ -71,6 +76,9 @@ export interface TrayState {
   externalAvailable: boolean
   /** 正在下载的版本；非 null 时那条标「（下载中…）」 */
   downloading: string | null
+  /** 「dsh 服务地址」：当前生效的远程地址（null = 本地）与可选远程列表（旧壳 #136） */
+  remoteAddr: string | null
+  remoteList: readonly string[]
   /** 「注册 dsh 命令」项的文案；null = 已注册或还没探出 ⇒ 不摆这一项（旧壳 #175 三态） */
   registerLabel: string | null
 }
@@ -120,6 +128,13 @@ export function parseTrayAction(action: string | undefined | null): TrayAction |
     const version = action.slice(TRAY_MENU_ACTIONS.runtimeFetchPrefix.length)
     if (version === '') return null
     return { kind: 'download-runtime', version }
+  }
+  if (action === TRAY_MENU_ACTIONS.remoteLocal) return { kind: 'remote-source' }
+  if (action.startsWith(TRAY_MENU_ACTIONS.remoteAddrPrefix)) {
+    const raw = action.slice(TRAY_MENU_ACTIONS.remoteAddrPrefix.length)
+    const addrIndex = Number(raw)
+    if (raw === '' || !Number.isInteger(addrIndex) || addrIndex < 0) return null
+    return { kind: 'remote-source', addrIndex }
   }
   return null
 }
@@ -213,6 +228,35 @@ export function runtimeMenuItems(state: TrayState): TrayMenuItem[] {
   return items
 }
 
+/**
+ * 「dsh 服务地址」子菜单（旧壳 `remote_menu_items` 的等价物，#136）：本地/远程同层单选，
+ * ● 当前生效 / ○ 可选；标签用 remoteDisplay（host[:port]，不含 token）。远程不可用
+ * （token 失效 401 等）时也能从托盘一键切回本地，不用手改配置文件。
+ */
+export function remoteMenuItems(
+  state: Pick<TrayState, 'remoteAddr' | 'remoteList'>,
+): TrayMenuItem[] {
+  const localMark = state.remoteAddr === null ? '●' : '○'
+  const items: TrayMenuItem[] = [
+    {
+      type: 'normal',
+      label: `${localMark} 本地（127.0.0.1）`,
+      action: TRAY_MENU_ACTIONS.remoteLocal,
+      checked: state.remoteAddr === null,
+    },
+  ]
+  state.remoteList.forEach((addr, index) => {
+    const mark = addr === state.remoteAddr ? '●' : '○'
+    items.push({
+      type: 'normal',
+      label: `${mark} ${remoteDisplay(addr)}`,
+      action: `${TRAY_MENU_ACTIONS.remoteAddrPrefix}${String(index)}`,
+      checked: addr === state.remoteAddr,
+    })
+  })
+  return items
+}
+
 
 /**
  * 托盘菜单限宽（目标 A6）：Electrobun 的菜单项没有 width 概念，超长 label 会把菜单
@@ -265,6 +309,11 @@ export function trayMenu(state: TrayState): TrayMenuItem[] {
       type: 'normal',
       label: '运行时版本',
       submenu: runtimeMenuItems(state),
+    },
+    {
+      type: 'normal',
+      label: 'dsh 服务地址',
+      submenu: remoteMenuItems(state),
     },
     {
       type: 'normal',

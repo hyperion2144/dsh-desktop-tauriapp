@@ -10,6 +10,7 @@ import {
   type TrayState,
   orderedProfiles,
   parseTrayAction,
+  remoteMenuItems,
   windowAction,
   runtimeMenuItems,
   trayMenu,
@@ -57,6 +58,8 @@ const baseState = (overrides: Partial<TrayState> = {}): TrayState => ({
   catalog: [],
   externalAvailable: false,
   downloading: null,
+  remoteAddr: null,
+  remoteList: [],
   registerLabel: null,
   ...overrides,
 })
@@ -143,6 +146,37 @@ describe('parseTrayAction', () => {
     })
     expect(parseTrayAction(windowAction('web'))).toEqual({ kind: 'open-window', profile: 'web' })
   })
+
+describe('remoteMenuItems（托盘「dsh 服务地址」，旧壳 #136）', () => {
+  test('本地生效：本地 ●、远程 ○，标签不含 token', () => {
+    const items = remoteMenuItems({
+      remoteAddr: null,
+      remoteList: ['http://192.168.1.10:3080/?token=secret123', 'dsh.example.cn'],
+    })
+    expect(items.length).toBe(3)
+    expect((items[0] as NormalItem).label).toBe('● 本地（127.0.0.1）')
+    expect((items[0] as NormalItem).action).toBe(TRAY_MENU_ACTIONS.remoteLocal)
+    expect((items[1] as NormalItem).label).toBe('○ 192.168.1.10:3080')
+    expect(((items[1] as NormalItem).label ?? '')).not.toContain('secret123')
+    expect((items[2] as NormalItem).label).toBe('○ dsh.example.cn')
+  })
+
+  test('远程生效：选中项 ● 且 id 按列表序稳定', () => {
+    const list = ['http://192.168.1.10:3080/?token=abc', 'dsh.example.cn']
+    const items = remoteMenuItems({ remoteAddr: list[0] ?? null, remoteList: list })
+    expect((items[0] as NormalItem).label).toBe('○ 本地（127.0.0.1）')
+    expect((items[1] as NormalItem).label).toBe('● 192.168.1.10:3080')
+    expect(parseTrayAction((items[1] as NormalItem).action)).toEqual({ kind: 'remote-source', addrIndex: 0 })
+    expect(parseTrayAction(TRAY_MENU_ACTIONS.remoteLocal)).toEqual({ kind: 'remote-source' })
+  })
+
+  test('trayMenu 里有「dsh 服务地址」子菜单且空列表只留本地一行', () => {
+    const menu = trayMenu(baseState())
+    const group = findItem(menu, 'dsh 服务地址')
+    expect(group?.submenu?.length).toBe(1)
+    expect(((group?.submenu?.[0] ?? {}) as NormalItem).label).toContain('本地')
+  })
+})
 })
 
 describe('parseTrayAction 的前缀边界', () => {

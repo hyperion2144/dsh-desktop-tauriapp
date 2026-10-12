@@ -255,6 +255,8 @@ function trayState(): TrayState {
     catalog: catalogCache?.entries ?? [],
     externalAvailable: snapshot.externalPath !== null,
     downloading: download.active && download.version !== '' ? download.version : null,
+    remoteAddr: settings.remoteAddr ?? null,
+    remoteList: settings.remoteList,
     registerLabel: registerTrayLabel(registerCli.cached()),
   }
 }
@@ -633,6 +635,20 @@ function onTrayAction(action: TrayAction): void {
     case 'register-cli':
       void registerDshCliFromTray()
       return
+    case 'remote-source': {
+      // 「dsh 服务地址」（旧壳 #136）：本地/远程同层单选；选完立即按目标重启 dsh。
+      // 远程不可用（token 失效 401）时也能从这里一键切回本地。
+      const svc = uiService()
+      const current = svc.settings()
+      const target = action.addrIndex === undefined ? '' : current.remoteList[action.addrIndex] ?? ''
+      if ((current.remoteAddr ?? '') === target) return
+      svc.save({ remote_addr: target })
+      void svc
+        .restartHost()
+        .then(() => refreshTray())
+        .catch((error) => console.error(`[shell] 切换 dsh 服务地址失败：${String(error)}`))
+      return
+    }
   }
 }
 

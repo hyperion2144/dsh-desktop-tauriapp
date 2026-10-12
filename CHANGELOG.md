@@ -7,6 +7,7 @@
 ### 桌面壳（Electrobun）
 
 - 手机稳定接入点 lane 转发器（F4，旧壳 `network/forwarder.rs` #94 的等价物）：新增 `desktop-electrobun/src/bun/lane-forwarder.ts`，壳在遗留 lane 端口（settings 的 `lane_port`，默认 3091）监听并把 TCP 原样双向转发到焦点实例的 lane——手机旧配置零改动，新连接落焦点实例、存量长连接不切换；外部 dsh 占了端口时警告后退场（手机直连它即可）。窗口焦点切换/关闭时更新目标；多实例下只有先起的服务面持有转发器。
+- 托盘「dsh 服务地址」分组（F7，旧壳 `remote_menu_items` #136 的等价物）：`desktop-electrobun/src/bun/tray-menu.ts` 新增 `remoteMenuItems()`（本地/远程同层单选，● 当前生效 / ○ 可选，标签用 `remoteDisplay`（host[:port]）绝不含 token）；托盘菜单在「运行时版本」后插入该子菜单，点选即保存 `remote_addr` 并重启 dsh——远程不可用（token 失效 401）时不用手改配置文件就能一键切回本地。
 
 - Windows 可执行安装程序（A2/A4）：新增 `desktop-electrobun/scripts/build-windows-installer.mjs`，把 Electrobun 的 Windows 构建产物（launcher.exe + Resources）用 NSIS 包成 `artifacts/windows-x64-DeepSeekHarnessDesktopBUN-setup.exe`——每用户安装（无需管理员）、目录选择页（InstallDirRegKey 记住自定义目录）、开始菜单快捷方式、控制面板卸载项与卸载器；图标同 `resources/app-icon.ico`。CI（shell-electrobun.yml）Windows job 在产物断言后跑 `bun run build:installer`（镜像缺 makensis 时 choco 兜底），setup.exe 随 artifacts/** 上传。
 
